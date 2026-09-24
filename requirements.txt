@@ -324,9 +324,9 @@ garmin-fit-sdk==21.214.0 \
     --hash=sha256:9fa66c8bc6983808e784ba5058c550831c2621862097f41998a3ba129b7b7c6d \
     --hash=sha256:c64c61c5582fc3e609a09a64ff9ff1ee78126da91dfc72ceefd378a92bb290ce
     # via -r requirements.in
-garminconnect==0.3.15 \
-    --hash=sha256:015b05a25a45e4a7883a5394ecf60af01987a04ee411d331ca4121daf32f5cba \
-    --hash=sha256:aa57cb5635eb2ad8f2ba9899043b644125289fd7169cd29d74b3207df4246c0d
+garminconnect==0.3.16 \
+    --hash=sha256:2a5e838bf19608ff62329ef9845658bfed0c4974d7b1e486e3a49595438b69c5 \
+    --hash=sha256:e919b17589095227e78cbcb20fe05630ac6592bc39f598c9eee4e5bd91aeec30
     # via -r requirements.in
 idna==3.20 \
     --hash=sha256:a7db850025b95ded1eae8a46181a1a6c56c92c96f0e2b005d9ff8dc0210cab44 \
