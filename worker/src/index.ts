@@ -31,7 +31,10 @@ import {
   coachInputPrefix, activityContextPrefix,
 } from "./lib";
 import {
-  buildHrvHistory, buildSleepHistory, historyMonthKeys, resolveHistoryRequest,
+  buildHrvHistory, buildSleepHistory, historyMonthKeys, historyReadThroughDates,
+  historyRowsEquivalent, indexedHistoryRows, indexedHistorySourceRevisions,
+  resolveHistoryRequest,
+  summarizeHrvPayload, summarizeSleepPayload,
 } from "./health-history";
 import {
   RefreshConfig, RefreshRun, dispatchRefresh, latestRefreshRun, pollRefreshRun,
@@ -196,6 +199,121 @@ class FitnessService {
   ): Promise<{ key: string; data: unknown } | null> {
     const stored = await this.getR2Text(keys, limits);
     return stored ? { key: stored.key, data: JSON.parse(stored.text) as unknown } : null;
+  }
+
+  async readCanonicalHistoryRow(
+    stream: "hrv" | "sleep",
+    day: string,
+    indexedRow: Record<string, unknown> | undefined,
+    includeDetail: boolean,
+    source: { key: string; etag: string } | undefined,
+    indexedRevision: string | undefined,
+  ): Promise<{
+    row: Record<string, unknown>;
+    stale: boolean;
+    orphaned: boolean;
+    confirmedMissing: boolean;
+    sourceRead: boolean;
+  }> {
+    if (!source) {
+      const orphaned = indexedRow !== undefined;
+      return {
+        row: {
+          date: day,
+          status: "not_stored",
+          index_state: orphaned ? "orphaned_index" : "confirmed_missing",
+        },
+        stale: false,
+        orphaned,
+        confirmedMissing: !orphaned,
+        sourceRead: false,
+      };
+    }
+    if (!includeDetail && indexedRow && indexedRevision === source.etag) {
+      return {
+        row: { ...indexedRow, index_state: "verified" },
+        stale: false,
+        orphaned: false,
+        confirmedMissing: false,
+        sourceRead: false,
+      };
+    }
+    let stored: { key: string; text: string; etag: string } | null = null;
+    let invalid = false;
+    try {
+      stored = await this.getR2Text([source.key]);
+    } catch {
+      // The object was found but could not be decoded within the bounded limits.
+      invalid = true;
+    }
+    // R2 listing is strongly consistent. A key disappearing between LIST and
+    // GET is treated as a stale index/source race rather than serving old data.
+    if (!stored && !invalid) {
+      const orphaned = indexedRow !== undefined;
+      return {
+        row: {
+          date: day,
+          status: "not_stored",
+          index_state: orphaned ? "orphaned_index" : "confirmed_missing",
+        },
+        stale: false,
+        orphaned,
+        confirmedMissing: !orphaned,
+        sourceRead: false,
+      };
+    }
+
+    let canonical: Record<string, unknown>;
+    try {
+      const payload = invalid ? null : JSON.parse(stored!.text) as unknown;
+      canonical = stream === "hrv"
+        ? summarizeHrvPayload(day, payload)
+        : summarizeSleepPayload(day, payload);
+    } catch {
+      canonical = { date: day, status: "invalid_schema" };
+    }
+    const stale = !indexedRow || !historyRowsEquivalent(indexedRow, canonical);
+    const row: Record<string, unknown> = {
+      ...canonical,
+      index_state: stale ? "read_through" : "verified",
+    };
+    if (!includeDetail) {
+      delete row.readings;
+      delete row.stages;
+    }
+    return {
+      row, stale, orphaned: false, confirmedMissing: false, sourceRead: true,
+    };
+  }
+
+  async discoverCanonicalHistoryKeys(
+    stream: "hrv" | "sleep",
+    dates: string[],
+  ): Promise<{
+    keys: Map<string, { key: string; etag: string }>;
+    prefixesScanned: number;
+  }> {
+    const allowed = new Set(dates);
+    const months = [...new Set(dates.map((day) => day.slice(0, 7)))];
+    const keys = new Map<string, { key: string; etag: string }>();
+    for (const month of months) {
+      const root = stream === "hrv" ? "health/hrv" : "health/sleep/v1";
+      const prefix = `${root}/${month.slice(0, 4)}/${month.slice(5, 7)}/`;
+      const listed = await this.env.SLIPSTREAM_DATA.list({ prefix, limit: 100 });
+      if (listed.truncated) {
+        throw new Error(`R2 history source listing exceeded the bounded monthly limit: ${prefix}`);
+      }
+      for (const object of listed.objects) {
+        const filename = object.key.slice(prefix.length);
+        const match = /^(\d{4}-\d{2}-\d{2})\.json(?:\.gz)?$/.exec(filename);
+        if (!match || !allowed.has(match[1])) continue;
+        const current = keys.get(match[1]);
+        if (!current || (current.key.endsWith(".json.gz") && object.key.endsWith(".json"))) {
+          keys.set(match[1], { key: object.key, etag: object.etag });
+        }
+      }
+    }
+    return { keys, prefixesScanned: months.length };
   }
 
   async putSmallJson(key: string, value: Record<string, unknown>): Promise<void> {
@@ -521,42 +639,56 @@ class FitnessService {
       );
       const keys = historyMonthKeys("hrv", request.dates);
       const indexes: unknown[] = [];
+      const invalidIndexObjects: string[] = [];
       for (const key of keys) {
-        const stored = await this.getR2Json([key], HISTORY_INDEX_R2_LIMITS);
-        if (stored) indexes.push(stored.data);
-      }
-      const history = buildHrvHistory(indexes, request.dates, request.granularity);
-      let sourceObjectsRead = keys.length;
-      const days = [];
-      for (const row of history.days) {
-        if (args.detail_level !== "full" || row.status !== "available") {
-          days.push(row);
-          continue;
+        try {
+          const stored = await this.getR2Json([key], HISTORY_INDEX_R2_LIMITS);
+          if (stored) indexes.push(stored.data);
+        } catch {
+          invalidIndexObjects.push(key);
         }
-        if (typeof row.date !== "string") {
-          days.push(row);
-          continue;
-        }
-        sourceObjectsRead += 1;
-        const stored = await this.getR2Json(hrvObjectKeys(row.date));
-        const payload = stored?.data && typeof stored.data === "object" && !Array.isArray(stored.data)
-          ? stored.data as Record<string, unknown>
-          : null;
-        const readings = Array.isArray(payload?.readings) ? payload.readings.flatMap((value) => {
-          if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-          const reading = value as Record<string, unknown>;
-          return [{ timestamp: reading.timestamp ?? null, hrv_ms: reading.hrv_ms ?? null }];
-        }) : [];
-        days.push({ ...row, readings });
       }
+      const indexedRows = indexedHistoryRows("hrv", indexes, request.dates);
+      const indexedRevisions = indexedHistorySourceRevisions("hrv", indexes);
+      const probeDates = historyReadThroughDates(request.dates, request.granularity);
+      const discovered = await this.discoverCanonicalHistoryKeys("hrv", probeDates);
+      const overrides = new Map<string, Record<string, unknown>>();
+      const staleDates: string[] = [];
+      const orphanedIndexDates: string[] = [];
+      const confirmedMissingDates: string[] = [];
+      let canonicalObjectsRead = 0;
+      for (const day of probeDates) {
+        const source = discovered.keys.get(day);
+        const result = await this.readCanonicalHistoryRow(
+          "hrv", day, indexedRows.get(day), args.detail_level === "full",
+          source, source ? indexedRevisions.get(source.key) : undefined,
+        );
+        overrides.set(day, result.row);
+        if (result.stale) staleDates.push(day);
+        if (result.orphaned) orphanedIndexDates.push(day);
+        if (result.confirmedMissing) confirmedMissingDates.push(day);
+        if (result.sourceRead) canonicalObjectsRead += 1;
+      }
+      const history = buildHrvHistory(
+        indexes, request.dates, request.granularity, overrides,
+      );
       return this.text({
         start_date: args.start_date,
         end_date: args.end_date,
         granularity: request.granularity,
         detail_level: args.detail_level,
         ...history,
-        days,
-        source_objects_read: sourceObjectsRead,
+        source_objects_read: keys.length + canonicalObjectsRead,
+        index_consistency: {
+          mode: request.granularity === "daily" ? "all_requested_days" : "recent_7_days",
+          checked_dates: probeDates.length,
+          index_only_dates: request.dates.length - probeDates.length,
+          stale_dates: staleDates,
+          orphaned_index_dates: orphanedIndexDates,
+          confirmed_missing_dates: confirmedMissingDates,
+          source_prefixes_scanned: discovered.prefixesScanned,
+          invalid_index_objects: invalidIndexObjects,
+        },
       });
     });
 
@@ -620,46 +752,56 @@ class FitnessService {
       );
       const keys = historyMonthKeys("sleep", request.dates);
       const indexes: unknown[] = [];
+      const invalidIndexObjects: string[] = [];
       for (const key of keys) {
-        const stored = await this.getR2Json([key], HISTORY_INDEX_R2_LIMITS);
-        if (stored) indexes.push(stored.data);
-      }
-      const history = buildSleepHistory(indexes, request.dates, request.granularity);
-      let sourceObjectsRead = keys.length;
-      const days = [];
-      for (const row of history.days) {
-        if (args.detail_level !== "full" || row.status !== "available") {
-          days.push(row);
-          continue;
+        try {
+          const stored = await this.getR2Json([key], HISTORY_INDEX_R2_LIMITS);
+          if (stored) indexes.push(stored.data);
+        } catch {
+          invalidIndexObjects.push(key);
         }
-        if (typeof row.date !== "string") {
-          days.push(row);
-          continue;
-        }
-        sourceObjectsRead += 1;
-        const stored = await this.getR2Json(sleepObjectKeys(row.date));
-        const payload = stored?.data && typeof stored.data === "object" && !Array.isArray(stored.data)
-          ? stored.data as Record<string, unknown>
-          : null;
-        const stages = Array.isArray(payload?.stages) ? payload.stages.flatMap((value) => {
-          if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-          const stage = value as Record<string, unknown>;
-          return [{
-            start_gmt: stage.start_gmt ?? null,
-            end_gmt: stage.end_gmt ?? null,
-            stage: stage.stage ?? null,
-          }];
-        }) : [];
-        days.push({ ...row, stages });
       }
+      const indexedRows = indexedHistoryRows("sleep", indexes, request.dates);
+      const indexedRevisions = indexedHistorySourceRevisions("sleep", indexes);
+      const probeDates = historyReadThroughDates(request.dates, request.granularity);
+      const discovered = await this.discoverCanonicalHistoryKeys("sleep", probeDates);
+      const overrides = new Map<string, Record<string, unknown>>();
+      const staleDates: string[] = [];
+      const orphanedIndexDates: string[] = [];
+      const confirmedMissingDates: string[] = [];
+      let canonicalObjectsRead = 0;
+      for (const day of probeDates) {
+        const source = discovered.keys.get(day);
+        const result = await this.readCanonicalHistoryRow(
+          "sleep", day, indexedRows.get(day), args.detail_level === "full",
+          source, source ? indexedRevisions.get(source.key) : undefined,
+        );
+        overrides.set(day, result.row);
+        if (result.stale) staleDates.push(day);
+        if (result.orphaned) orphanedIndexDates.push(day);
+        if (result.confirmedMissing) confirmedMissingDates.push(day);
+        if (result.sourceRead) canonicalObjectsRead += 1;
+      }
+      const history = buildSleepHistory(
+        indexes, request.dates, request.granularity, overrides,
+      );
       return this.text({
         start_date: args.start_date,
         end_date: args.end_date,
         granularity: request.granularity,
         detail_level: args.detail_level,
         ...history,
-        days,
-        source_objects_read: sourceObjectsRead,
+        source_objects_read: keys.length + canonicalObjectsRead,
+        index_consistency: {
+          mode: request.granularity === "daily" ? "all_requested_days" : "recent_7_days",
+          checked_dates: probeDates.length,
+          index_only_dates: request.dates.length - probeDates.length,
+          stale_dates: staleDates,
+          orphaned_index_dates: orphanedIndexDates,
+          confirmed_missing_dates: confirmedMissingDates,
+          source_prefixes_scanned: discovered.prefixesScanned,
+          invalid_index_objects: invalidIndexObjects,
+        },
       });
     });
 

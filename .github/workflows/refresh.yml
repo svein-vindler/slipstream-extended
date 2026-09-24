@@ -128,3 +128,6 @@ jobs:
       - name: Generate coach input for refreshed running activities
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular }}
         run: python -m pipeline.coach_backfill --max-activities 10
+      - name: Reconcile health history indexes with canonical R2 objects
+        if: ${{ !cancelled() }}
+        run: python -m pipeline.health_history_index

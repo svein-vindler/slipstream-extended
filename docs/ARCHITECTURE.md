@@ -129,9 +129,21 @@ or the manual `health-history-index.yml` workflow performs the initial build.
 
 The Worker reads at most 13 monthly indexes for a 366-day summary request.
 `auto` granularity returns daily rows through 31 days and ISO-week summaries
-after that. Full HRV readings or sleep-stage timelines read canonical daily
-objects only for a maximum of seven days. This bounds R2 operations, Worker CPU
-and MCP response size.
+after that. It verifies every day in a daily request and the newest seven days
+in a weekly request against the canonical object, replacing a stale index row
+in memory and reporting the consistency state. Full HRV readings or sleep-stage
+timelines remain limited to seven days. The refresh workflow finishes with a
+revision-aware reconciliation of every history month. Together these safeguards
+make canonical R2 data self-healing while bounding R2 operations, Worker CPU and
+MCP response size.
+
+This is the R2 consistency contract for every data type: canonical objects are
+authoritative; derived manifests and indexes are updated by their writer and
+must have a reconciliation path; bounded readers prefer canonical state when a
+derived view disagrees. Tools without a derived index (single-night HRV/sleep,
+body composition, activity artifacts and coach inputs) already read their
+canonical keys directly. Summary CSV tools validate their R2 ETag before reusing
+an in-isolate parsed cache.
 
 All historical backfills are self-quiescing. A completed activity plan returns
 before Garmin login and performs no R2 writes. HRV, sleep and body-composition

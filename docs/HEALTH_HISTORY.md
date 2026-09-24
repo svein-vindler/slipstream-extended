@@ -28,6 +28,24 @@ computed by Slipstream and must not be interpreted as Garmin metrics.
 An HRV day remains `available` when Garmin provides its nightly summary but no
 detailed readings; `detailed_readings_available` makes that distinction explicit.
 
+The canonical daily R2 object is the source of truth. Daily history requests
+check every requested day directly (at most 31 objects), while longer weekly
+requests check the newest seven days directly. This bounded read-through makes
+new or corrected recent data visible even if its monthly index has not been
+rebuilt yet, without turning a year-long query into hundreds of R2 reads.
+For summary requests, the Worker compares R2 ETags recorded in the index and
+downloads a canonical object only when it is new or changed. Full-detail
+requests still read the requested canonical objects to return their timelines.
+
+`index_consistency` explains what was checked. `stale_dates` were served from a
+canonical object that was missing from or differed from the index;
+`orphaned_index_dates` existed only in the index; and
+`confirmed_missing_dates` were absent from both. Daily rows additionally expose
+`index_state` (`verified`, `read_through`, `confirmed_missing`,
+`orphaned_index`, `indexed` or `index_only`). A malformed monthly object is
+reported in `invalid_index_objects`; it does not hide canonical data in the
+bounded read-through window.
+
 ## Monthly R2 indexes
 
 Canonical per-night objects stay unchanged. Small gzip-compressed indexes are
@@ -46,7 +64,11 @@ seven days.
 Source object revisions are recorded inside each private index. Re-running the
 builder skips unchanged months at the current builder revision, making it safe
 and resumable while still allowing corrected summaries to be rebuilt. Normal HRV and
-sleep ingestion updates only affected months automatically.
+sleep ingestion updates only affected months automatically. The six-hour and
+on-demand refresh workflow also performs a final full reconciliation. It reads
+revision metadata first and rewrites only changed months, so a process that was
+interrupted between writing a daily object and its index repairs itself on the
+next refresh.
 
 ## Initial index build
 
@@ -69,6 +91,13 @@ GB-month Standard-storage free allowance. A full first build for roughly 3,300
 sleep nights and 1,400 HRV nights needs about 5,000 Class B reads and fewer than
 200 Class A writes. A six-month MCP query reads six or seven monthly objects
 rather than about 180 daily objects.
+
+Read-through adds at most two bounded monthly prefix scans. A summary request
+normally performs no extra object read when index ETags match; the worst case is
+31 canonical reads for a daily query or seven for a weekly query. A normal
+refresh's reconciliation lists revisions and skips unchanged months. These
+bounds keep the self-healing behavior comfortably below the existing Worker
+subrequest and project R2 budgets.
 
 Cloudflare currently includes 1 million Class A operations, 10 million Class B
 operations and 10 GB-month of Standard storage each month. The free allowance
