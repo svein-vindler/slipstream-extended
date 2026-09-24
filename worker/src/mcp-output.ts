@@ -116,6 +116,24 @@ const sleepStage = z.object({
   stage: z.union([z.string(), z.number().finite()]).nullable(),
 });
 
+const nightContextFields = {
+  wake_date: z.string(),
+  night_of: nullableString,
+  sleep_start_local: nullableString,
+  sleep_end_local: nullableString,
+  sleep_midpoint_local: nullableString,
+  sleep_start_date_local: nullableString,
+  sleep_end_date_local: nullableString,
+  sleep_start_weekday_local: nullableString,
+  sleep_end_weekday_local: nullableString,
+  timezone: nullableString,
+};
+const nightContextSchema = z.object(nightContextFields);
+const healthDayWithNightContext = healthDay.extend({
+  sleep_night: nightContextSchema.nullable(),
+  hrv_night: nightContextSchema.nullable(),
+});
+
 const historyStatus = z.enum(["available", "no_data", "not_stored", "invalid_schema"]);
 const historyIndexState = z.enum([
   "indexed", "verified", "read_through", "confirmed_missing", "orphaned_index", "index_only",
@@ -134,6 +152,7 @@ const historyStatusCounts = z.object({
   invalid_schema: z.number().int().nonnegative(),
 });
 const hrvHistoryDay = z.object({
+  ...nightContextFields,
   date: z.string(),
   status: historyStatus,
   index_state: historyIndexState.optional(),
@@ -180,6 +199,7 @@ const hrvHistoryWeek = z.object({
   slope_ms_per_hour: historyMetric,
 });
 const sleepHistoryDay = z.object({
+  ...nightContextFields,
   date: z.string(),
   status: historyStatus,
   index_state: historyIndexState.optional(),
@@ -214,10 +234,19 @@ const sleepHistoryWeek = z.object({
     rem: nullableNumber,
   }),
 });
+const nightOfWeekdaySummary = z.object({
+  weekday: z.enum(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]),
+  nights: z.number().int().nonnegative(),
+  sleep_seconds: historyMetric,
+  sleep_score: historyMetric,
+  midpoint_nights: z.number().int().nonnegative(),
+  mean_sleep_midpoint_clock_local: nullableString,
+});
 
 const historyBase = {
   start_date: z.string(),
   end_date: z.string(),
+  timezone: nullableString,
   granularity: z.enum(["daily", "weekly"]),
   detail_level: z.enum(["summary", "full"]),
   days_requested: z.number().int().positive(),
@@ -295,7 +324,10 @@ export const outputSchemas = {
   daily_health: z.object({
     matched: z.number().int().nonnegative(),
     showing: z.number().int().nonnegative(),
-    days: z.array(healthDay),
+    timezone: nullableString,
+    night_context_limited: z.boolean(),
+    night_context_unavailable: z.boolean(),
+    days: z.array(healthDayWithNightContext),
   }),
   health_trends: z.object({
     overall: healthStats,
@@ -304,6 +336,7 @@ export const outputSchemas = {
     available: z.boolean(),
     date: z.unknown(),
     message: z.string().optional(),
+    ...Object.fromEntries(Object.entries(nightContextFields).map(([key, schema]) => [key, schema.optional()])),
     sleep_start_gmt: z.unknown().optional(),
     sleep_end_gmt: z.unknown().optional(),
     summary: z.unknown().optional(),
@@ -322,6 +355,7 @@ export const outputSchemas = {
     available: z.boolean(),
     date: z.string(),
     message: z.string().optional(),
+    ...Object.fromEntries(Object.entries(nightContextFields).map(([key, schema]) => [key, schema.optional()])),
     sleep_start_gmt: nullableTimestamp.optional(),
     sleep_end_gmt: nullableTimestamp.optional(),
     confirmed: nullableBoolean.optional(),
@@ -334,6 +368,9 @@ export const outputSchemas = {
     ...historyBase,
     days: z.array(sleepHistoryDay),
     weeks: z.array(sleepHistoryWeek),
+    by_night_of_weekday: z.array(nightOfWeekdaySummary),
+    nights_without_local_start: z.number().int().nonnegative(),
+    weekend_midpoint_shift_minutes: nullableNumber,
   }),
   body_composition: z.object({
     available: z.boolean(),

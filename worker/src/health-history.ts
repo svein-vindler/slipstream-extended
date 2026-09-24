@@ -1,4 +1,5 @@
 import { healthHistoryIndexKey } from "./lib";
+import { nightContext } from "./night-context";
 
 export type HistoryStream = "hrv" | "sleep";
 export type HistoryGranularity = "auto" | "daily" | "weekly";
@@ -397,11 +398,80 @@ function statusCounts(dates: string[], rows: Map<string, Record<string, unknown>
   return result;
 }
 
+function withNightContext(row: Record<string, unknown>, timezone: string | null) {
+  const day = typeof row.date === "string" ? row.date : "";
+  return {
+    ...row,
+    ...nightContext(day, row.sleep_start_gmt, row.sleep_end_gmt, timezone),
+  };
+}
+
+const NIGHT_WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+function clockMinutes(timestamp: unknown): number | null {
+  if (typeof timestamp !== "string") return null;
+  const match = /T(\d{2}):(\d{2}):\d{2}[+-]\d{2}:\d{2}$/.exec(timestamp);
+  return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+}
+
+function circularMeanMinutes(values: number[]): number | null {
+  if (!values.length) return null;
+  const radians = values.map((value) => value * 2 * Math.PI / 1440);
+  const sine = radians.reduce((total, value) => total + Math.sin(value), 0);
+  const cosine = radians.reduce((total, value) => total + Math.cos(value), 0);
+  if (Math.hypot(sine, cosine) < 0.000001) return null;
+  const angle = Math.atan2(sine, cosine);
+  return ((Math.round(angle * 1440 / (2 * Math.PI)) % 1440) + 1440) % 1440;
+}
+
+function clockLabel(minutes: number | null): string | null {
+  return minutes === null ? null
+    : `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
+function sleepWeekdaySummary(
+  dates: string[], rows: Map<string, Record<string, unknown>>, timezone: string | null,
+) {
+  const nights = dates.flatMap((day) => {
+    const row = rows.get(day);
+    return row && statusOf(row) === "available" ? [withNightContext(row, timezone)] : [];
+  });
+  const classified = nights.filter((row) => typeof row.sleep_start_weekday_local === "string");
+  const byNightOfWeekday = NIGHT_WEEKDAYS.map((weekday) => {
+    const selected = classified.filter((row) => row.sleep_start_weekday_local === weekday);
+    const midpoints = selected.map((row) => clockMinutes(row.sleep_midpoint_local))
+      .filter((value): value is number => value !== null);
+    return {
+      weekday,
+      nights: selected.length,
+      sleep_seconds: metricStats(selected.map((row) => numberAt(row, "summary", "sleep_seconds"))),
+      sleep_score: metricStats(selected.map((row) => numberAt(row, "summary", "sleep_score"))),
+      midpoint_nights: midpoints.length,
+      mean_sleep_midpoint_clock_local: clockLabel(circularMeanMinutes(midpoints)),
+    };
+  });
+  const midpointFor = (weekdays: string[]) => circularMeanMinutes(
+    classified.filter((row) => weekdays.includes(row.sleep_start_weekday_local as string))
+      .map((row) => clockMinutes(row.sleep_midpoint_local))
+      .filter((value): value is number => value !== null),
+  );
+  const workMidpoint = midpointFor(["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]);
+  const weekendMidpoint = midpointFor(["Friday", "Saturday"]);
+  const shift = workMidpoint === null || weekendMidpoint === null ? null
+    : ((weekendMidpoint - workMidpoint + 2160) % 1440) - 720;
+  return {
+    by_night_of_weekday: byNightOfWeekday,
+    nights_without_local_start: nights.length - classified.length,
+    weekend_midpoint_shift_minutes: shift,
+  };
+}
+
 export function buildHrvHistory(
   indexes: unknown[],
   dates: string[],
   granularity: ResolvedGranularity,
   overrides: Map<string, Record<string, unknown>> = new Map(),
+  timezone: string | null = null,
 ) {
   const rows = indexedHistoryRows("hrv", indexes, dates);
   for (const [day, row] of overrides) rows.set(day, row);
@@ -409,9 +479,9 @@ export function buildHrvHistory(
   if (granularity === "daily") {
     return {
       ...status,
-      days: dates.map((day) => rows.get(day) ?? {
+      days: dates.map((day) => withNightContext(rows.get(day) ?? {
         date: day, status: "not_stored", index_state: "index_only",
-      }),
+      }, timezone)),
       weeks: [],
     };
   }
@@ -448,16 +518,19 @@ export function buildSleepHistory(
   dates: string[],
   granularity: ResolvedGranularity,
   overrides: Map<string, Record<string, unknown>> = new Map(),
+  timezone: string | null = null,
 ) {
   const rows = indexedHistoryRows("sleep", indexes, dates);
   for (const [day, row] of overrides) rows.set(day, row);
   const status = baseStatus(dates, rows);
+  const weekdaySummary = sleepWeekdaySummary(dates, rows, timezone);
   if (granularity === "daily") {
     return {
       ...status,
-      days: dates.map((day) => rows.get(day) ?? {
+      ...weekdaySummary,
+      days: dates.map((day) => withNightContext(rows.get(day) ?? {
         date: day, status: "not_stored", index_state: "index_only",
-      }),
+      }, timezone)),
       weeks: [],
     };
   }
@@ -497,5 +570,5 @@ export function buildSleepHistory(
       },
     };
   });
-  return { ...status, days: [], weeks };
+  return { ...status, ...weekdaySummary, days: [], weeks };
 }

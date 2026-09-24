@@ -49,6 +49,9 @@ For longer health analysis, ask the assistant to use `hrv_history` or
 `sleep_history`. Ranges longer than 31 days automatically return weekly
 summaries, so six months fits in one tool call. Ask for a specific week or one
 night afterward when you need full HRV readings or the sleep-stage timeline.
+For Friday/Saturday night comparisons, use `sleep_history`'s
+`by_night_of_weekday`, not the existing wake-date `date`. Configure
+`HEALTH_TIMEZONE` first; local night fields remain `null` without it.
 
 For a refresh test, ask it to refresh today's Garmin data and wait until the
 run completes. This requires the optional GitHub Worker secrets described in

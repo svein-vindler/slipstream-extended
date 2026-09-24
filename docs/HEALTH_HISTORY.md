@@ -21,6 +21,57 @@ A six-month request is one MCP call returning roughly 26 weekly rows. The
 assistant can then drill into an unusual week with a daily request or inspect
 one night with the existing single-date tools.
 
+## Which calendar day belongs to a night?
+
+Garmin's existing `date` remains the **morning/wake-date** for both sleep and
+nightly HRV. It is unchanged for compatibility. A sleep row dated `2026-09-24`
+can therefore describe sleep starting on the evening of `2026-09-23`. Do not
+classify Friday or Saturday nights using `date`.
+
+Configure the Worker's optional `HEALTH_TIMEZONE` with the user's IANA zone
+(for example `Europe/Oslo`). The Worker then derives these fields at read time
+from each stored UTC sleep window, without rewriting R2 data:
+
+- `wake_date` is the explicit alias of the existing `date`.
+- `night_of` and `sleep_start_date_local` are the date on which sleep started
+  in the configured zone. Use `night_of` for weekday and weekend grouping.
+- `sleep_start_local`, `sleep_end_local` and `sleep_midpoint_local` are ISO local
+  timestamps with their actual UTC offsets. The offsets are computed separately
+  at each instant, so daylight-saving transitions are handled correctly.
+- `sleep_end_date_local`, `sleep_start_weekday_local`,
+  `sleep_end_weekday_local` and `timezone` make the calendar meaning explicit.
+  Weekday names are English Monday–Sunday.
+
+The same fields appear in `sleep_detail`, `hrv_curve`, and daily rows of
+`sleep_history` and `hrv_history`. Nightly HRV uses the same wake-date join key;
+its `night_of` is populated only when its own sleep-start timestamp exists.
+`daily_health` keeps `date` as its general health-calendar date and adds
+`sleep_night` and `hrv_night` objects where those metrics exist. For its HRV
+context, the matching sleep window is used when the HRV record lacks one.
+This tool bounds its extra lookups to 13 index months and read-through of three
+recent dates per stream; `night_context_limited` signals when a sparse query
+spans more months. `night_context_unavailable` reports a context lookup error
+without hiding the ordinary daily summary. Use the dedicated history tools for
+longer night analyses.
+
+If the timezone is unset or invalid, `timezone` and derived local fields are
+`null`; the Worker never guesses a local date or uses a fixed UTC offset. If a
+stored night lacks a usable start timestamp, `night_of` remains `null` even
+when the zone is configured. `wake_date` remains available. A single configured
+zone represents the user's chosen reference zone; it cannot reconstruct a
+different travel-time zone unless that zone is supplied separately in future.
+
+`sleep_history` includes `by_night_of_weekday` even for compact weekly
+requests. Each of the seven rows gives night counts, sleep-duration/score
+statistics, and a circular mean of local mid-sleep clock time. The optional
+`weekend_midpoint_shift_minutes` is the signed difference between Friday/
+Saturday night and Sunday–Thursday night midpoints; it is a **calendar-based
+proxy**, not a diagnosis or a work-schedule-aware social-jetlag measure. Check
+sample counts and `nights_without_local_start` before interpreting it. Existing
+weekly `period_start`/`period_end` still group **wake-dates** for compatibility.
+For 1–2-night lag analysis with HRV, request daily HRV and sleep rows in
+overlapping chunks of at most 31 days, then join on `wake_date` or `night_of`.
+
 Every response distinguishes `available`, `no_data`, `not_stored` and
 `invalid_schema`. One missing night does not fail the whole period. HRV fields
 under `garmin` come from Garmin's nightly summary; fields under `derived` are
