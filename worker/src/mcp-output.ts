@@ -117,6 +117,9 @@ const sleepStage = z.object({
 });
 
 const historyStatus = z.enum(["available", "no_data", "not_stored", "invalid_schema"]);
+const historyIndexState = z.enum([
+  "indexed", "verified", "read_through", "confirmed_missing", "orphaned_index", "index_only",
+]);
 const historyMetric = z.object({
   days: z.number().int().nonnegative(),
   average: z.number().finite(),
@@ -133,6 +136,7 @@ const historyStatusCounts = z.object({
 const hrvHistoryDay = z.object({
   date: z.string(),
   status: historyStatus,
+  index_state: historyIndexState.optional(),
   detailed_readings_available: z.boolean().optional(),
   sleep_start_gmt: z.unknown().optional(),
   sleep_end_gmt: z.unknown().optional(),
@@ -178,6 +182,7 @@ const hrvHistoryWeek = z.object({
 const sleepHistoryDay = z.object({
   date: z.string(),
   status: historyStatus,
+  index_state: historyIndexState.optional(),
   sleep_start_gmt: nullableTimestamp.optional(),
   sleep_end_gmt: nullableTimestamp.optional(),
   confirmed: nullableBoolean.optional(),
@@ -221,6 +226,16 @@ const historyBase = {
   not_stored_dates: z.array(z.string()),
   invalid_dates: z.array(z.string()),
   source_objects_read: z.number().int().nonnegative(),
+  index_consistency: z.object({
+    mode: z.enum(["all_requested_days", "recent_7_days"]),
+    checked_dates: z.number().int().nonnegative(),
+    index_only_dates: z.number().int().nonnegative(),
+    stale_dates: z.array(z.string()),
+    orphaned_index_dates: z.array(z.string()),
+    confirmed_missing_dates: z.array(z.string()),
+    source_prefixes_scanned: z.number().int().nonnegative(),
+    invalid_index_objects: z.array(z.string()),
+  }),
 };
 
 const bodyMeasurement = z.object({

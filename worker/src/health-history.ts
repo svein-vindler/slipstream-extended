@@ -4,8 +4,16 @@ export type HistoryStream = "hrv" | "sleep";
 export type HistoryGranularity = "auto" | "daily" | "weekly";
 export type ResolvedGranularity = "daily" | "weekly";
 export type HistoryDetail = "summary" | "full";
+export type HistoryIndexState =
+  | "indexed"
+  | "verified"
+  | "read_through"
+  | "confirmed_missing"
+  | "orphaned_index"
+  | "index_only";
 
 const DAY_MS = 86_400_000;
+export const HEALTH_HISTORY_BUILDER_REVISION = 2;
 
 function parseDate(value: string): Date {
   const parsed = new Date(`${value}T00:00:00Z`);
@@ -59,6 +67,214 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function normalizedNumber(value: unknown): number | null {
+  if (value === null || value === undefined || typeof value === "boolean") return null;
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  if (typeof value === "string" && !value.trim()) return null;
+  const number = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(number)) return null;
+  return Math.round(number * 1000) / 1000;
+}
+
+function firstNumber(row: Record<string, unknown>, ...keys: string[]): number | null {
+  for (const key of keys) {
+    const value = normalizedNumber(row[key]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+function firstString(row: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = row[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function average(values: number[]): number | null {
+  return values.length
+    ? Math.round((values.reduce((total, value) => total + value, 0) / values.length) * 1000) / 1000
+    : null;
+}
+
+function median(values: number[]): number | null {
+  if (!values.length) return null;
+  const ordered = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(ordered.length / 2);
+  const value = ordered.length % 2
+    ? ordered[middle]
+    : (ordered[middle - 1] + ordered[middle]) / 2;
+  return Math.round(value * 1000) / 1000;
+}
+
+function percentile(values: number[], fraction: number): number | null {
+  if (!values.length) return null;
+  const ordered = [...values].sort((a, b) => a - b);
+  const position = (ordered.length - 1) * fraction;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  const value = lower === upper
+    ? ordered[lower]
+    : ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower);
+  return Math.round(value * 1000) / 1000;
+}
+
+function timestampSeconds(value: unknown): number | null {
+  const number = normalizedNumber(value);
+  if (number !== null) return number > 10_000_000_000 ? number / 1000 : number;
+  if (typeof value !== "string" || !value.trim()) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed / 1000 : null;
+}
+
+function linearSlopePerHour(points: Array<[number, number]>): number | null {
+  if (points.length < 2) return null;
+  const origin = points[0][0];
+  const xs = points.map(([timestamp]) => (timestamp - origin) / 3600);
+  const ys = points.map(([, value]) => value);
+  const xMean = xs.reduce((total, value) => total + value, 0) / xs.length;
+  const yMean = ys.reduce((total, value) => total + value, 0) / ys.length;
+  const denominator = xs.reduce((total, value) => total + (value - xMean) ** 2, 0);
+  if (denominator <= 0) return null;
+  const numerator = xs.reduce(
+    (total, value, index) => total + (value - xMean) * (ys[index] - yMean),
+    0,
+  );
+  return Math.round((numerator / denominator) * 1000) / 1000;
+}
+
+/** Build the same allow-listed HRV row as the Python monthly-index builder. */
+export function summarizeHrvPayload(day: string, value: unknown): Record<string, unknown> {
+  const payload = asRecord(value);
+  if (!payload) return { date: day, status: "invalid_schema" };
+  const rawReadings = Array.isArray(payload.readings) ? payload.readings : [];
+  const readings: Array<{ timestamp: unknown; hrv_ms: unknown }> = [];
+  const values: number[] = [];
+  const timed: Array<[number, number]> = [];
+  for (const raw of rawReadings) {
+    const reading = asRecord(raw);
+    if (!reading) continue;
+    readings.push({ timestamp: reading.timestamp ?? null, hrv_ms: reading.hrv_ms ?? null });
+    const hrv = normalizedNumber(reading.hrv_ms);
+    if (hrv === null) continue;
+    values.push(hrv);
+    const timestamp = timestampSeconds(reading.timestamp);
+    if (timestamp !== null) timed.push([timestamp, hrv]);
+  }
+  const summary = asRecord(payload.summary) ?? {};
+  const garmin = {
+    last_night_avg_ms: firstNumber(summary, "lastNightAvg", "lastNightAverage", "lastNightAvgMs"),
+    last_night_5_min_high_ms: firstNumber(
+      summary, "lastNight5MinHigh", "lastNightFiveMinHigh", "lastNight5MinHighMs",
+    ),
+    weekly_avg_ms: firstNumber(summary, "weeklyAvg", "weeklyAverage", "weeklyAvgMs"),
+    status: firstString(summary, "status", "statusKey", "hrvStatus"),
+    baseline_low_ms: firstNumber(summary, "baselineBalancedLower", "baselineLow", "baselineLower"),
+    baseline_high_ms: firstNumber(summary, "baselineBalancedUpper", "baselineHigh", "baselineUpper"),
+  };
+  if (!values.length && !Object.values(garmin).some((item) => item !== null)) {
+    return { date: day, status: "no_data" };
+  }
+  const midpoint = Math.floor(values.length / 2);
+  const firstMean = average(values.slice(0, midpoint));
+  const secondMean = average(values.slice(midpoint));
+  return {
+    date: day,
+    status: "available",
+    detailed_readings_available: values.length > 0,
+    sleep_start_gmt: payload.sleep_start_gmt ?? null,
+    sleep_end_gmt: payload.sleep_end_gmt ?? null,
+    garmin,
+    derived: {
+      valid_reading_count: values.length,
+      minimum_ms: values.length ? Math.min(...values) : null,
+      maximum_ms: values.length ? Math.max(...values) : null,
+      mean_ms: average(values),
+      median_ms: median(values),
+      p10_ms: percentile(values, 0.10),
+      p90_ms: percentile(values, 0.90),
+      first_half_mean_ms: firstMean,
+      second_half_mean_ms: secondMean,
+      second_minus_first_ms: firstMean !== null && secondMean !== null
+        ? Math.round((secondMean - firstMean) * 1000) / 1000
+        : null,
+      slope_ms_per_hour: linearSlopePerHour(timed.sort((a, b) => a[0] - b[0])),
+    },
+    readings,
+  };
+}
+
+/** Build the same allow-listed sleep row as the Python monthly-index builder. */
+export function summarizeSleepPayload(day: string, value: unknown): Record<string, unknown> {
+  const payload = asRecord(value);
+  if (!payload) return { date: day, status: "invalid_schema" };
+  const summary = asRecord(payload.summary);
+  if (!summary) return { date: day, status: "invalid_schema" };
+  const stages = Array.isArray(payload.stages) ? payload.stages.flatMap((raw) => {
+    const stage = asRecord(raw);
+    return stage ? [{
+      start_gmt: stage.start_gmt ?? null,
+      end_gmt: stage.end_gmt ?? null,
+      stage: typeof stage.stage === "string"
+        || (typeof stage.stage === "number" && Number.isFinite(stage.stage))
+        ? stage.stage
+        : null,
+    }] : [];
+  }) : [];
+  if (summary.sleep_seconds === null || summary.sleep_seconds === undefined) {
+    if (!stages.length) return { date: day, status: "no_data" };
+  }
+  const allowedSummary = Object.fromEntries([
+    "sleep_seconds", "deep_sleep_seconds", "light_sleep_seconds", "rem_sleep_seconds",
+    "awake_sleep_seconds", "unmeasurable_sleep_seconds", "nap_seconds", "sleep_score",
+    "average_spo2_percent", "lowest_spo2_percent", "average_respiration_brpm",
+    "lowest_respiration_brpm", "highest_respiration_brpm", "average_sleep_stress",
+  ].map((key) => [key, normalizedNumber(summary[key])]));
+  const scoreBreakdown: Record<string, { value: number | null; qualifier: string | null }> = {};
+  const rawBreakdown = asRecord(payload.score_breakdown);
+  if (rawBreakdown) {
+    for (const [name, raw] of Object.entries(rawBreakdown)) {
+      const item = asRecord(raw);
+      if (!item) continue;
+      scoreBreakdown[name] = {
+        value: normalizedNumber(item.value),
+        qualifier: typeof item.qualifier === "string" ? item.qualifier : null,
+      };
+    }
+  }
+  return {
+    date: day,
+    status: "available",
+    sleep_start_gmt: payload.sleep_start_gmt ?? null,
+    sleep_end_gmt: payload.sleep_end_gmt ?? null,
+    confirmed: typeof payload.confirmed === "boolean" ? payload.confirmed : null,
+    summary: allowedSummary,
+    score_breakdown: scoreBreakdown,
+    stage_count: Math.max(0, Math.trunc(normalizedNumber(payload.stage_count) ?? 0)),
+    stages,
+  };
+}
+
+function comparable(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(comparable);
+  const row = asRecord(value);
+  if (!row) return value;
+  return Object.fromEntries(Object.keys(row).sort().flatMap((key) =>
+    ["index_state", "readings", "stages"].includes(key) ? [] : [[key, comparable(row[key])]]));
+}
+
+export function historyRowsEquivalent(left: unknown, right: unknown): boolean {
+  return JSON.stringify(comparable(left)) === JSON.stringify(comparable(right));
+}
+
+export function historyReadThroughDates(
+  dates: string[],
+  granularity: ResolvedGranularity,
+): string[] {
+  return granularity === "daily" ? dates : dates.slice(-7);
 }
 
 function numberAt(row: Record<string, unknown>, ...path: string[]): number | null {
@@ -135,10 +351,29 @@ export function indexedHistoryRows(
     for (const raw of index.days) {
       const row = asRecord(raw);
       if (!row || typeof row.date !== "string" || !allowed.has(row.date)) continue;
-      rows.set(row.date, row);
+      rows.set(row.date, { ...row, index_state: "indexed" });
     }
   }
   return rows;
+}
+
+export function indexedHistorySourceRevisions(
+  stream: HistoryStream,
+  indexes: unknown[],
+): Map<string, string> {
+  const revisions = new Map<string, string>();
+  for (const value of indexes) {
+    const index = asRecord(value);
+    if (!index || index.schema_version !== 1
+      || index.builder_revision !== HEALTH_HISTORY_BUILDER_REVISION
+      || index.kind !== `slipstream-${stream}-month-index`) continue;
+    const sources = asRecord(index.source_revisions);
+    if (!sources) continue;
+    for (const [key, revision] of Object.entries(sources)) {
+      if (typeof revision === "string" && revision) revisions.set(key, revision);
+    }
+  }
+  return revisions;
 }
 
 function weeklyGroups(dates: string[]): Array<{ start: string; end: string; dates: string[] }> {
@@ -166,13 +401,17 @@ export function buildHrvHistory(
   indexes: unknown[],
   dates: string[],
   granularity: ResolvedGranularity,
+  overrides: Map<string, Record<string, unknown>> = new Map(),
 ) {
   const rows = indexedHistoryRows("hrv", indexes, dates);
+  for (const [day, row] of overrides) rows.set(day, row);
   const status = baseStatus(dates, rows);
   if (granularity === "daily") {
     return {
       ...status,
-      days: dates.map((day) => rows.get(day) ?? { date: day, status: "not_stored" }),
+      days: dates.map((day) => rows.get(day) ?? {
+        date: day, status: "not_stored", index_state: "index_only",
+      }),
       weeks: [],
     };
   }
@@ -208,13 +447,17 @@ export function buildSleepHistory(
   indexes: unknown[],
   dates: string[],
   granularity: ResolvedGranularity,
+  overrides: Map<string, Record<string, unknown>> = new Map(),
 ) {
   const rows = indexedHistoryRows("sleep", indexes, dates);
+  for (const [day, row] of overrides) rows.set(day, row);
   const status = baseStatus(dates, rows);
   if (granularity === "daily") {
     return {
       ...status,
-      days: dates.map((day) => rows.get(day) ?? { date: day, status: "not_stored" }),
+      days: dates.map((day) => rows.get(day) ?? {
+        date: day, status: "not_stored", index_state: "index_only",
+      }),
       weeks: [],
     };
   }
