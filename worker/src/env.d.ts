@@ -10,6 +10,8 @@ interface Env {
   MCP_WRITES_ENABLED?: string;
   /** Exact accepted writes per authenticated identity and UTC day. */
   MCP_WRITE_DAILY_LIMIT: string;
+  /** Optional IANA zone for local sleep-night dates, e.g. Europe/Oslo. */
+  HEALTH_TIMEZONE?: string;
   /** Fine-grained, single-repository token with Actions read/write only. */
   GITHUB_ACTIONS_TOKEN?: string;
   /** owner/repository used only when on-demand refresh is enabled. */

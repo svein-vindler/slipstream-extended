@@ -59,4 +59,16 @@ describe("MCP structured outputs", () => {
     expect(result.structuredContent).toEqual(value);
     expect(JSON.parse(result.content[0].text)).toEqual(value);
   });
+
+  it("advertises local night semantics on every sleep/overnight HRV output", () => {
+    for (const name of ["daily_health", "sleep_detail", "sleep_history",
+      "hrv_curve", "hrv_history"] as const) {
+      const schema = JSON.stringify(z.toJSONSchema(outputSchemas[name]));
+      expect(schema).toContain('"wake_date"');
+      expect(schema).toContain('"night_of"');
+      expect(schema).toContain('"timezone"');
+    }
+    expect(JSON.stringify(z.toJSONSchema(outputSchemas.sleep_history)))
+      .toContain('"by_night_of_weekday"');
+  });
 });

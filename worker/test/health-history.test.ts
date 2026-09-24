@@ -98,8 +98,9 @@ describe("health history summaries", () => {
     expect(result.available_days).toBe(2);
     expect(result.no_data_dates).toEqual(["2026-09-03"]);
     expect(result.not_stored_dates).toEqual(["2026-09-04"]);
-    expect(result.days[3]).toEqual({
-      date: "2026-09-04", status: "not_stored", index_state: "index_only",
+    expect(result.days[3]).toMatchObject({
+      date: "2026-09-04", wake_date: "2026-09-04", night_of: null,
+      status: "not_stored", index_state: "index_only",
     });
   });
 
@@ -127,6 +128,54 @@ describe("health history summaries", () => {
     expect(result.weeks[0].sleep_score).toMatchObject({ average: 82, days: 2 });
     expect(result.weeks[0].stage_totals_seconds.deep).toBe(7800);
     expect(result.weeks[0].stage_percent_of_sleep.deep).toBe(14.44);
+  });
+
+  it("classifies weekend sleep by local night-of, even in weekly output", () => {
+    const nights = {
+      ...sleepIndex,
+      days: [
+        { date: "2026-09-22", status: "available",
+          sleep_start_gmt: "2026-09-21T20:00:00Z",
+          sleep_end_gmt: "2026-09-22T04:00:00Z",
+          summary: { sleep_seconds: 28800, sleep_score: 80 } },
+        { date: "2026-09-26", status: "available",
+          sleep_start_gmt: "2026-09-25T21:00:00Z",
+          sleep_end_gmt: "2026-09-26T05:00:00Z",
+          summary: { sleep_seconds: 28800, sleep_score: 81 } },
+        { date: "2026-09-27", status: "available",
+          sleep_start_gmt: "2026-09-26T21:00:00Z",
+          sleep_end_gmt: "2026-09-27T05:00:00Z",
+          summary: { sleep_seconds: 28800, sleep_score: 82 } },
+      ],
+    };
+    const dates = ["2026-09-22", "2026-09-26", "2026-09-27"];
+    const result = buildSleepHistory([nights], dates, "weekly", new Map(), "Europe/Oslo");
+    expect(result.days).toEqual([]);
+    expect(result.by_night_of_weekday.find((row) => row.weekday === "Friday"))
+      .toMatchObject({ nights: 1, mean_sleep_midpoint_clock_local: "03:00" });
+    expect(result.by_night_of_weekday.find((row) => row.weekday === "Saturday"))
+      .toMatchObject({ nights: 1, mean_sleep_midpoint_clock_local: "03:00" });
+    expect(result.weekend_midpoint_shift_minutes).toBe(60);
+    const daily = buildSleepHistory([nights], dates, "daily", new Map(), "Europe/Oslo");
+    expect(daily.days[1]).toMatchObject({
+      date: "2026-09-26", wake_date: "2026-09-26", night_of: "2026-09-25",
+      sleep_start_weekday_local: "Friday",
+    });
+  });
+
+  it("gives nightly HRV the same explicit wake-date and night-of fields", () => {
+    const index = { ...hrvIndex, days: [{
+      date: "2026-09-26", status: "available",
+      sleep_start_gmt: "2026-09-25T21:00:00Z",
+      sleep_end_gmt: "2026-09-26T05:00:00Z",
+      garmin: { last_night_avg_ms: 45 },
+    }] };
+    const result = buildHrvHistory([index], ["2026-09-26"], "daily",
+      new Map(), "Europe/Oslo");
+    expect(result.days[0]).toMatchObject({
+      date: "2026-09-26", wake_date: "2026-09-26", night_of: "2026-09-25",
+      sleep_start_weekday_local: "Friday",
+    });
   });
 
   it("lets canonical rows override a stale or missing monthly index", () => {

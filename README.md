@@ -87,7 +87,9 @@ Example questions:
 
 More examples are in [Prompt ideas](docs/PROMPTS.md).
 See [HRV and sleep history](docs/HEALTH_HISTORY.md) for date-range behavior,
-monthly R2 indexes and the one-time index build.
+local `night_of` versus wake-date semantics, monthly R2 indexes and the one-time
+index build. Set `HEALTH_TIMEZONE` during installation for DST-correct local
+sleep dates and weekday comparisons.
 
 ## Keeping data fresh
 

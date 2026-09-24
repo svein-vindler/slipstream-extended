@@ -17,6 +17,7 @@
  *   SLIPSTREAM_DATA     private R2 bucket binding
  *   GITHUB_ACTIONS_TOKEN  optional fine-grained token for on-demand refresh
  *   GITHUB_REPOSITORY     optional owner/repository for on-demand refresh
+ *   HEALTH_TIMEZONE       optional IANA zone for local sleep-night context
  *
  * Pure data helpers live in ./lib (unit-tested); this file is the MCP wiring.
  */
@@ -47,6 +48,7 @@ import {
 } from "./security";
 import { outputSchemas, structuredToolResult } from "./mcp-output";
 import { authenticateMcpRequest } from "./mcp-auth";
+import { nightContext, validatedHealthTimezone } from "./night-context";
 
 export { RefreshCoordinator } from "./refresh-coordinator";
 
@@ -316,6 +318,39 @@ class FitnessService {
     return { keys, prefixesScanned: months.length };
   }
 
+  /** Reuse indexed nights for daily health, with bounded read-through for three recent dates. */
+  async nightRowsForHealth(
+    stream: "hrv" | "sleep", dates: string[],
+  ): Promise<Map<string, Record<string, unknown>>> {
+    if (!dates.length) return new Map();
+    // At most 13 index reads and three LIST/GET pairs per stream. This also
+    // bounds requests when a sparse 366-row health query spans many years.
+    const allowedMonths = new Set([...new Set(dates.map((day) => day.slice(0, 7)))].slice(0, 13));
+    const selectedDates = dates.filter((day) => allowedMonths.has(day.slice(0, 7)));
+    const indexes: unknown[] = [];
+    for (const key of historyMonthKeys(stream, selectedDates)) {
+      try {
+        const stored = await this.getR2Json([key], HISTORY_INDEX_R2_LIMITS);
+        if (stored) indexes.push(stored.data);
+      } catch {
+        // A bad index must not make the ordinary daily summary unavailable.
+      }
+    }
+    const rows = indexedHistoryRows(stream, indexes, selectedDates);
+    const revisions = indexedHistorySourceRevisions(stream, indexes);
+    const recent = [...new Set(selectedDates)].sort().slice(-3);
+    const discovered = await this.discoverCanonicalHistoryKeys(stream, recent);
+    for (const day of recent) {
+      const source = discovered.keys.get(day);
+      const result = await this.readCanonicalHistoryRow(
+        stream, day, rows.get(day), false, source,
+        source ? revisions.get(source.key) : undefined,
+      );
+      rows.set(day, result.row);
+    }
+    return rows;
+  }
+
   async putSmallJson(key: string, value: Record<string, unknown>): Promise<void> {
     const body = JSON.stringify(value);
     if (new TextEncoder().encode(body).byteLength > COACH_CONFIG_R2_LIMITS.stored) {
@@ -548,7 +583,7 @@ class FitnessService {
     });
 
     server.registerTool("daily_health", {
-      description: "List daily sleep, HRV, pulse, Body Battery, stress, steps, respiration and weight summaries.",
+      description: "List daily sleep, HRV, pulse, Body Battery, stress, steps, respiration and weight summaries. For sleep/overnight HRV, date is the morning wake-date; sleep_night and hrv_night expose local night_of when HEALTH_TIMEZONE and timestamps are available.",
       inputSchema: z.object({
         start_date: dateRange, end_date: dateRange,
         limit: z.number().int().min(1).max(366).default(30),
@@ -560,8 +595,36 @@ class FitnessService {
       let rows = filterHealth(await this.getHealth(), args);
       rows = [...rows].sort((a, b) => args.sort === "date_asc"
         ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date));
+      const displayed = rows.slice(0, args.limit);
+      const timezone = validatedHealthTimezone(this.env.HEALTH_TIMEZONE);
+      const contextMonths = new Set(displayed.map((row) => row.date.slice(0, 7)));
+      const contexts = timezone ? await Promise.allSettled([
+        this.nightRowsForHealth("sleep", displayed.filter((row) => row.sleepSeconds != null)
+          .map((row) => row.date)),
+        this.nightRowsForHealth("hrv", displayed.filter((row) => row.hrvLastNightAvg != null)
+          .map((row) => row.date)),
+      ]) : null;
+      const emptyContext = () => new Map<string, Record<string, unknown>>();
+      const sleepRows = contexts?.[0].status === "fulfilled" ? contexts[0].value : emptyContext();
+      const hrvRows = contexts?.[1].status === "fulfilled" ? contexts[1].value : emptyContext();
       return this.text({ matched: rows.length, showing: Math.min(args.limit, rows.length),
-        days: rows.slice(0, args.limit).map(toHealthSummary) });
+        timezone,
+        night_context_limited: contextMonths.size > 13,
+        night_context_unavailable: contexts?.some((result) => result.status === "rejected") ?? false,
+        days: displayed.map((row) => {
+          const sleep = sleepRows.get(row.date);
+          const hrv = hrvRows.get(row.date);
+          const hrvSource = hrv?.sleep_start_gmt != null ? hrv : sleep;
+          return {
+            ...toHealthSummary(row),
+            sleep_night: row.sleepSeconds != null
+              ? nightContext(row.date, sleep?.sleep_start_gmt, sleep?.sleep_end_gmt, timezone)
+              : null,
+            hrv_night: row.hrvLastNightAvg != null
+              ? nightContext(row.date, hrvSource?.sleep_start_gmt, hrvSource?.sleep_end_gmt, timezone)
+              : null,
+          };
+        }) });
     });
 
     server.registerTool("health_trends", {
@@ -586,7 +649,7 @@ class FitnessService {
     });
 
     server.registerTool("hrv_curve", {
-      description: "Read the detailed overnight Garmin HRV curve for one date. Returns timestamps and HRV values, without GPS or raw device payloads.",
+      description: "Read the detailed overnight Garmin HRV curve for one wake-date. Returns timestamps, HRV values and local night_of when configured, without GPS or raw device payloads.",
       inputSchema: z.object({ date: exactDate }),
       outputSchema: outputSchemas.hrv_curve,
       annotations: PRIVATE_READ_TOOL_ANNOTATIONS,
@@ -615,6 +678,8 @@ class FitnessService {
       return this.text({
         available: true,
         date: payload.date ?? args.date,
+        ...nightContext(typeof payload.date === "string" ? payload.date : args.date, payload.sleep_start_gmt,
+          payload.sleep_end_gmt, validatedHealthTimezone(this.env.HEALTH_TIMEZONE)),
         sleep_start_gmt: payload.sleep_start_gmt ?? null,
         sleep_end_gmt: payload.sleep_end_gmt ?? null,
         summary: payload.summary ?? null,
@@ -624,7 +689,7 @@ class FitnessService {
     });
 
     server.registerTool("hrv_history", {
-      description: "Analyze detailed overnight HRV across a date range. Auto returns daily summaries for up to 31 days and compact weekly summaries for longer ranges (up to 366 days); full readings are limited to 7 days.",
+      description: "Analyze overnight HRV by morning wake-date. Daily rows expose local night_of when configured. Auto returns daily summaries for up to 31 days and compact wake-date weekly summaries for longer ranges (up to 366 days); use daily chunks for night-lag analysis. Full readings are limited to 7 days.",
       inputSchema: z.object({
         start_date: exactDate,
         end_date: exactDate,
@@ -671,10 +736,12 @@ class FitnessService {
       }
       const history = buildHrvHistory(
         indexes, request.dates, request.granularity, overrides,
+        validatedHealthTimezone(this.env.HEALTH_TIMEZONE),
       );
       return this.text({
         start_date: args.start_date,
         end_date: args.end_date,
+        timezone: validatedHealthTimezone(this.env.HEALTH_TIMEZONE),
         granularity: request.granularity,
         detail_level: args.detail_level,
         ...history,
@@ -693,7 +760,7 @@ class FitnessService {
     });
 
     server.registerTool("sleep_detail", {
-      description: "Read detailed Garmin sleep for one date: sleep window, stages, score components, oxygen, respiration and sleep stress. Returns normalized data without the raw Garmin payload.",
+      description: "Read detailed Garmin sleep for one morning wake-date. Local night_of is the sleep-start date when HEALTH_TIMEZONE is configured. Includes window, stages, score, oxygen, respiration and stress without raw Garmin payload.",
       inputSchema: z.object({ date: exactDate }),
       outputSchema: outputSchemas.sleep_detail,
       annotations: {
@@ -725,6 +792,9 @@ class FitnessService {
       return this.text({
         available: true,
         date: typeof payload.date === "string" ? payload.date : args.date,
+        ...nightContext(typeof payload.date === "string" ? payload.date : args.date,
+          payload.sleep_start_gmt, payload.sleep_end_gmt,
+          validatedHealthTimezone(this.env.HEALTH_TIMEZONE)),
         sleep_start_gmt: payload.sleep_start_gmt ?? null,
         sleep_end_gmt: payload.sleep_end_gmt ?? null,
         confirmed: typeof payload.confirmed === "boolean" ? payload.confirmed : null,
@@ -737,7 +807,7 @@ class FitnessService {
     });
 
     server.registerTool("sleep_history", {
-      description: "Analyze detailed sleep across a date range. Auto returns daily summaries for up to 31 days and compact weekly summaries for longer ranges (up to 366 days); full stage timelines are limited to 7 days.",
+      description: "Analyze sleep by morning wake-date. Daily rows expose local night_of and weekly output includes by_night_of_weekday for Friday/Saturday comparisons and a midpoint-shift proxy. Auto uses daily summaries up to 31 days and compact wake-date weekly summaries up to 366 days; full stages are limited to 7 days.",
       inputSchema: z.object({
         start_date: exactDate,
         end_date: exactDate,
@@ -784,10 +854,12 @@ class FitnessService {
       }
       const history = buildSleepHistory(
         indexes, request.dates, request.granularity, overrides,
+        validatedHealthTimezone(this.env.HEALTH_TIMEZONE),
       );
       return this.text({
         start_date: args.start_date,
         end_date: args.end_date,
+        timezone: validatedHealthTimezone(this.env.HEALTH_TIMEZONE),
         granularity: request.granularity,
         detail_level: args.detail_level,
         ...history,
