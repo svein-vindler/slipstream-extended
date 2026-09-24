@@ -13,6 +13,12 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # @cloudflare/vitest-plugin currently supports Vitest 4.x only.
+    # Revisit this guard when the plugin declares support for a newer major.
+    ignore:
+      - dependency-name: vitest
+        update-types:
+          - version-update:semver-major
 
   # GitHub Actions used by the workflows
   - package-ecosystem: github-actions
