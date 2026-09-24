@@ -14,7 +14,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
     "@modelcontextprotocol/server": "2.0.0",
-    "agents": "0.20.1",
+    "agents": "0.24.0",
     "jose": "6.2.3",
     "zod": "4.6.5"
   },
