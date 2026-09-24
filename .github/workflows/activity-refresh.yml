@@ -1,0 +1,72 @@
+name: Refresh changed Garmin activities
+
+on:
+  schedule:
+    - cron: "15 23 * * *"  # daily rolling check, serialized with every Garmin job
+  workflow_dispatch:
+    inputs:
+      activity_id:
+        description: "Optional Garmin activity ID to check or force-refresh"
+        required: false
+        type: string
+      force:
+        description: "Force replacement of artifacts for the specified activity ID"
+        required: true
+        default: false
+        type: boolean
+      lookback_days:
+        description: "Recent scheduled-check window (1-90 days)"
+        required: true
+        default: "30"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: garmin-sync
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GARMINTOKENS: ${{ secrets.GARMINTOKENS }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: slipstream-data
+      R2_MAX_BUCKET_BYTES: "5368709120"
+      R2_MAX_BUCKET_OBJECTS: "100000"
+      R2_MAX_WRITES_PER_RUN: "250"
+      R2_MAX_WRITE_BYTES_PER_RUN: "536870912"
+      ACTIVITY_ID: ${{ inputs.activity_id }}
+      FORCE: ${{ inputs.force || 'false' }}
+      LOOKBACK_DAYS: ${{ inputs.lookback_days || '30' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Check recent activities or refresh one explicit activity
+        shell: bash
+        run: |
+          args=(--lookback-days "$LOOKBACK_DAYS" --max-activities 50)
+          if [[ -n "$ACTIVITY_ID" ]]; then
+            if ! [[ "$ACTIVITY_ID" =~ ^(garmin-)?[0-9]{1,20}$ ]]; then
+              echo "activity_id must be a Garmin numeric ID."
+              exit 2
+            fi
+            args+=(--activity-id "${ACTIVITY_ID#garmin-}")
+          fi
+          if [[ "$FORCE" == "true" ]]; then
+            if [[ -z "$ACTIVITY_ID" ]]; then
+              echo "force requires activity_id."
+              exit 2
+            fi
+            args+=(--force)
+          fi
+          python -m pipeline.activity_refresh "${args[@]}"

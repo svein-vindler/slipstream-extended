@@ -1,0 +1,64 @@
+name: Backfill granular Garmin activities
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "First activity date (YYYY-MM-DD, maximum one year)"
+        required: true
+        type: string
+      end_date:
+        description: "Last activity date (YYYY-MM-DD)"
+        required: true
+        type: string
+      max_activities:
+        description: "Maximum missing activities to process (1-50)"
+        required: true
+        default: "20"
+        type: string
+      retry_failures:
+        description: "Retry activities already blocked after three failures"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: garmin-sync
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GARMINTOKENS: ${{ secrets.GARMINTOKENS }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: slipstream-data
+      R2_MAX_BUCKET_BYTES: "5368709120"
+      R2_MAX_BUCKET_OBJECTS: "100000"
+      R2_MAX_WRITES_PER_RUN: "250"
+      R2_MAX_WRITE_BYTES_PER_RUN: "536870912"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Export missing activity artifacts to private R2
+        shell: bash
+        run: |
+          args=(
+            --start-date "${{ inputs.start_date }}"
+            --end-date "${{ inputs.end_date }}"
+            --max-activities "${{ inputs.max_activities }}"
+          )
+          if [ "${{ inputs.retry_failures }}" = "true" ]; then
+            args+=(--retry-failures)
+          fi
+          python -m pipeline.activity_backfill "${args[@]}"

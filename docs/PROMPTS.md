@@ -1,0 +1,162 @@
+# Example prompts and use cases
+
+Slipstream turns your last few weeks of Garmin activities into something you can
+actually have a conversation with. Below are prompts to copy, grouped by what you
+are trying to do. They work in Claude and ChatGPT.
+
+**How to phrase it.** Start with something like *"Using Slipstream, ..."* so the
+assistant reaches for your data. It can see activity summaries (sport, distance,
+duration, heart rate, elevation, calories, pace) for roughly the last 30 days. It
+cannot see GPS routes. The best results come from treating it like an analyst:
+ask it to compare, trend, judge, and suggest, not just list.
+
+> **A note on health.** Heart-rate and calorie numbers are device estimates, and
+> nothing here is medical or dietary advice. Use it to explore and plan, and take
+> anything concerning (chest pain, unusual heart rate, dizziness, persistent
+> fatigue) to a qualified professional.
+
+---
+
+## Make it your coach (start here)
+
+### One-time coach setup
+
+Before asking for zone-based coach input, start a dedicated setup conversation.
+Slipstream will not guess heart-rate zones or thresholds.  The assistant should
+ask you to confirm:
+
+- the effective date for the profile;
+- each zone's lower and upper heart-rate boundary;
+- optional LT1 and LT2 reference ranges;
+- optional BPM thresholds used for interval summaries.
+
+Then ask it to save the values with `add_coach_profile`.  A later profile must
+use its real effective date: it applies to new activities and does not overwrite
+old coach inputs.  Explicit reanalysis can create another immutable revision.
+
+Copyable setup prompt:
+
+> Using Slipstream, help me create my running coach profile. Ask me to confirm
+> the effective date, heart-rate zones, LT1/LT2 references and interval BPM
+> thresholds. Do not infer missing values. Show the complete profile for my
+> approval, then save it with `add_coach_profile`.
+
+No personal zone values are shipped as defaults. The analysis time basis is
+elapsed time unless a later schema explicitly adds another option.
+
+After an activity, user-owned information can be appended without editing the
+Garmin source data:
+
+> Add RPE 3, conditions "sunny and dry", and note "testing the Achilles" to
+> activity garmin-123. Do not infer anything I did not state.
+
+`coach_input` returns the newest prepared analysis. Garmin's planned workout
+steps and the laps actually performed are separate. If no Garmin workout or
+explicit correction exists, the first version treats the continuous activity as
+one main section; it does not guess intervals from pace or heart rate.
+
+These single prompts do a lot, because you are handing the assistant a role and
+your data at once:
+
+- *"Using Slipstream, act as my running coach. Look at my last 30 days and give me
+  three observations and one thing to focus on next week."*
+- *"You are my endurance coach. Summarize my recent training, then suggest a
+  sensible session for today and say why."*
+- *"Review my last month like a performance analyst: volume, intensity balance,
+  consistency, and one risk you see."*
+
+---
+
+## Daily and weekly check-ins
+
+- *"What did I do this week, and how does the total compare to last week?"*
+- *"How far did I run and cycle in the last 30 days?"*
+- *"Summarize yesterday's workout."*
+- *"What's my current streak of active days?"*
+- *"Using Slipstream, analyze my sleep and HRV over the last six months. Start
+  with weekly trends, identify unusual weeks, and only then inspect individual
+  nights that need explanation."*
+- *"Compare daily sleep score, sleep duration and nightly HRV for the last 30
+  days. Clearly distinguish Garmin metrics from Slipstream-derived HRV
+  statistics."*
+
+## Training load and progression
+
+- *"Show my weekly running volume for the last month. Is it trending up, flat, or
+  down?"* -> spots ramps and dips.
+- *"How much did my training load change week to week? Am I increasing too fast?"*
+  -> a coach watches for sharp jumps.
+- *"Which was my biggest training week, and my lightest?"*
+- *"How many hard days versus easy days this week, judging by heart rate?"*
+
+## Workout suggestions and readiness
+
+- *"Based on my last two weeks, suggest a good workout for today."*
+- *"I want to run a little longer than usual. Given my recent long runs, is 12 to
+  14 km reasonable or a stretch?"*
+- *"I have 45 minutes today. What session fits my recent training?"*
+- *"I rode hard yesterday. Should today be easy, and how easy?"*
+
+## Race and goal planning
+
+- *"I want to run a half marathon in 8 weeks. Based on my current running, is that
+  realistic, and what should my weekly long run build to?"*
+- *"My goal is a 100 km cycling week. How close am I, and how should I get there
+  safely?"*
+- *"Design a simple three-day running week that fits what I am already doing."*
+- *"If I keep my current weekly volume, what will my monthly total look like?"*
+
+## Pace, speed, and performance
+
+- *"What's my fastest average pace this month, and on which run?"*
+- *"Sort my runs by pace. What's my range from easiest to hardest?"*
+- *"Is my pace at a given effort improving over the month?"*
+
+## Heart rate and aerobic fitness (estimates, not diagnosis)
+
+- *"Are my easy runs actually easy by heart rate, or am I running them too hard?"*
+- *"How is my average heart rate on easy runs trending? Steadier heart rate at the
+  same pace can suggest improving aerobic fitness."*
+- *"What's the highest heart rate I recorded recently, and in which session?"*
+- *"Compare average heart rate on my runs versus my rides."*
+
+## Recovery and overtraining signals
+
+- *"Have I done any back-to-back hard days? Flag possible overreaching."*
+- *"How many full rest days have I taken in the last two weeks?"*
+- *"My legs feel heavy. Does my recent training load help explain it?"*
+
+## Cross-training and balance
+
+- *"How balanced am I across running, cycling, and strength this month?"*
+- *"How many mobility or yoga sessions have I done? Given my run volume, should I
+  add more?"*
+- *"Am I neglecting any type of training lately?"*
+
+## Fueling and energy (rough estimates)
+
+- *"Estimate my total calories burned this week to help me plan fueling."*
+- *"Which days had the highest energy expenditure? Those are days to eat more."*
+- *"On my long-session days, roughly how much extra am I burning versus a rest
+  day?"* -> a starting point to discuss with a nutritionist, not a prescription.
+
+## Reflection, motivation, and sharing
+
+- *"Write a short, upbeat recap of my training month, the way a coach would."*
+- *"Did I set any personal bests recently? Celebrate them."*
+- *"Draft a two-sentence training update I could share with a friend."*
+- *"What's the one number from this month I should be proud of?"*
+
+## Power-user combinations
+
+- *"Compare my running this month versus last month: volume, average pace, and
+  average heart rate, and tell me what changed."*
+- *"Build a table of my weekly distance and average heart rate by sport for the
+  last four weeks."*
+- *"Find my three longest efforts of the month and what they have in common."*
+
+---
+
+These are starting points. Because it is a real conversation, you can always
+follow up: ask why, ask for a plan, ask it to challenge you, or ask it to explain
+a number in plain language.

@@ -1,0 +1,44 @@
+name: Scheduled Garmin activity backfill
+
+on:
+  schedule:
+    - cron: "30 2,8,14,20 * * *"  # four bounded batches daily, offset from refresh and HRV jobs
+  workflow_dispatch:
+    inputs:
+      max_activities:
+        description: "Maximum missing activities to process (1-50)"
+        required: true
+        default: "50"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: garmin-sync
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GARMINTOKENS: ${{ secrets.GARMINTOKENS }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: slipstream-data
+      R2_MAX_BUCKET_BYTES: "5368709120"
+      R2_MAX_BUCKET_OBJECTS: "100000"
+      R2_MAX_WRITES_PER_RUN: "250"
+      R2_MAX_WRITE_BYTES_PER_RUN: "536870912"
+      MAX_ACTIVITIES: ${{ inputs.max_activities || '50' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Advance newest unfinished activity range
+        run: python -m pipeline.activity_backfill_scheduler --max-activities "$MAX_ACTIVITIES"

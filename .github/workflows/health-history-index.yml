@@ -1,0 +1,66 @@
+name: Build health history indexes
+
+on:
+  workflow_dispatch:
+    inputs:
+      stream:
+        description: "History stream to index"
+        required: true
+        default: all
+        type: choice
+        options: [all, hrv, sleep]
+      start_date:
+        description: "Optional first date (YYYY-MM-DD)"
+        required: false
+        type: string
+      end_date:
+        description: "Optional last date (YYYY-MM-DD)"
+        required: false
+        type: string
+      recent_months:
+        description: "Optional newest month count; 0 builds all months"
+        required: true
+        default: "0"
+        type: string
+
+permissions:
+  contents: read
+
+# Serialize with source writers so a month cannot change mid-snapshot.
+concurrency:
+  group: garmin-sync
+  cancel-in-progress: false
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: slipstream-data
+      R2_MAX_BUCKET_BYTES: "5368709120"
+      R2_MAX_BUCKET_OBJECTS: "100000"
+      R2_MAX_WRITES_PER_RUN: "250"
+      R2_MAX_WRITE_BYTES_PER_RUN: "536870912"
+      STREAM: ${{ inputs.stream }}
+      START_DATE: ${{ inputs.start_date }}
+      END_DATE: ${{ inputs.end_date }}
+      RECENT_MONTHS: ${{ inputs.recent_months }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Build changed monthly indexes from private R2
+        shell: bash
+        run: |
+          args=()
+          if [[ "$STREAM" != "all" ]]; then args+=(--stream "$STREAM"); fi
+          if [[ -n "$START_DATE" ]]; then args+=(--start-date "$START_DATE"); fi
+          if [[ -n "$END_DATE" ]]; then args+=(--end-date "$END_DATE"); fi
+          if [[ "$RECENT_MONTHS" != "0" ]]; then args+=(--recent-months "$RECENT_MONTHS"); fi
+          python -m pipeline.health_history_index "${args[@]}"

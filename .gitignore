@@ -1,0 +1,28 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node / Cloudflare
+node_modules/
+.wrangler/
+worker/worker-configuration.d.ts
+
+# Secrets & tokens - NEVER commit these
+.env
+.dev.vars
+*.token
+.mcp_secret
+.connector_url
+garmin_tokens*.txt
+.garminconnect/
+.garmintokens/
+
+# Local scratch
+*.local
+.granular/
+.codex-pytest/
+
+# Runtime summary files are restored from and written back to private R2.
+data/activities.csv
+data/health_daily.csv

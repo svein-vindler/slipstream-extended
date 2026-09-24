@@ -1,0 +1,65 @@
+name: Scheduled Garmin health detail backfill
+
+on:
+  schedule:
+    - cron: "15 1,7,13,19 * * *"  # staggered between summary and activity jobs
+  workflow_dispatch:
+    inputs:
+      max_sleep_days:
+        description: "Maximum missing sleep nights to process (1-100)"
+        required: true
+        default: "100"
+        type: string
+      max_body_days:
+        description: "Maximum missing body-composition dates to process (1-100)"
+        required: true
+        default: "100"
+        type: string
+      retry_failures:
+        description: "Retry dates already paused after three failures"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: garmin-sync
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GARMINTOKENS: ${{ secrets.GARMINTOKENS }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: slipstream-data
+      R2_MAX_BUCKET_BYTES: "5368709120"
+      R2_MAX_BUCKET_OBJECTS: "100000"
+      R2_MAX_WRITES_PER_RUN: "250"
+      R2_MAX_WRITE_BYTES_PER_RUN: "536870912"
+      MAX_SLEEP_DAYS: ${{ inputs.max_sleep_days || '100' }}
+      MAX_BODY_DAYS: ${{ inputs.max_body_days || '100' }}
+      RETRY_FAILURES: ${{ inputs.retry_failures || 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Advance missing sleep and body-composition dates
+        shell: bash
+        run: |
+          args=(
+            --max-sleep-days "$MAX_SLEEP_DAYS"
+            --max-body-days "$MAX_BODY_DAYS"
+          )
+          if [[ "$RETRY_FAILURES" == "true" ]]; then
+            args+=(--retry-failures)
+          fi
+          python -m pipeline.health_detail_backfill "${args[@]}"

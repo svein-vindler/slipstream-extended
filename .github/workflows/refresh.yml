@@ -1,0 +1,130 @@
+name: Refresh fitness data
+
+# Pulls your latest Garmin data on a schedule and on-demand. Existing summaries
+# are restored from private R2, merged incrementally, and uploaded back to R2.
+on:
+  schedule:
+    - cron: "0 */6 * * *"      # every 6 hours
+  workflow_dispatch:
+    inputs:
+      health_start:
+        description: "Optional health backfill start (YYYY-MM-DD)"
+        required: false
+        type: string
+      health_end:
+        description: "Optional health backfill end (YYYY-MM-DD)"
+        required: false
+        type: string
+      backfill_start_year:
+        description: "Optional first year in a multi-year health backfill"
+        required: false
+        type: string
+      backfill_end_year:
+        description: "Optional last year; processed first, then backwards"
+        required: false
+        type: string
+      include_granular:
+        description: "Also refresh recent detailed HRV and activity artifacts"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  # Shared with granular jobs so Garmin is never queried concurrently.
+  group: garmin-sync
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    env:
+      DAYS_BACK: "30"          # refresh window; older rows are preserved
+      HEALTH_DAYS_BACK: "14"   # recent health can settle for several days
+      GARMINTOKENS: ${{ secrets.GARMINTOKENS }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: slipstream-data
+      R2_MAX_BUCKET_BYTES: "5368709120"       # 5 GiB, half the free allowance
+      R2_MAX_BUCKET_OBJECTS: "100000"
+      R2_MAX_WRITES_PER_RUN: "250"
+      R2_MAX_WRITE_BYTES_PER_RUN: "536870912" # 512 MiB
+      HEALTH_START: ${{ inputs.health_start }}
+      HEALTH_END: ${{ inputs.health_end }}
+      BACKFILL_START_YEAR: ${{ inputs.backfill_start_year }}
+      BACKFILL_END_YEAR: ${{ inputs.backfill_end_year }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore current summaries from private R2
+        run: python -m pipeline.summary_restore --data-dir data
+      - name: Fetch + write data/
+        run: |
+          if [ -n "$BACKFILL_START_YEAR" ] || [ -n "$BACKFILL_END_YEAR" ]; then
+            if [ -z "$BACKFILL_START_YEAR" ] || [ -z "$BACKFILL_END_YEAR" ]; then
+              echo "Both backfill_start_year and backfill_end_year are required."
+              exit 2
+            fi
+            if [ -n "$HEALTH_START" ] || [ -n "$HEALTH_END" ]; then
+              echo "Use either year inputs or date inputs, not both."
+              exit 2
+            fi
+            if ! [[ "$BACKFILL_START_YEAR" =~ ^[0-9]{4}$ && "$BACKFILL_END_YEAR" =~ ^[0-9]{4}$ ]]; then
+              echo "Backfill years must contain four digits."
+              exit 2
+            fi
+            if [ "$BACKFILL_START_YEAR" -gt "$BACKFILL_END_YEAR" ]; then
+              echo "backfill_start_year cannot be after backfill_end_year."
+              exit 2
+            fi
+            for ((year=BACKFILL_END_YEAR; year>=BACKFILL_START_YEAR; year--)); do
+              echo "Fetching health summaries for $year"
+              python -m pipeline.fetch --skip-activities \
+                --health-start "$year-01-01" --health-end "$year-12-31"
+            done
+          elif [ -n "$HEALTH_START" ] || [ -n "$HEALTH_END" ]; then
+            if [ -z "$HEALTH_START" ] || [ -z "$HEALTH_END" ]; then
+              echo "Both health_start and health_end are required for a backfill."
+              exit 2
+            fi
+            python -m pipeline.fetch --skip-activities \
+              --health-start "$HEALTH_START" --health-end "$HEALTH_END"
+          else
+            python -m pipeline.fetch --days "$DAYS_BACK" \
+              --health-days "$HEALTH_DAYS_BACK"
+          fi
+      - name: Upload summaries and daily snapshot to private R2
+        run: python -m pipeline.summary_export --data-dir data
+      - name: Refresh recent detailed sleep and body composition
+        run: |
+          python -m pipeline.health_detail_backfill \
+            --max-sleep-days 3 \
+            --max-body-days 3 \
+            --refresh-recent-days 3
+      - name: Refresh recent detailed HRV
+        run: |
+          python -m pipeline.granular_export \
+            --hrv-days 3 \
+            --activity-days 0 \
+            --cardio-count 0 \
+            --strength-count 0 \
+            --upload-r2
+      - name: Refresh recent detailed activity artifacts
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular }}
+        run: |
+          python -m pipeline.granular_export \
+            --hrv-days 0 \
+            --activity-days 14 \
+            --cardio-count 5 \
+            --strength-count 5 \
+            --upload-r2
+      - name: Generate coach input for refreshed running activities
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular }}
+        run: python -m pipeline.coach_backfill --max-activities 10

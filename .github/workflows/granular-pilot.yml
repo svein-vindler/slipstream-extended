@@ -1,0 +1,53 @@
+name: Granular Garmin pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      hrv_days:
+        description: "Recent nights of detailed HRV"
+        required: true
+        default: "7"
+        type: string
+      activity_days:
+        description: "How far back to search for representative activities"
+        required: true
+        default: "180"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # Shared with refresh.yml so Garmin is never queried by two jobs at once.
+  group: garmin-sync
+  cancel-in-progress: false
+
+jobs:
+  pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GARMINTOKENS: ${{ secrets.GARMINTOKENS }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: slipstream-data
+      R2_MAX_BUCKET_BYTES: "5368709120"       # 5 GiB, half the free allowance
+      R2_MAX_BUCKET_OBJECTS: "100000"
+      R2_MAX_WRITES_PER_RUN: "250"
+      R2_MAX_WRITE_BYTES_PER_RUN: "536870912" # 512 MiB
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Export pilot data to private R2
+        run: |
+          python -m pipeline.granular_export \
+            --hrv-days "${{ inputs.hrv_days }}" \
+            --activity-days "${{ inputs.activity_days }}" \
+            --cardio-count 2 \
+            --strength-count 2 \
+            --upload-r2

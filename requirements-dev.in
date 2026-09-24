@@ -1,0 +1,8 @@
+-r requirements.in
+
+pip-audit==2.10.1
+pytest==9.1.1
+ruff==0.16.8
+# cyclonedx-python-lib only requires this on Python < 3.14. Keep it explicit
+# so the shared hash lock also installs cleanly in the Python 3.12 CI job.
+typing-extensions==4.16.0

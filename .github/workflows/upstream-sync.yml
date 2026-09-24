@@ -1,0 +1,82 @@
+name: Check upstream Slipstream
+
+on:
+  schedule:
+    - cron: "17 9 * * 1"
+      timezone: "Europe/Oslo"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-slipstream-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check for upstream changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Compare reviewed and current upstream revisions
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          reviewed="$(tr -d '[:space:]' < .upstream-version)"
+          if ! [[ "$reviewed" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid .upstream-version: expected one full commit SHA." >&2
+            exit 1
+          fi
+
+          latest="$(git ls-remote https://github.com/yhecht/slipstream.git refs/heads/main | awk '{print $1}')"
+          if ! [[ "$latest" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Could not resolve upstream main." >&2
+            exit 1
+          fi
+
+          echo "reviewed=${reviewed}" >> "$GITHUB_OUTPUT"
+          echo "latest=${latest}" >> "$GITHUB_OUTPUT"
+          if [ "$reviewed" = "$latest" ]; then
+            echo "update_available=false" >> "$GITHUB_OUTPUT"
+            echo "The recorded upstream revision is current."
+          else
+            echo "update_available=true" >> "$GITHUB_OUTPUT"
+            echo "Upstream changed; manual review is required."
+          fi
+
+      - name: Open or update the manual-review issue
+        if: steps.upstream.outputs.update_available == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEWED: ${{ steps.upstream.outputs.reviewed }}
+          LATEST: ${{ steps.upstream.outputs.latest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          title="Review upstream Slipstream changes"
+          compare="https://github.com/yhecht/slipstream/compare/${REVIEWED}...${LATEST}"
+          body="The original Slipstream project has changed since the last manually reviewed revision.
+
+- Reviewed revision: \`${REVIEWED}\`
+- Current upstream revision: \`${LATEST}\`
+- Upstream comparison: ${compare}
+- Workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+The public Slipstream Extended repository intentionally has independent Git history. Do not merge upstream history automatically. Inspect the comparison, adapt or cherry-pick only wanted changes, run the complete test suite, and update \`.upstream-version\` to the reviewed full SHA in the same pull request."
+
+          issue="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "${title} in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$issue" ]; then
+            gh issue edit "$issue" --repo "$GITHUB_REPOSITORY" \
+              --title "$title" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
