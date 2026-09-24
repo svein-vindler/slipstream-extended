@@ -1,4 +1,9 @@
-from scripts.public_release_check import audit_paths, audit_public_metadata, audit_text
+from scripts.public_release_check import (
+    _contains_private_slipstream_reference,
+    audit_paths,
+    audit_public_metadata,
+    audit_text,
+)
 
 
 def test_public_release_paths_accept_templates_and_source_files():
@@ -63,7 +68,8 @@ def test_public_metadata_accepts_safe_upstream_workflow(tmp_path):
     (tmp_path / ".github/workflows").mkdir(parents=True)
     (tmp_path / ".upstream-version").write_text("a" * 40, encoding="utf-8")
     (tmp_path / ".github/workflows/upstream-sync.yml").write_text(
-        "issues: write\ngit ls-remote upstream refs/heads/main\n.upstream-version\n",
+        "issues: write\ngit ls-remote https://github.com/yhecht/slipstream.git "
+        "refs/heads/main\n.upstream-version\n",
         encoding="utf-8",
     )
     for relative in (
@@ -98,8 +104,17 @@ def test_public_metadata_rejects_merge_and_private_repo_reference(tmp_path):
         ".upstream-version\ngit merge upstream/main\n",
         encoding="utf-8",
     )
+    private_owner = "svein" + "-" + "vindler"
+    private_https_reference = "/".join(
+        ("https://github.com", private_owner, "slipstream", "actions")
+    )
+    private_ssh_reference = "".join(
+        ("git@github.com:", private_owner, "/", "slipstream", ".git")
+    )
+    assert _contains_private_slipstream_reference(private_https_reference)
+    assert _contains_private_slipstream_reference(private_ssh_reference)
     (tmp_path / "README.md").write_text(
-        "https://github.com/svein-vindler/slipstream/actions", encoding="utf-8"
+        f"{private_https_reference}\n{private_ssh_reference}\n", encoding="utf-8"
     )
 
     violations = audit_public_metadata(
@@ -107,4 +122,16 @@ def test_public_metadata_rejects_merge_and_private_repo_reference(tmp_path):
     )
 
     assert any("must not run git merge" in item for item in violations)
-    assert any("old private repository reference" in item for item in violations)
+    assert any("private Slipstream repository reference" in item for item in violations)
+
+
+def test_public_metadata_allows_extended_repository_name():
+    assert not _contains_private_slipstream_reference(
+        "git@github.com:example/slipstream-extended.git"
+    )
+
+
+def test_public_metadata_allows_generic_slipstream_test_fixture():
+    assert not _contains_private_slipstream_reference(
+        "https://github.com/owner/slipstream/actions/runs/123"
+    )

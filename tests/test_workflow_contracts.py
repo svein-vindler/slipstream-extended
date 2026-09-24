@@ -22,3 +22,15 @@ def test_upstream_check_is_notification_only_for_independent_history():
     assert "issues: write" in workflow
     assert "git merge" not in workflow
     assert "git push" not in workflow
+
+
+def test_upstream_issue_body_stays_inside_yaml_run_literal():
+    workflow = (ROOT / ".github/workflows/upstream-sync.yml").read_text(encoding="utf-8")
+    lines = workflow.splitlines()
+    body_start = lines.index('          body="$(cat <<EOF')
+    body_end = lines.index('          )"', body_start)
+
+    assert all(
+        not line.strip() or line.startswith("          ")
+        for line in lines[body_start : body_end + 1]
+    )

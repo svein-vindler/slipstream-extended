@@ -58,16 +58,51 @@ REQUIRED_PUBLIC_FILES = {
     "docs/PUBLISHING.md",
 }
 
-OLD_PRIVATE_REPOSITORY_REFERENCES = {
-    "https://github.com/svein-vindler/slipstream/",
-    "git@github.com:svein-vindler/slipstream.git",
-}
+PRIVATE_SLIPSTREAM_OWNER = "svein" + "-" + "vindler"
+GITHUB_SLIPSTREAM_REFERENCE_PATTERNS = (
+    re.compile(
+        r"https://github\.com/(?P<owner>[a-z0-9_.-]+)/"
+        r"(?P<repo>slipstream)(?:/|\.git\b|$)",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r"git@github\.com:(?P<owner>[a-z0-9_.-]+)/"
+        r"(?P<repo>slipstream)(?:\.git)?(?=$|[\s\"'<>),;])",
+        flags=re.IGNORECASE,
+    ),
+)
 
-PUBLIC_TEXT_SUFFIXES = {".md", ".yml", ".yaml", ".json", ".jsonc", ".toml"}
+PUBLIC_TEXT_SUFFIXES = {
+    ".cjs",
+    ".example",
+    ".in",
+    ".js",
+    ".json",
+    ".jsonc",
+    ".md",
+    ".mjs",
+    ".ps1",
+    ".py",
+    ".sh",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
 
 
 def _normalize(path: str) -> PurePosixPath:
     return PurePosixPath(path.replace("\\", "/"))
+
+
+def _contains_private_slipstream_reference(text: str) -> bool:
+    for pattern in GITHUB_SLIPSTREAM_REFERENCE_PATTERNS:
+        for match in pattern.finditer(text):
+            if match.group("owner").lower() == PRIVATE_SLIPSTREAM_OWNER:
+                return True
+    return False
 
 
 def audit_paths(paths: list[str]) -> list[str]:
@@ -146,12 +181,10 @@ def audit_public_metadata(root: Path, paths: list[str]) -> list[str]:
         if path.suffix.lower() not in PUBLIC_TEXT_SUFFIXES:
             continue
         text = (root / path).read_text(encoding="utf-8")
-        for old_reference in OLD_PRIVATE_REPOSITORY_REFERENCES:
-            if old_reference in text:
-                violations.append(
-                    f"{relative_path}: contains old private repository reference"
-                )
-                break
+        if _contains_private_slipstream_reference(text):
+            violations.append(
+                f"{relative_path}: contains private Slipstream repository reference"
+            )
 
     return violations
 

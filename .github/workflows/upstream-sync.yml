@@ -63,14 +63,17 @@ jobs:
 
           title="Review upstream Slipstream changes"
           compare="https://github.com/yhecht/slipstream/compare/${REVIEWED}...${LATEST}"
-          body="The original Slipstream project has changed since the last manually reviewed revision.
+          body="$(cat <<EOF
+          The original Slipstream project has changed since the last manually reviewed revision.
 
-- Reviewed revision: \`${REVIEWED}\`
-- Current upstream revision: \`${LATEST}\`
-- Upstream comparison: ${compare}
-- Workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Reviewed revision: \`${REVIEWED}\`
+          - Current upstream revision: \`${LATEST}\`
+          - Upstream comparison: ${compare}
+          - Workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 
-The public Slipstream Extended repository intentionally has independent Git history. Do not merge upstream history automatically. Inspect the comparison, adapt or cherry-pick only wanted changes, run the complete test suite, and update \`.upstream-version\` to the reviewed full SHA in the same pull request."
+          The public Slipstream Extended repository intentionally has independent Git history. Do not merge upstream history automatically. Inspect the comparison, adapt or cherry-pick only wanted changes, run the complete test suite, and update \`.upstream-version\` to the reviewed full SHA in the same pull request.
+          EOF
+          )"
 
           issue="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
             --search "${title} in:title" --json number --jq '.[0].number // empty')"
