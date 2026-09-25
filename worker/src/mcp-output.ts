@@ -154,6 +154,7 @@ const historyStatusCounts = z.object({
 });
 const hrvHistoryDay = z.object({
   ...nightContextFields,
+  night_context_stream: z.enum(["hrv", "sleep"]).nullable(),
   date: z.string(),
   status: historyStatus,
   index_state: historyIndexState.optional(),

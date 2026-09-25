@@ -174,8 +174,30 @@ describe("health history summaries", () => {
       new Map(), "Europe/Oslo");
     expect(result.days[0]).toMatchObject({
       date: "2026-09-26", wake_date: "2026-09-26", night_of: "2026-09-25",
-      sleep_start_weekday_local: "Friday",
+      sleep_start_weekday_local: "Friday", night_context_stream: "hrv",
     });
+  });
+
+  it("borrows matching sleep local time when an available HRV summary lacks its own", () => {
+    const day = "2026-07-10";
+    const index = { ...hrvIndex, month: "2026-07", days: [{
+      date: day, status: "available", garmin: { last_night_avg_ms: 45 },
+    }] };
+    const sleep = new Map([[day, {
+      date: day, status: "available",
+      sleep_start_gmt: Date.parse("2026-07-09T15:25:00Z"),
+      sleep_end_gmt: Date.parse("2026-07-09T22:41:00Z"),
+      sleep_start_garmin_local: Date.parse("2026-07-10T00:25:00Z"),
+      sleep_end_garmin_local: Date.parse("2026-07-10T07:41:00Z"),
+    }]]);
+    const result = buildHrvHistory([index], [day], "daily",
+      new Map(), "Europe/Oslo", sleep);
+    expect(result.days[0]).toMatchObject({
+      date: day, night_of: day, sleep_start_local: "2026-07-10T00:25:00+09:00",
+      timezone: null, local_time_source: "garmin_local", night_context_stream: "sleep",
+      garmin: { last_night_avg_ms: 45 },
+    });
+    expect(result.days[0]).not.toHaveProperty("sleep_start_garmin_local");
   });
 
   it("groups a travel night by Garmin local day in compact weekly output", () => {

@@ -71,5 +71,7 @@ describe("MCP structured outputs", () => {
     }
     expect(JSON.stringify(z.toJSONSchema(outputSchemas.sleep_history)))
       .toContain('"by_night_of_weekday"');
+    expect(JSON.stringify(z.toJSONSchema(outputSchemas.hrv_history)))
+      .toContain('"night_context_stream"');
   });
 });

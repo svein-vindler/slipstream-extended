@@ -137,7 +137,8 @@ export function nightContext(
     sleep_end_date_local: endLocal?.date ?? null,
     sleep_start_weekday_local: startLocal?.weekday ?? null,
     sleep_end_weekday_local: endLocal?.weekday ?? null,
-    timezone: useGarmin ? zoneMatchesGarmin ? timezone : null : timezone,
+    // An offset matching the configured zone does not identify the travel location.
+    timezone: useGarmin ? null : timezone,
     local_time_source: useGarmin ? "garmin_local"
       : configuredStart ? "configured_timezone" : "unavailable",
   };

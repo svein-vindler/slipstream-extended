@@ -695,7 +695,7 @@ class FitnessService {
     });
 
     server.registerTool("hrv_history", {
-      description: "Analyze overnight HRV by morning wake-date. Daily rows expose local night_of when configured. Auto returns daily summaries for up to 31 days and compact wake-date weekly summaries for longer ranges (up to 366 days); use daily chunks for night-lag analysis. Full readings are limited to 7 days.",
+      description: "Analyze overnight HRV by morning wake-date. Daily rows use matching sleep's Garmin local night when HRV lacks its own timestamps, with night_context_stream showing provenance. Auto returns daily summaries for up to 31 days and compact wake-date weekly summaries for longer ranges (up to 366 days); use daily chunks for night-lag analysis. Full readings are limited to 7 days.",
       inputSchema: z.object({
         start_date: exactDate,
         end_date: exactDate,
@@ -740,9 +740,30 @@ class FitnessService {
         if (result.confirmedMissing) confirmedMissingDates.push(day);
         if (result.sourceRead) canonicalObjectsRead += 1;
       }
+      const matchingSleep = new Map<string, Record<string, unknown>>();
+      let sleepContextObjectsRead = 0;
+      if (request.granularity === "daily") {
+        for (const day of request.dates) {
+          const row = overrides.get(day) ?? indexedRows.get(day);
+          if (row?.status !== "available") continue;
+          const own = nightContext(day, row.sleep_start_gmt, row.sleep_end_gmt,
+            validatedHealthTimezone(this.env.HEALTH_TIMEZONE),
+            row.sleep_start_garmin_local, row.sleep_end_garmin_local);
+          if (own.local_time_source === "garmin_local") continue;
+          try {
+            const stored = await this.getR2Json(sleepObjectKeys(day));
+            if (!stored) continue;
+            sleepContextObjectsRead += 1;
+            matchingSleep.set(day, summarizeSleepPayload(day, stored.data));
+          } catch {
+            // An invalid matching sleep object must not hide available HRV.
+          }
+        }
+      }
       const history = buildHrvHistory(
         indexes, request.dates, request.granularity, overrides,
         validatedHealthTimezone(this.env.HEALTH_TIMEZONE),
+        matchingSleep,
       );
       return this.text({
         start_date: args.start_date,
@@ -751,7 +772,7 @@ class FitnessService {
         granularity: request.granularity,
         detail_level: args.detail_level,
         ...history,
-        source_objects_read: keys.length + canonicalObjectsRead,
+        source_objects_read: keys.length + canonicalObjectsRead + sleepContextObjectsRead,
         index_consistency: {
           mode: request.granularity === "daily" ? "all_requested_days" : "recent_7_days",
           checked_dates: probeDates.length,
