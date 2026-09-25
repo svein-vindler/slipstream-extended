@@ -169,8 +169,10 @@ First inspect the plan, then apply small batches with a local backup directory:
   --apply --backup-dir .granular/night-local-backup --max-objects 20
 ```
 
-Re-run the apply command until `pending` is zero or remaining dates are reported
-as lacking valid Garmin local timestamps. The job preserves the original bytes
+Re-run the apply command until `pending` is zero. Dates for which Garmin lacks
+a valid local window are recorded in the ignored backup directory and excluded
+from later batches; use `--retry-skipped` to probe them again if Garmin changes.
+The job preserves the original bytes
 in the ignored backup directory before each overwrite and updates only affected
 monthly indexes. If an index update is interrupted after canonical writes, use
 `--sync-index` with the same date and environment files. The date file and

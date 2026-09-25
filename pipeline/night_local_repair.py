@@ -84,13 +84,44 @@ def has_local_window(payload: dict[str, Any]) -> bool:
     ))
 
 
-def plan(store: R2Store, days: list[str]) -> tuple[list[tuple[str, str]], dict[str, int]]:
+def _load_skips(path: Path) -> dict[tuple[str, str], str]:
+    if not path.exists():
+        return {}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, list):
+        raise ValueError("local skipped-night state must contain a list")
+    skips = {}
+    for item in value:
+        if not isinstance(item, dict) or item.get("stream") not in STREAMS_TO_REPAIR:
+            raise ValueError("local skipped-night state is invalid")
+        day = item.get("date")
+        if not isinstance(day, str) or date.fromisoformat(day).isoformat() != day:
+            raise ValueError("local skipped-night date is invalid")
+        skips[(item["stream"], day)] = str(item.get("reason") or "unavailable")
+    return skips
+
+
+def _save_skips(path: Path, skips: dict[tuple[str, str], str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [{"stream": stream, "date": day, "reason": reason}
+            for (stream, day), reason in sorted(skips.items())]
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def plan(
+    store: R2Store, days: list[str], *,
+    skipped: dict[tuple[str, str], str] | None = None,
+) -> tuple[list[tuple[str, str]], dict[str, int]]:
+    skipped = skipped or {}
     existing = {
         "sleep": store.list_keys("health/sleep/v1/"),
         "hrv": store.list_keys("health/hrv/"),
     }
     counts = {"target_days": len(days), "existing_sleep": 0, "existing_hrv": 0,
-              "already_local": 0, "missing_objects": 0}
+              "already_local": 0, "unavailable_from_garmin": 0,
+              "missing_objects": 0}
     pending: list[tuple[str, str]] = []
     for day in days:
         for stream in STREAMS_TO_REPAIR:
@@ -102,6 +133,8 @@ def plan(store: R2Store, days: list[str]) -> tuple[list[tuple[str, str]], dict[s
             payload = _json_object(store.get(key))
             if has_local_window(payload):
                 counts["already_local"] += 1
+            elif (stream, day) in skipped:
+                counts["unavailable_from_garmin"] += 1
             else:
                 pending.append((stream, day))
     return pending, counts
@@ -164,12 +197,15 @@ def apply(
     backup_dir: Path,
     max_objects: int = 20,
     request_pause: float = 0.25,
+    skipped_state: dict[tuple[str, str], str] | None = None,
 ) -> dict[str, Any]:
     if not 1 <= max_objects <= MAX_APPLY_OBJECTS:
         raise ValueError(f"max_objects must be between 1 and {MAX_APPLY_OBJECTS}")
     if not 0 <= request_pause <= 10:
         raise ValueError("request_pause must be between 0 and 10")
     backup_dir.mkdir(parents=True, exist_ok=True)
+    state_path = backup_dir / "skipped.json"
+    skipped_state = skipped_state if skipped_state is not None else _load_skips(state_path)
     completed: dict[str, list[str]] = {"sleep": [], "hrv": []}
     skipped: list[dict[str, str]] = []
     try:
@@ -184,6 +220,8 @@ def apply(
                 if is_job_stopping_error(exc):
                     raise RuntimeError("Garmin service or authentication error; batch stopped") from exc
                 skipped.append({"stream": stream, "date": day, "reason": str(exc)})
+                skipped_state[(stream, day)] = str(exc)
+                _save_skips(state_path, skipped_state)
                 if request_pause:
                     time.sleep(request_pause)
                 continue
@@ -195,6 +233,9 @@ def apply(
                     file.write(previous)
             store.put(key, gzip_json(payload), "application/json", encoding="gzip")
             completed[stream].append(day)
+            if (stream, day) in skipped_state:
+                skipped_state.pop((stream, day))
+                _save_skips(state_path, skipped_state)
             if request_pause:
                 time.sleep(request_pause)
     finally:
@@ -215,6 +256,8 @@ def main() -> None:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--sync-index", action="store_true",
                         help="Reconcile months after an interrupted run without refetching")
+    parser.add_argument("--retry-skipped", action="store_true",
+                        help="Retry dates previously lacking valid Garmin local times")
     parser.add_argument("--backup-dir", type=Path)
     parser.add_argument("--max-objects", type=int, default=20)
     parser.add_argument("--request-pause", type=float, default=0.25)
@@ -235,7 +278,8 @@ def main() -> None:
         load_env_file(args.env_file)
     days = dates_from_file(args.dates_file, margin_days=args.margin_days)
     store = R2Store()
-    pending, counts = plan(store, days)
+    skipped_state = _load_skips(args.backup_dir / "skipped.json") if args.backup_dir else {}
+    pending, counts = plan(store, days, skipped={} if args.retry_skipped else skipped_state)
     mode = "apply" if args.apply else "sync_index" if args.sync_index else "dry_run"
     print(json.dumps({"mode": mode,
                       "bucket": store.bucket, "counts": counts,
@@ -243,7 +287,8 @@ def main() -> None:
                      indent=2))
     if args.apply and pending:
         result = apply(store, _login(), pending, backup_dir=args.backup_dir,
-                       max_objects=args.max_objects, request_pause=args.request_pause)
+                       max_objects=args.max_objects, request_pause=args.request_pause,
+                       skipped_state=skipped_state)
         print(json.dumps(result, indent=2))
     elif args.sync_index:
         synced = {}
