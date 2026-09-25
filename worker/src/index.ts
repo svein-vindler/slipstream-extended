@@ -583,7 +583,7 @@ class FitnessService {
     });
 
     server.registerTool("daily_health", {
-      description: "List daily sleep, HRV, pulse, Body Battery, stress, steps, respiration and weight summaries. For sleep/overnight HRV, date is the morning wake-date; sleep_night and hrv_night expose local night_of when HEALTH_TIMEZONE and timestamps are available.",
+      description: "List daily health summaries. For sleep/overnight HRV, date is the morning wake-date; sleep_night and hrv_night prefer Garmin's per-night local timestamps, with HEALTH_TIMEZONE as fallback.",
       inputSchema: z.object({
         start_date: dateRange, end_date: dateRange,
         limit: z.number().int().min(1).max(366).default(30),
@@ -598,12 +598,12 @@ class FitnessService {
       const displayed = rows.slice(0, args.limit);
       const timezone = validatedHealthTimezone(this.env.HEALTH_TIMEZONE);
       const contextMonths = new Set(displayed.map((row) => row.date.slice(0, 7)));
-      const contexts = timezone ? await Promise.allSettled([
+      const contexts = await Promise.allSettled([
         this.nightRowsForHealth("sleep", displayed.filter((row) => row.sleepSeconds != null)
           .map((row) => row.date)),
         this.nightRowsForHealth("hrv", displayed.filter((row) => row.hrvLastNightAvg != null)
           .map((row) => row.date)),
-      ]) : null;
+      ]);
       const emptyContext = () => new Map<string, Record<string, unknown>>();
       const sleepRows = contexts?.[0].status === "fulfilled" ? contexts[0].value : emptyContext();
       const hrvRows = contexts?.[1].status === "fulfilled" ? contexts[1].value : emptyContext();
@@ -614,14 +614,19 @@ class FitnessService {
         days: displayed.map((row) => {
           const sleep = sleepRows.get(row.date);
           const hrv = hrvRows.get(row.date);
-          const hrvSource = hrv?.sleep_start_gmt != null ? hrv : sleep;
+          const hrvSource = hrv?.sleep_start_garmin_local != null ? hrv
+            : sleep?.sleep_start_garmin_local != null ? sleep
+              : hrv?.sleep_start_gmt != null ? hrv : sleep;
           return {
             ...toHealthSummary(row),
             sleep_night: row.sleepSeconds != null
-              ? nightContext(row.date, sleep?.sleep_start_gmt, sleep?.sleep_end_gmt, timezone)
+              ? nightContext(row.date, sleep?.sleep_start_gmt, sleep?.sleep_end_gmt, timezone,
+                sleep?.sleep_start_garmin_local, sleep?.sleep_end_garmin_local)
               : null,
             hrv_night: row.hrvLastNightAvg != null
-              ? nightContext(row.date, hrvSource?.sleep_start_gmt, hrvSource?.sleep_end_gmt, timezone)
+              ? nightContext(row.date, hrvSource?.sleep_start_gmt, hrvSource?.sleep_end_gmt,
+                timezone, hrvSource?.sleep_start_garmin_local,
+                hrvSource?.sleep_end_garmin_local)
               : null,
           };
         }) });
@@ -649,7 +654,7 @@ class FitnessService {
     });
 
     server.registerTool("hrv_curve", {
-      description: "Read the detailed overnight Garmin HRV curve for one wake-date. Returns timestamps, HRV values and local night_of when configured, without GPS or raw device payloads.",
+      description: "Read detailed overnight Garmin HRV for one wake-date. Local night_of prefers Garmin's own timestamps and otherwise uses configured HEALTH_TIMEZONE, without GPS or raw device payloads.",
       inputSchema: z.object({ date: exactDate }),
       outputSchema: outputSchemas.hrv_curve,
       annotations: PRIVATE_READ_TOOL_ANNOTATIONS,
@@ -679,7 +684,8 @@ class FitnessService {
         available: true,
         date: payload.date ?? args.date,
         ...nightContext(typeof payload.date === "string" ? payload.date : args.date, payload.sleep_start_gmt,
-          payload.sleep_end_gmt, validatedHealthTimezone(this.env.HEALTH_TIMEZONE)),
+          payload.sleep_end_gmt, validatedHealthTimezone(this.env.HEALTH_TIMEZONE),
+          payload.sleep_start_garmin_local, payload.sleep_end_garmin_local),
         sleep_start_gmt: payload.sleep_start_gmt ?? null,
         sleep_end_gmt: payload.sleep_end_gmt ?? null,
         summary: payload.summary ?? null,
@@ -760,7 +766,7 @@ class FitnessService {
     });
 
     server.registerTool("sleep_detail", {
-      description: "Read detailed Garmin sleep for one morning wake-date. Local night_of is the sleep-start date when HEALTH_TIMEZONE is configured. Includes window, stages, score, oxygen, respiration and stress without raw Garmin payload.",
+      description: "Read detailed Garmin sleep for one morning wake-date. Local night_of is the sleep-start date, using Garmin's local timestamps when available and HEALTH_TIMEZONE only as fallback. Includes window, stages and score without raw Garmin payload.",
       inputSchema: z.object({ date: exactDate }),
       outputSchema: outputSchemas.sleep_detail,
       annotations: {
@@ -794,7 +800,8 @@ class FitnessService {
         date: typeof payload.date === "string" ? payload.date : args.date,
         ...nightContext(typeof payload.date === "string" ? payload.date : args.date,
           payload.sleep_start_gmt, payload.sleep_end_gmt,
-          validatedHealthTimezone(this.env.HEALTH_TIMEZONE)),
+          validatedHealthTimezone(this.env.HEALTH_TIMEZONE),
+          payload.sleep_start_garmin_local, payload.sleep_end_garmin_local),
         sleep_start_gmt: payload.sleep_start_gmt ?? null,
         sleep_end_gmt: payload.sleep_end_gmt ?? null,
         confirmed: typeof payload.confirmed === "boolean" ? payload.confirmed : null,

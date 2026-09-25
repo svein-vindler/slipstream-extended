@@ -216,16 +216,17 @@ For `MCP_HOSTNAME`, enter only the hostname, for example
 value at each prompt. Do not store installation-specific values in
 `wrangler.jsonc`.
 
-To get correct local sleep-night dates, set your IANA timezone once (for
-example `Europe/Oslo`, not `UTC+1`):
+Set your usual IANA timezone once (for example `Europe/Oslo`, not `UTC+1`)
+as a fallback for older sleep/HRV records without Garmin local times:
 
 ```bash
 npx wrangler secret put HEALTH_TIMEZONE
 ```
 
 Enter your own timezone at the prompt. Wrangler deploys a new Worker version
-when the secret is saved. This value is optional, but without it the local
-`night_of`/weekday fields remain `null` rather than guessing. The existing
+when the secret is saved. This value is optional; new Garmin imports can
+provide local `night_of`/weekday fields even without it. Older records without
+Garmin local times remain `null` rather than guessing. The existing
 `date` in sleep and nightly HRV responses always means the morning/wake-date.
 
 The MCP server is read-only by default. If you want ChatGPT to save immutable

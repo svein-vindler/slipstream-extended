@@ -28,38 +28,52 @@ nightly HRV. It is unchanged for compatibility. A sleep row dated `2026-09-24`
 can therefore describe sleep starting on the evening of `2026-09-23`. Do not
 classify Friday or Saturday nights using `date`.
 
-Configure the Worker's optional `HEALTH_TIMEZONE` with the user's IANA zone
-(for example `Europe/Oslo`). The Worker then derives these fields at read time
-from each stored UTC sleep window, without rewriting R2 data:
+New Garmin imports preserve both UTC instants and Garmin's per-night local
+wall-clock timestamps. The Worker prefers that recorded local time, including
+on trips. Set the optional `HEALTH_TIMEZONE` to the user's usual IANA zone
+(for example `Europe/Oslo`) as a fallback for older records without Garmin
+local timestamps:
 
 - `wake_date` is the explicit alias of the existing `date`.
-- `night_of` and `sleep_start_date_local` are the date on which sleep started
-  in the configured zone. Use `night_of` for weekday and weekend grouping.
+- `night_of` and `sleep_start_date_local` are the local date on which sleep
+  started. Use `night_of` for weekday and weekend grouping. A post-midnight
+  sleep start is classified on that new calendar date.
 - `sleep_start_local`, `sleep_end_local` and `sleep_midpoint_local` are ISO local
   timestamps with their actual UTC offsets. The offsets are computed separately
   at each instant, so daylight-saving transitions are handled correctly.
-- `sleep_end_date_local`, `sleep_start_weekday_local`,
-  `sleep_end_weekday_local` and `timezone` make the calendar meaning explicit.
-  Weekday names are English Monday–Sunday.
+- `sleep_end_date_local`, `sleep_start_weekday_local` and
+  `sleep_end_weekday_local` make the calendar meaning explicit. Weekday names
+  are English Monday–Sunday.
+- `local_time_source` is `garmin_local`, `configured_timezone` or
+  `unavailable`. Garmin gives the actual local offset for each sleep-window
+  endpoint, but not necessarily an IANA timezone such as `Asia/Tokyo`.
+  Per-night `timezone` is therefore `null` if Garmin's offset differs from
+  the configured reference zone. The ISO local timestamps still carry the
+  correct offset. The top-level history `timezone` is only the configured
+  fallback zone, not a claim about every night in the range.
 
 The same fields appear in `sleep_detail`, `hrv_curve`, and daily rows of
 `sleep_history` and `hrv_history`. Nightly HRV uses the same wake-date join key;
 its `night_of` is populated only when its own sleep-start timestamp exists.
 `daily_health` keeps `date` as its general health-calendar date and adds
 `sleep_night` and `hrv_night` objects where those metrics exist. For its HRV
-context, the matching sleep window is used when the HRV record lacks one.
+context, the matching sleep window is preferred when the HRV record lacks
+Garmin local times, even if its UTC window is present.
 This tool bounds its extra lookups to 13 index months and read-through of three
 recent dates per stream; `night_context_limited` signals when a sparse query
 spans more months. `night_context_unavailable` reports a context lookup error
 without hiding the ordinary daily summary. Use the dedicated history tools for
 longer night analyses.
 
-If the timezone is unset or invalid, `timezone` and derived local fields are
-`null`; the Worker never guesses a local date or uses a fixed UTC offset. If a
-stored night lacks a usable start timestamp, `night_of` remains `null` even
-when the zone is configured. `wake_date` remains available. A single configured
-zone represents the user's chosen reference zone; it cannot reconstruct a
-different travel-time zone unless that zone is supplied separately in future.
+If Garmin local times are absent, the Worker uses the configured IANA zone
+with DST rules. If both are absent, derived local fields are `null`; it never
+guesses a local date. If a stored night lacks a usable start timestamp,
+`night_of` remains `null` even when the zone is configured. `wake_date`
+remains available. If Garmin's start and end offsets differ and no matching
+IANA zone is known, `sleep_midpoint_local` is `null` rather than guessing the
+transition instant. Previously stored nights contain only UTC fields, so
+travel nights need a targeted refetch from Garmin (or a retained raw export)
+to gain correct local context. The ordinary backfill does not overwrite them.
 
 `sleep_history` includes `by_night_of_weekday` even for compact weekly
 requests. Each of the seven rows gives night counts, sleep-duration/score

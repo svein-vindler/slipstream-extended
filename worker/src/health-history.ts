@@ -188,6 +188,8 @@ export function summarizeHrvPayload(day: string, value: unknown): Record<string,
     detailed_readings_available: values.length > 0,
     sleep_start_gmt: payload.sleep_start_gmt ?? null,
     sleep_end_gmt: payload.sleep_end_gmt ?? null,
+    sleep_start_garmin_local: payload.sleep_start_garmin_local ?? null,
+    sleep_end_garmin_local: payload.sleep_end_garmin_local ?? null,
     garmin,
     derived: {
       valid_reading_count: values.length,
@@ -251,6 +253,8 @@ export function summarizeSleepPayload(day: string, value: unknown): Record<strin
     status: "available",
     sleep_start_gmt: payload.sleep_start_gmt ?? null,
     sleep_end_gmt: payload.sleep_end_gmt ?? null,
+    sleep_start_garmin_local: payload.sleep_start_garmin_local ?? null,
+    sleep_end_garmin_local: payload.sleep_end_garmin_local ?? null,
     confirmed: typeof payload.confirmed === "boolean" ? payload.confirmed : null,
     summary: allowedSummary,
     score_breakdown: scoreBreakdown,
@@ -400,9 +404,11 @@ function statusCounts(dates: string[], rows: Map<string, Record<string, unknown>
 
 function withNightContext(row: Record<string, unknown>, timezone: string | null) {
   const day = typeof row.date === "string" ? row.date : "";
+  const { sleep_start_garmin_local, sleep_end_garmin_local, ...publicRow } = row;
   return {
-    ...row,
-    ...nightContext(day, row.sleep_start_gmt, row.sleep_end_gmt, timezone),
+    ...publicRow,
+    ...nightContext(day, row.sleep_start_gmt, row.sleep_end_gmt, timezone,
+      sleep_start_garmin_local, sleep_end_garmin_local),
   };
 }
 

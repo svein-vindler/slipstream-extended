@@ -127,6 +127,7 @@ const nightContextFields = {
   sleep_start_weekday_local: nullableString,
   sleep_end_weekday_local: nullableString,
   timezone: nullableString,
+  local_time_source: z.enum(["garmin_local", "configured_timezone", "unavailable"]),
 };
 const nightContextSchema = z.object(nightContextFields);
 const healthDayWithNightContext = healthDay.extend({

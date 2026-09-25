@@ -746,6 +746,8 @@ def test_normalize_and_compress_hrv_readings():
     payload = normalize_hrv("2026-09-20", {
         "sleepStartTimestampGMT": "2026-09-19T22:00:00Z",
         "sleepEndTimestampGMT": "2026-09-20T06:00:00Z",
+        "sleepStartTimestampLocal": "2026-09-20T00:00:00.0",
+        "sleepEndTimestampLocal": "2026-09-20T08:00:00.0",
         "hrvSummary": {"lastNightAvg": 42},
         "hrvReadings": [
             {"readingTimeGMT": "2026-09-20T01:00:00Z", "hrvValue": 39},
@@ -753,6 +755,8 @@ def test_normalize_and_compress_hrv_readings():
         ],
     })
     assert payload["reading_count"] == 2
+    assert payload["sleep_start_garmin_local"] == "2026-09-20T00:00:00.0"
+    assert payload["sleep_end_garmin_local"] == "2026-09-20T08:00:00.0"
     assert payload["readings"][0]["hrv_ms"] == 39
     assert json.loads(gzip.decompress(gzip_json(payload)))["summary"]["lastNightAvg"] == 42
 
@@ -1316,6 +1320,8 @@ def test_normalize_sleep_detail_keeps_stages_and_score_components():
             "remSleepSeconds": 6000,
             "sleepStartTimestampGMT": 1789941600000,
             "sleepEndTimestampGMT": 1789966800000,
+            "sleepStartTimestampLocal": 1789948800000,
+            "sleepEndTimestampLocal": 1789974000000,
             "sleepWindowConfirmed": 1,
             "sleepScores": {
                 "overall": {"value": 84, "qualifierKey": "GOOD"},
@@ -1329,6 +1335,8 @@ def test_normalize_sleep_detail_keeps_stages_and_score_components():
     })
 
     assert result["summary"]["sleep_score"] == 84
+    assert result["sleep_start_garmin_local"] == 1789948800000
+    assert result["sleep_end_garmin_local"] == 1789974000000
     assert result["confirmed"] is True
     assert result["stage_count"] == 2
     assert result["score_breakdown"]["duration"] == {
@@ -2128,6 +2136,8 @@ def test_health_history_hrv_summary_derives_distribution_and_slope():
     result = summarize_hrv_payload("2026-09-20", {
         "sleep_start_gmt": "2026-09-19T22:00:00Z",
         "sleep_end_gmt": "2026-09-20T06:00:00Z",
+        "sleep_start_garmin_local": "2026-09-20T00:00:00.0",
+        "sleep_end_garmin_local": "2026-09-20T08:00:00.0",
         "summary": {
             "lastNightAvg": 42,
             "lastNight5MinHigh": 61,
@@ -2143,6 +2153,8 @@ def test_health_history_hrv_summary_derives_distribution_and_slope():
     })
 
     assert result["status"] == "available"
+    assert result["sleep_start_garmin_local"] == "2026-09-20T00:00:00.0"
+    assert result["sleep_end_garmin_local"] == "2026-09-20T08:00:00.0"
     assert result["detailed_readings_available"] is True
     assert result["garmin"] == {
         "last_night_avg_ms": 42,
@@ -2196,6 +2208,7 @@ def test_health_history_month_index_is_incremental_and_gzip_compressed():
             self.objects = {
                 day_key: gzip_json({
                     "date": "2026-09-20",
+                    "sleep_start_garmin_local": "2026-09-20T00:00:00.0",
                     "summary": {"lastNightAvg": 42},
                     "readings": [{"timestamp": 1, "hrv_ms": 42}],
                 }),
@@ -2226,6 +2239,7 @@ def test_health_history_month_index_is_incremental_and_gzip_compressed():
     assert store.puts == [(key, "application/json", "gzip")]
     assert payload["builder_revision"] == 2
     assert payload["days"][0]["garmin"]["last_night_avg_ms"] == 42
+    assert payload["days"][0]["sleep_start_garmin_local"] == "2026-09-20T00:00:00.0"
 
     second = sync_health_history_stream("hrv", store=store)
     assert second["months_written"] == []
@@ -2238,6 +2252,7 @@ def test_health_history_sleep_index_does_not_copy_stage_timeline():
         def get(self, key):
             return gzip_json({
                 "date": "2026-09-20",
+                "sleep_start_garmin_local": 1789948800000,
                 "summary": {"sleep_seconds": 28800, "sleep_score": 85},
                 "score_breakdown": {
                     "duration": {"value": 90, "qualifier": "EXCELLENT"},
@@ -2254,4 +2269,5 @@ def test_health_history_sleep_index_does_not_copy_stage_timeline():
     )
 
     assert payload["days"][0]["stage_count"] == 1
+    assert payload["days"][0]["sleep_start_garmin_local"] == 1789948800000
     assert "stages" not in payload["days"][0]

@@ -67,6 +67,7 @@ describe("MCP structured outputs", () => {
       expect(schema).toContain('"wake_date"');
       expect(schema).toContain('"night_of"');
       expect(schema).toContain('"timezone"');
+      expect(schema).toContain('"local_time_source"');
     }
     expect(JSON.stringify(z.toJSONSchema(outputSchemas.sleep_history)))
       .toContain('"by_night_of_weekday"');

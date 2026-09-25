@@ -88,8 +88,8 @@ Example questions:
 More examples are in [Prompt ideas](docs/PROMPTS.md).
 See [HRV and sleep history](docs/HEALTH_HISTORY.md) for date-range behavior,
 local `night_of` versus wake-date semantics, monthly R2 indexes and the one-time
-index build. Set `HEALTH_TIMEZONE` during installation for DST-correct local
-sleep dates and weekday comparisons.
+index build. Garmin's recorded local times handle travel nights; set
+`HEALTH_TIMEZONE` during installation as a DST-correct fallback for older data.
 
 ## Keeping data fresh
 

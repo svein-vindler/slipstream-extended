@@ -106,6 +106,8 @@ def normalize_hrv(day: str, raw: Any) -> dict[str, Any]:
         "date": day,
         "sleep_start_gmt": source.get("sleepStartTimestampGMT"),
         "sleep_end_gmt": source.get("sleepEndTimestampGMT"),
+        "sleep_start_garmin_local": source.get("sleepStartTimestampLocal"),
+        "sleep_end_garmin_local": source.get("sleepEndTimestampLocal"),
         "summary": summary,
         "reading_count": len(normalized),
         "readings": normalized,
