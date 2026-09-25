@@ -149,6 +149,33 @@ It is safe to stop and rerun. Unchanged months are skipped. To build only recent
 months, add `--recent-months 3`. Users who prefer GitHub Actions can run
 **Build health history indexes** once with `stream=all` and `recent_months=0`.
 
+## Repair selected nights after travel
+
+Garmin can provide a local sleep window whose UTC offset differs from the
+configured home timezone. Existing canonical objects created before local
+timestamps were retained need a targeted re-fetch. Put only the affected
+**wake-date** ranges in an ignored `*.local` file, one `YYYY-MM-DD..YYYY-MM-DD`
+range per line. The command includes one adjacent day on each side by default
+to cover outbound and return nights. It never fetches a night without an
+existing canonical sleep or HRV object.
+
+First inspect the plan, then apply small batches with a local backup directory:
+
+```powershell
+.\.venv\Scripts\python.exe -m pipeline.night_local_repair `
+  --env-file .env.local-bootstrap --dates-file travel-nights.local
+.\.venv\Scripts\python.exe -m pipeline.night_local_repair `
+  --env-file .env.local-bootstrap --dates-file travel-nights.local `
+  --apply --backup-dir .granular/night-local-backup --max-objects 20
+```
+
+Re-run the apply command until `pending` is zero or remaining dates are reported
+as lacking valid Garmin local timestamps. The job preserves the original bytes
+in the ignored backup directory before each overwrite and updates only affected
+monthly indexes. If an index update is interrupted after canonical writes, use
+`--sync-index` with the same date and environment files. The date file and
+backups must stay local; never commit them or the `.env` credentials.
+
 ## Free-tier design
 
 The R2 safeguards remain 5 GiB and 100,000 objects, below Cloudflare's 10
