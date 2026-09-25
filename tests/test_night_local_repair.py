@@ -47,7 +47,20 @@ def test_plan_does_not_offer_absent_or_already_local_objects():
     pending, counts = repair.plan(store, ["2026-07-07", "2026-07-08"])
     assert pending == [("sleep", "2026-07-07")]
     assert counts == {"target_days": 2, "existing_sleep": 1, "existing_hrv": 1,
-                      "already_local": 1, "missing_objects": 2}
+                      "already_local": 1, "unavailable_from_garmin": 0,
+                      "missing_objects": 2}
+
+
+def test_plan_excludes_known_unavailable_but_can_retry():
+    day = "2026-07-07"
+    key = repair.object_key("hrv", day)
+    store = MemoryStore({key: b'{"date":"2026-07-07"}'})
+    skipped = {("hrv", day): "Garmin local window absent"}
+    pending, counts = repair.plan(store, [day], skipped=skipped)
+    assert pending == []
+    assert counts["unavailable_from_garmin"] == 1
+    pending_retry, _ = repair.plan(store, [day])
+    assert pending_retry == [("hrv", day)]
 
 
 def test_valid_local_window_accepts_travel_offset_and_rejects_bad_offset():
@@ -104,4 +117,6 @@ def test_apply_never_overwrites_when_garmin_local_window_is_missing(tmp_path):
                           request_pause=0)
     assert not store.writes
     assert result["skipped"][0]["reason"] == "Garmin local sleep window is absent or invalid"
-
+    assert repair._load_skips(tmp_path / "skipped.json") == {
+        ("sleep", day): "Garmin local sleep window is absent or invalid"
+    }
