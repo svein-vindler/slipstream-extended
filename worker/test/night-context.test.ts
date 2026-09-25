@@ -67,12 +67,12 @@ describe("local sleep-night context", () => {
       null, startLocal, endLocal).night_of).toBe("2026-06-12");
   });
 
-  it("uses Garmin ISO local times and keeps the configured zone when they agree", () => {
+  it("does not claim an IANA zone from Garmin's matching local offset", () => {
     expect(nightContext("2026-09-24", "2026-09-23T21:30:00Z",
       "2026-09-24T05:30:00Z", "Europe/Oslo",
       "2026-09-23T23:30:00.0", "2026-09-24T07:30:00.0")).toMatchObject({
         night_of: "2026-09-23",
-        timezone: "Europe/Oslo",
+        timezone: null,
         local_time_source: "garmin_local",
       });
   });

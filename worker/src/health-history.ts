@@ -412,6 +412,27 @@ function withNightContext(row: Record<string, unknown>, timezone: string | null)
   };
 }
 
+function withHrvNightContext(
+  row: Record<string, unknown>, timezone: string | null,
+  matchingSleep?: Record<string, unknown>,
+) {
+  const own = withNightContext(row, timezone);
+  if (row.status !== "available" || own.local_time_source === "garmin_local"
+    || matchingSleep?.status !== "available") {
+    return { ...own, night_context_stream: own.local_time_source === "unavailable" ? null : "hrv" };
+  }
+  const sleepContext = withNightContext(matchingSleep, timezone);
+  if (sleepContext.local_time_source !== "garmin_local") {
+    return { ...own, night_context_stream: own.local_time_source === "unavailable" ? null : "hrv" };
+  }
+  const context = nightContext(
+    typeof row.date === "string" ? row.date : "",
+    matchingSleep.sleep_start_gmt, matchingSleep.sleep_end_gmt, timezone,
+    matchingSleep.sleep_start_garmin_local, matchingSleep.sleep_end_garmin_local,
+  );
+  return { ...own, ...context, night_context_stream: "sleep" };
+}
+
 const NIGHT_WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
 function clockMinutes(timestamp: unknown): number | null {
@@ -478,6 +499,7 @@ export function buildHrvHistory(
   granularity: ResolvedGranularity,
   overrides: Map<string, Record<string, unknown>> = new Map(),
   timezone: string | null = null,
+  matchingSleep: Map<string, Record<string, unknown>> = new Map(),
 ) {
   const rows = indexedHistoryRows("hrv", indexes, dates);
   for (const [day, row] of overrides) rows.set(day, row);
@@ -485,9 +507,9 @@ export function buildHrvHistory(
   if (granularity === "daily") {
     return {
       ...status,
-      days: dates.map((day) => withNightContext(rows.get(day) ?? {
+      days: dates.map((day) => withHrvNightContext(rows.get(day) ?? {
         date: day, status: "not_stored", index_state: "index_only",
-      }, timezone)),
+      }, timezone, matchingSleep.get(day))),
       weeks: [],
     };
   }

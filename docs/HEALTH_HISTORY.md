@@ -47,14 +47,20 @@ local timestamps:
 - `local_time_source` is `garmin_local`, `configured_timezone` or
   `unavailable`. Garmin gives the actual local offset for each sleep-window
   endpoint, but not necessarily an IANA timezone such as `Asia/Tokyo`.
-  Per-night `timezone` is therefore `null` if Garmin's offset differs from
-  the configured reference zone. The ISO local timestamps still carry the
-  correct offset. The top-level history `timezone` is only the configured
-  fallback zone, not a claim about every night in the range.
+  Per-night `timezone` is therefore `null` whenever Garmin local time is used,
+  even if its offset happens to match the configured reference zone. The ISO
+  local timestamps still carry the correct offset. The top-level history
+  `timezone` is only the configured fallback zone, not a claim about every
+  night in the range.
 
 The same fields appear in `sleep_detail`, `hrv_curve`, and daily rows of
-`sleep_history` and `hrv_history`. Nightly HRV uses the same wake-date join key;
-its `night_of` is populated only when its own sleep-start timestamp exists.
+`sleep_history` and `hrv_history`. Nightly HRV uses the same wake-date join key.
+When an HRV record lacks its own usable Garmin local window, a daily
+`hrv_history` row uses the matching canonical sleep object's Garmin local
+window without changing the HRV metrics. `night_context_stream` identifies
+`sleep` or `hrv` as the source of the displayed night, or is `null` when no
+local context is available. This direct fallback is bounded to at most 31
+sleep objects for one daily request and is included in `source_objects_read`.
 `daily_health` keeps `date` as its general health-calendar date and adds
 `sleep_night` and `hrv_night` objects where those metrics exist. For its HRV
 context, the matching sleep window is preferred when the HRV record lacks
