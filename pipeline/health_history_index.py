@@ -194,6 +194,8 @@ def summarize_hrv_payload(day: str, payload: dict[str, Any]) -> dict[str, Any]:
         "detailed_readings_available": bool(values),
         "sleep_start_gmt": payload.get("sleep_start_gmt"),
         "sleep_end_gmt": payload.get("sleep_end_gmt"),
+        "sleep_start_garmin_local": payload.get("sleep_start_garmin_local"),
+        "sleep_end_garmin_local": payload.get("sleep_end_garmin_local"),
         "garmin": garmin,
         "derived": derived,
     }
@@ -240,6 +242,8 @@ def summarize_sleep_payload(day: str, payload: dict[str, Any]) -> dict[str, Any]
         "status": "available",
         "sleep_start_gmt": payload.get("sleep_start_gmt"),
         "sleep_end_gmt": payload.get("sleep_end_gmt"),
+        "sleep_start_garmin_local": payload.get("sleep_start_garmin_local"),
+        "sleep_end_garmin_local": payload.get("sleep_end_garmin_local"),
         "confirmed": payload.get("confirmed")
         if isinstance(payload.get("confirmed"), bool)
         else None,

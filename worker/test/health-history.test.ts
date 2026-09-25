@@ -178,6 +178,29 @@ describe("health history summaries", () => {
     });
   });
 
+  it("groups a travel night by Garmin local day in compact weekly output", () => {
+    const startGmt = Date.parse("2026-06-11T15:30:00Z");
+    const endGmt = Date.parse("2026-06-11T22:30:00Z");
+    const index = { ...sleepIndex, days: [{
+      date: "2026-06-12", status: "available",
+      sleep_start_gmt: startGmt,
+      sleep_end_gmt: endGmt,
+      sleep_start_garmin_local: Date.parse("2026-06-12T00:30:00Z"),
+      sleep_end_garmin_local: Date.parse("2026-06-12T07:30:00Z"),
+      summary: { sleep_seconds: 25200, sleep_score: 80 },
+    }] };
+    const weekly = buildSleepHistory([index], ["2026-06-12"],
+      "weekly", new Map(), "Europe/Oslo");
+    expect(weekly.by_night_of_weekday.find((row) => row.weekday === "Friday"))
+      .toMatchObject({ nights: 1, mean_sleep_midpoint_clock_local: "04:00" });
+    const daily = buildSleepHistory([index], ["2026-06-12"],
+      "daily", new Map(), "Europe/Oslo");
+    expect(daily.days[0]).toMatchObject({
+      night_of: "2026-06-12", timezone: null, local_time_source: "garmin_local",
+    });
+    expect(daily.days[0]).not.toHaveProperty("sleep_start_garmin_local");
+  });
+
   it("lets canonical rows override a stale or missing monthly index", () => {
     const overrides = new Map([
       ["2026-09-04", {
@@ -226,6 +249,7 @@ describe("canonical history read-through", () => {
     const row = summarizeHrvPayload("2026-09-24", {
       sleep_start_gmt: "2026-09-23T22:00:00Z",
       sleep_end_gmt: "2026-09-24T06:00:00Z",
+      sleep_start_garmin_local: "2026-09-24T00:00:00.0",
       summary: { lastNightAvg: "45", weeklyAvg: 44, status: "BALANCED" },
       readings: [
         { timestamp: "2026-09-23T22:00:00Z", hrv_ms: 40 },
@@ -235,6 +259,7 @@ describe("canonical history read-through", () => {
     expect(row).toMatchObject({
       status: "available",
       detailed_readings_available: true,
+      sleep_start_garmin_local: "2026-09-24T00:00:00.0",
       garmin: { last_night_avg_ms: 45, weekly_avg_ms: 44, status: "BALANCED" },
       derived: { valid_reading_count: 2, mean_ms: 45, second_minus_first_ms: 10 },
     });
@@ -246,6 +271,7 @@ describe("canonical history read-through", () => {
 
   it("normalizes canonical sleep and preserves full stages for bounded detail", () => {
     const row = summarizeSleepPayload("2026-09-24", {
+      sleep_start_garmin_local: 1789948800000,
       summary: { sleep_seconds: 28800, sleep_score: "82" },
       score_breakdown: { overall: { value: "82", qualifier: "GOOD" } },
       stage_count: 1,
@@ -253,6 +279,7 @@ describe("canonical history read-through", () => {
     });
     expect(row).toMatchObject({
       status: "available",
+      sleep_start_garmin_local: 1789948800000,
       summary: { sleep_seconds: 28800, sleep_score: 82 },
       score_breakdown: { overall: { value: 82, qualifier: "GOOD" } },
       stage_count: 1,

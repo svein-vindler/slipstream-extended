@@ -152,6 +152,12 @@ def normalize_sleep_detail(day: str, raw: Any) -> dict[str, Any]:
         "sleep_end_gmt": _first(
             dto, "sleepEndTimestampGMT", "autoSleepEndTimestampGMT"
         ),
+        "sleep_start_garmin_local": _first(
+            dto, "sleepStartTimestampLocal", "autoSleepStartTimestampLocal"
+        ),
+        "sleep_end_garmin_local": _first(
+            dto, "sleepEndTimestampLocal", "autoSleepEndTimestampLocal"
+        ),
         "confirmed": _boolean(dto.get("sleepWindowConfirmed")),
         "summary": summary,
         "score_breakdown": _score_breakdown(dto),

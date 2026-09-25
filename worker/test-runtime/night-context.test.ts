@@ -11,4 +11,17 @@ describe("night context in the Cloudflare Workers runtime", () => {
       sleep_end_local: "2026-03-29T07:30:00+02:00",
     });
   });
+
+  it("uses Garmin's per-night local offset during travel", () => {
+    const night = nightContext("2026-06-12",
+      Date.parse("2026-06-11T15:30:00Z"),
+      Date.parse("2026-06-11T22:30:00Z"), "Europe/Oslo",
+      Date.parse("2026-06-12T00:30:00Z"),
+      Date.parse("2026-06-12T07:30:00Z"));
+    expect(night).toMatchObject({
+      night_of: "2026-06-12", timezone: null,
+      local_time_source: "garmin_local",
+      sleep_start_local: "2026-06-12T00:30:00+09:00",
+    });
+  });
 });

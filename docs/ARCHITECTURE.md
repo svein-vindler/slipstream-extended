@@ -113,8 +113,13 @@ HRV date appears.
 Detailed sleep and body-composition history is filled by
 `scheduled-health-detail-backfill.yml`. Separate resumable plans target only
 dates that already contain sleep or weight in the daily-health summary. Sleep is
-stored under `health/sleep/v1/` with its window, stages, score components, SpO2,
-respiration and sleep stress. Body measurements are stored under
+stored under `health/sleep/v1/` with its UTC window, Garmin-recorded local
+window when available, stages, score components, SpO2, respiration and sleep
+stress. HRV canonical objects likewise retain Garmin local sleep-window times.
+The Worker derives `night_of` from those per-night times before falling back
+to the configured usual IANA zone; an unknown travel-zone name is not invented.
+Older canonical objects remain readable but need targeted refetch to recover
+their discarded local times. Body measurements are stored under
 `health/body-composition/v1/`, preserving multiple measurements per day and the
 available weight, BMI, fat, water, muscle, bone and metabolic fields. Each
 stream processes at most 100 dates per run, pauses a persistent date after three

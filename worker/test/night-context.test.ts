@@ -46,6 +46,51 @@ describe("local sleep-night context", () => {
     });
   });
 
+  it("prefers Garmin's travel-night clock over the configured home timezone", () => {
+    const startGmt = Date.parse("2026-06-11T15:30:00Z");
+    const endGmt = Date.parse("2026-06-11T22:30:00Z");
+    const startLocal = Date.parse("2026-06-12T00:30:00Z");
+    const endLocal = Date.parse("2026-06-12T07:30:00Z");
+    const result = nightContext("2026-06-12", startGmt, endGmt,
+      "Europe/Oslo", startLocal, endLocal);
+    expect(result).toMatchObject({
+      wake_date: "2026-06-12",
+      night_of: "2026-06-12",
+      sleep_start_local: "2026-06-12T00:30:00+09:00",
+      sleep_end_local: "2026-06-12T07:30:00+09:00",
+      sleep_midpoint_local: "2026-06-12T04:00:00+09:00",
+      sleep_start_weekday_local: "Friday",
+      timezone: null,
+      local_time_source: "garmin_local",
+    });
+    expect(nightContext("2026-06-12", startGmt, endGmt,
+      null, startLocal, endLocal).night_of).toBe("2026-06-12");
+  });
+
+  it("uses Garmin ISO local times and keeps the configured zone when they agree", () => {
+    expect(nightContext("2026-09-24", "2026-09-23T21:30:00Z",
+      "2026-09-24T05:30:00Z", "Europe/Oslo",
+      "2026-09-23T23:30:00.0", "2026-09-24T07:30:00.0")).toMatchObject({
+        night_of: "2026-09-23",
+        timezone: "Europe/Oslo",
+        local_time_source: "garmin_local",
+      });
+  });
+
+  it("falls back on malformed Garmin local time and never mixes zones", () => {
+    const start = "2026-06-11T15:30:00Z";
+    const end = "2026-06-11T22:30:00Z";
+    expect(nightContext("2026-06-12", start, end, "Europe/Oslo",
+      "2026-06-12T15:30:00.0", null)).toMatchObject({
+        night_of: "2026-06-11", local_time_source: "configured_timezone",
+      });
+    expect(nightContext("2026-06-12", start, end, "Europe/Oslo",
+      "2026-06-12T00:30:00.0", null)).toMatchObject({
+        night_of: "2026-06-12", sleep_end_local: null,
+        sleep_midpoint_local: null, local_time_source: "garmin_local",
+      });
+  });
+
   it("does not invent a start date when the zone or timestamp is unavailable", () => {
     expect(validatedHealthTimezone("Europe/Oslo")).toBe("Europe/Oslo");
     expect(validatedHealthTimezone("not/a-zone")).toBeNull();
