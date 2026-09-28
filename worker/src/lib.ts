@@ -223,11 +223,27 @@ export function filterActs(acts: Activity[], o: {
   sport_type?: string; start_date?: string; end_date?: string; name_contains?: string;
 }): Activity[] {
   let out = acts;
-  if (o.sport_type) { const s = o.sport_type.toLowerCase(); out = out.filter((a) => a.type.toLowerCase() === s); }
+  if (o.sport_type) {
+    const requested = o.sport_type.trim().toLowerCase();
+    const aliases: Record<string, string> = {
+      running: "run", "løping": "run", "løp": "run", jogging: "run",
+      cycling: "ride", "sykling": "ride",
+    };
+    const sport = aliases[requested] ?? requested;
+    out = out.filter((a) => a.type.toLowerCase() === sport);
+  }
   if (o.name_contains) { const q = o.name_contains.toLowerCase(); out = out.filter((a) => a.name.toLowerCase().includes(q)); }
   if (o.start_date) { const t = new Date(o.start_date + "T00:00:00Z").getTime(); out = out.filter((a) => a.date && a.date.getTime() >= t); }
   if (o.end_date) { const t = new Date(o.end_date + "T23:59:59Z").getTime(); out = out.filter((a) => a.date && a.date.getTime() <= t); }
   return out;
+}
+
+export function activityFilterWarning(
+  matched: number,
+  filters: { sport_type?: string; name_contains?: string },
+): string | undefined {
+  if (matched > 0 || (!filters.sport_type && !filters.name_contains)) return undefined;
+  return "No activities matched all filters. This does not establish that the date has no stored activities; retry without sport_type or name_contains before concluding that data is missing.";
 }
 
 export function summarize(acts: Activity[]) {

@@ -60,6 +60,13 @@ describe("MCP structured outputs", () => {
     expect(JSON.parse(result.content[0].text)).toEqual(value);
   });
 
+  it("exposes the empty-filter warning in both activity query schemas", () => {
+    for (const name of ["list_activities", "activity_stats"] as const) {
+      expect(JSON.stringify(z.toJSONSchema(outputSchemas[name])))
+        .toContain('"filter_warning"');
+    }
+  });
+
   it("advertises local night semantics on every sleep/overnight HRV output", () => {
     for (const name of ["daily_health", "sleep_detail", "sleep_history",
       "hrv_curve", "hrv_history"] as const) {

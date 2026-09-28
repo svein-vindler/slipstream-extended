@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  parseCsv, parseHealthCsv, summarize, summarizeHealth, filterActs, filterHealth,
+  parseCsv, parseHealthCsv, summarize, summarizeHealth, filterActs, activityFilterWarning, filterHealth,
   toSummary, toHealthSummary, bucketKey, healthBucketKey, fmtDuration,
   rawGarminActivityId, hrvObjectKeys, activityJsonObjectKeys,
   activityEnduranceObjectKeys, sleepObjectKeys, bodyCompositionObjectKeys,
@@ -41,6 +41,19 @@ describe("filterActs", () => {
   const acts = parseCsv(CSV);
   it("filters by sport (case-insensitive)", () =>
     expect(filterActs(acts, { sport_type: "run" })).toHaveLength(2));
+  it("accepts common running and cycling aliases", () => {
+    for (const sport_type of ["Running", "running", "Løping", "løp", "jogging"]) {
+      expect(filterActs(acts, { sport_type })).toHaveLength(2);
+    }
+    for (const sport_type of ["Cycling", "sykling"]) {
+      expect(filterActs(acts, { sport_type })).toHaveLength(1);
+    }
+  });
+  it("warns that a filtered empty result does not prove an empty day", () => {
+    expect(activityFilterWarning(0, { sport_type: "unknown" })).toContain("retry without sport_type");
+    expect(activityFilterWarning(0, {})).toBeUndefined();
+    expect(activityFilterWarning(1, { sport_type: "Run" })).toBeUndefined();
+  });
   it("filters by start date inclusive", () =>
     expect(filterActs(acts, { start_date: "2026-06-01" })).toHaveLength(2));
   it("filters by name substring", () =>
