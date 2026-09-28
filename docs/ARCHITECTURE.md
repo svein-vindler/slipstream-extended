@@ -47,10 +47,13 @@ Every six-hour summary refresh also advances up to three newly eligible sleep
 and body-composition dates, refreshes the latest three eligible detail dates so
 late Garmin corrections replace early snapshots, and rewrites the latest three
 compact HRV curves. An on-demand MCP refresh then performs the optional recent
-activity artifact check and R2-only coach generation in the same workflow. This
-makes successful workflow completion the readiness boundary for summaries,
-recent health detail, activity artifacts and any applicable coach input, without
-re-downloading FIT/TCX files on every scheduled run.
+activity check and R2-only coach generation in the same workflow. It compares
+the activity index before and after fetching, prioritizes newly discovered runs,
+then checks recent runs that may already be indexed but still lack detail or
+coach input. The bounded result is stored under `refresh/reports/<run-id>.json`.
+MCP distinguishes "the workflow completed" from "a new workout and its coach
+input are ready"; no new activity means Garmin did not expose a new one in that
+refresh. Routine scheduled runs still avoid FIT/TCX downloads.
 
 ### Free-tier guardrails
 

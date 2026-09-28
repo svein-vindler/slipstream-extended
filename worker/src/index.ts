@@ -52,6 +52,7 @@ import { nightContext, validatedHealthTimezone } from "./night-context";
 import {
   buildWeightDay, invalidWeightDay, missingWeightDay, resolveWeightRequest,
 } from "./weight-history";
+import { activityReady, refreshReportMessage, refreshReportSchema } from "./refresh-report";
 
 export { RefreshCoordinator } from "./refresh-coordinator";
 
@@ -204,6 +205,40 @@ class FitnessService {
   ): Promise<{ key: string; data: unknown } | null> {
     const stored = await this.getR2Text(keys, limits);
     return stored ? { key: stored.key, data: JSON.parse(stored.text) as unknown } : null;
+  }
+
+  private async completedRefreshDetails(run: RefreshRun | null): Promise<{
+    message: string;
+    activity_ready: boolean | null;
+    activity_refresh?: import("./refresh-report").RefreshReport;
+  }> {
+    if (!run || run.status !== "completed" || run.conclusion !== "success") {
+      return { message: "", activity_ready: null };
+    }
+    try {
+      const stored = await this.getR2Json(
+        [`refresh/reports/${run.id}.json`],
+        { stored: 64 * 1024, decoded: 64 * 1024 },
+      );
+      const parsed = refreshReportSchema.safeParse(stored?.data);
+      if (parsed.success) {
+        return {
+          message: refreshReportMessage(parsed.data),
+          activity_ready: activityReady(parsed.data),
+          activity_refresh: parsed.data,
+        };
+      }
+    } catch (error) {
+      console.error(JSON.stringify({
+        message: "Could not read on-demand activity refresh report",
+        run_id: run.id,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    }
+    return {
+      message: "The Garmin refresh completed, but activity-file and coach-input readiness could not be verified for this run.",
+      activity_ready: null,
+    };
   }
 
   async readCanonicalHistoryRow(
@@ -1282,8 +1317,11 @@ class FitnessService {
     if (this.env.GITHUB_ACTIONS_TOKEN && this.env.GITHUB_REPOSITORY) {
       server.registerTool("refresh_today", {
       title: "Refresh today's Garmin data",
-      description: "Request one safe incremental Garmin refresh, including recent detailed health and activity artifacts plus coach input for refreshed running activities. This changes stored data and must only be called when the user explicitly asks to update or refresh their data. It cannot start a historical backfill. IMPORTANT: do not give the user a final response while should_continue_polling is true. Call refresh_status with the returned run ID in the same conversation turn until terminal is true, so the user does not need to ask again.",
-      inputSchema: z.object({}),
+      description: "Request an incremental Garmin refresh. Set new_activity_expected=true when the user says a recent workout is missing; this uses a 5-minute minimum interval instead of the normal 30-minute cooldown. A completed run explicitly reports whether new activity files and running coach input are ready; do not claim a workout is ready merely because data_ready is true. This changes stored data and must only be called when the user explicitly asks to update or refresh their data. It cannot start a historical backfill. IMPORTANT: while should_continue_polling is true, call refresh_status with the returned run ID in the same conversation turn.",
+      inputSchema: z.object({
+        new_activity_expected: z.boolean().optional()
+          .describe("True only when the user expects a recent workout that is not yet in Slipstream"),
+      }),
       outputSchema: outputSchemas.refresh_today,
       annotations: {
         readOnlyHint: false,
@@ -1291,7 +1329,7 @@ class FitnessService {
         idempotentHint: true,
         openWorldHint: true,
       },
-    }, async () => {
+    }, async (args) => {
       const coordinator = this.env.REFRESH_COORDINATOR.getByName("global");
       const lease = await coordinator.reserve("refresh-today", Date.now(), REFRESH_LEASE_TTL_MS);
       if (!lease.acquired || !lease.token) {
@@ -1306,7 +1344,10 @@ class FitnessService {
       try {
         const config = this.refreshConfig();
         const latest = await latestRefreshRun(config);
-        const decision = refreshDecision(latest, Date.now(), config.cooldownMinutes);
+        const cooldownMinutes = args.new_activity_expected
+          ? Math.min(5, config.cooldownMinutes)
+          : config.cooldownMinutes;
+        const decision = refreshDecision(latest, Date.now(), cooldownMinutes);
         if (!decision.dispatch) {
           await coordinator.release("refresh-today", lease.token);
           const run = decision.reason === "already_running"
@@ -1318,12 +1359,13 @@ class FitnessService {
             : decision.run;
           clearSummaryCachesWhenReady(run);
           const control = refreshControl(run);
+          const details = await this.completedRefreshDetails(run);
           const message = control.should_continue_polling
             ? "A Garmin refresh is still queued or running. Call refresh_status now in this same turn; do not ask the user to send another prompt."
             : control.data_ready
               ? decision.reason === "recent_success"
-                ? `A successful refresh was already completed within the last ${config.cooldownMinutes} minutes; the R2 data and applicable coach input are ready.`
-                : "The existing Garmin refresh completed successfully and the updated R2 data and applicable coach input are ready."
+                ? `No new refresh was started because a successful run began within the last ${cooldownMinutes} minutes. ${details.message}`
+                : details.message
               : `The existing Garmin refresh completed with conclusion ${run?.conclusion ?? "unknown"}; updated data is not ready.`;
           return this.text({
             accepted: false,
@@ -1331,6 +1373,8 @@ class FitnessService {
             message,
             run,
             ...control,
+            activity_ready: details.activity_ready,
+            ...(details.activity_refresh ? { activity_refresh: details.activity_refresh } : {}),
           });
         }
         const dispatched = await dispatchRefresh(config);
@@ -1342,14 +1386,17 @@ class FitnessService {
         });
         clearSummaryCachesWhenReady(run);
         const control = refreshControl(run);
+        const details = await this.completedRefreshDetails(run);
         // Keep the short lease until expiry so GitHub has time to expose the new run.
         return this.text({
           accepted: true,
           message: control.data_ready
-            ? "The Garmin refresh completed successfully and the updated R2 data and applicable coach input are ready."
+            ? details.message
             : "The Garmin refresh was accepted and is still running. Call refresh_status now in this same turn; do not ask the user to send another prompt.",
           run,
           ...control,
+          activity_ready: details.activity_ready,
+          ...(details.activity_refresh ? { activity_refresh: details.activity_refresh } : {}),
         });
       } catch (error) {
         await coordinator.release("refresh-today", lease.token);
@@ -1413,17 +1460,20 @@ class FitnessService {
         });
         clearSummaryCachesWhenReady(run);
         const control = refreshControl(run);
+        const details = await this.completedRefreshDetails(run);
         return this.text({
           available: run !== null,
           message: !run
             ? "No Garmin refresh run was found yet. Call refresh_status again in this same turn."
             : control.data_ready
-              ? "The Garmin refresh completed successfully and the updated R2 data and applicable coach input are ready."
+              ? details.message
               : control.terminal
                 ? `The Garmin refresh completed with conclusion ${run.conclusion ?? "unknown"}; updated data is not ready.`
                 : "The Garmin refresh is still queued or running. Call refresh_status again in this same turn; do not ask the user to send another prompt.",
           run,
           ...control,
+          activity_ready: details.activity_ready,
+          ...(details.activity_refresh ? { activity_refresh: details.activity_refresh } : {}),
         });
       } catch (error) {
         console.error(JSON.stringify({

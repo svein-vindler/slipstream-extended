@@ -63,6 +63,12 @@ morning measurement. See [WEIGHT_HISTORY.md](WEIGHT_HISTORY.md).
 For a refresh test, ask it to refresh today's Garmin data and wait until the
 run completes. This requires the optional GitHub Worker secrets described in
 [INSTALL.md](INSTALL.md#11-optional-allow-chat-triggered-refresh).
+If a recent workout is missing, say so explicitly: `refresh_today` can use a
+five-minute minimum interval for that case instead of the usual 30-minute
+cooldown. Its result distinguishes a completed summary refresh from newly
+imported activity files and running coach input. If no new workout appears,
+Garmin has not returned one during that refresh; the assistant should not claim
+that the requested workout is ready.
 
 ## Reauthentication and removal
 

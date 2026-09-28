@@ -36,6 +36,23 @@ describe("GitHub refresh helpers", () => {
       .toEqual({ dispatch: true });
   });
 
+  it("allows a missing-workout retry after five minutes without bypassing active runs", () => {
+    expect(refreshDecision(RUN, Date.parse("2026-09-21T12:04:00Z"), 5))
+      .toMatchObject({ dispatch: false, reason: "recent_success" });
+    expect(refreshDecision(RUN, Date.parse("2026-09-21T12:06:00Z"), 5))
+      .toEqual({ dispatch: true });
+    expect(refreshDecision({ ...RUN, status: "in_progress" },
+      Date.parse("2026-09-21T12:06:00Z"), 5))
+      .toMatchObject({ dispatch: false, reason: "already_running" });
+  });
+
+  it("does not treat a scheduled summary refresh as an on-demand workout import", () => {
+    expect(refreshDecision({ ...RUN, event: "schedule" },
+      Date.parse("2026-09-21T12:01:00Z"), 30)).toEqual({ dispatch: true });
+    expect(refreshDecision({ ...RUN, event: "schedule", status: "in_progress" },
+      Date.parse("2026-09-21T12:01:00Z"), 30)).toEqual({ dispatch: true });
+  });
+
   it("reads the latest run for the fixed workflow and branch", async () => {
     const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(String(input)).toContain("/actions/workflows/refresh.yml/runs?branch=main&per_page=1");

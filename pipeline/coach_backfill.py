@@ -119,7 +119,12 @@ def _source_signature(
     return sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
 
 
-def run(*, max_activities: int = 50, store: R2Store | None = None) -> dict[str, Any]:
+def run(
+    *,
+    max_activities: int = 50,
+    store: R2Store | None = None,
+    priority_activity_ids: set[str] | None = None,
+) -> dict[str, Any]:
     if not 1 <= max_activities <= MAX_ACTIVITIES_PER_RUN:
         raise ValueError(f"max_activities must be between 1 and {MAX_ACTIVITIES_PER_RUN}")
     store = store or R2Store()
@@ -223,6 +228,9 @@ def run(*, max_activities: int = 50, store: R2Store | None = None) -> dict[str, 
                 "source_signature": signature,
             }
         )
+
+    if priority_activity_ids:
+        pending.sort(key=lambda item: item["activity"]["id"] not in priority_activity_ids)
 
     completed = []
     skipped = []

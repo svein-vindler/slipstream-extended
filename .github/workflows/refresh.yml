@@ -65,6 +65,11 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Restore current summaries from private R2
         run: python -m pipeline.summary_restore --data-dir data
+      - name: Remember activities already stored before an on-demand refresh
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular }}
+        run: |
+          python -m pipeline.manual_activity_refresh snapshot \
+            --summary data/activities.csv --output .granular/on-demand-baseline.json
       - name: Fetch + write data/
         run: |
           if [ -n "$BACKFILL_START_YEAR" ] || [ -n "$BACKFILL_END_YEAR" ]; then
@@ -116,18 +121,13 @@ jobs:
             --cardio-count 0 \
             --strength-count 0 \
             --upload-r2
-      - name: Refresh recent detailed activity artifacts
+      - name: Import newly discovered workouts and missing recent files
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular }}
         run: |
-          python -m pipeline.granular_export \
-            --hrv-days 0 \
-            --activity-days 14 \
-            --cardio-count 5 \
-            --strength-count 5 \
-            --upload-r2
-      - name: Generate coach input for refreshed running activities
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular }}
-        run: python -m pipeline.coach_backfill --max-activities 10
+          python -m pipeline.manual_activity_refresh process \
+            --baseline .granular/on-demand-baseline.json \
+            --summary data/activities.csv \
+            --run-id "$GITHUB_RUN_ID"
       - name: Reconcile health history indexes with canonical R2 objects
         if: ${{ !cancelled() }}
         run: python -m pipeline.health_history_index

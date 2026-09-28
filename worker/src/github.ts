@@ -130,6 +130,10 @@ export function refreshDecision(
   cooldownMinutes: number,
 ): RefreshDecision {
   if (!run) return { dispatch: true };
+  // Scheduled refreshes do not import the specific workout and coach input
+  // requested by an MCP user. GitHub's shared concurrency group will queue
+  // this on-demand run behind an active scheduled run.
+  if (run.event === "schedule") return { dispatch: true };
   if (run.status !== "completed") {
     return { dispatch: false, reason: "already_running", run };
   }

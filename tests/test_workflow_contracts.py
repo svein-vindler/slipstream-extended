@@ -5,13 +5,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_on_demand_refresh_generates_coach_after_activity_artifacts():
     workflow = (ROOT / ".github/workflows/refresh.yml").read_text(encoding="utf-8")
-    artifacts = workflow.index("- name: Refresh recent detailed activity artifacts")
-    coach = workflow.index("- name: Generate coach input for refreshed running activities")
-    coach_block = workflow[coach:]
+    restore = workflow.index("- name: Restore current summaries from private R2")
+    snapshot = workflow.index("- name: Remember activities already stored")
+    fetch = workflow.index("- name: Fetch + write data/")
+    import_workouts = workflow.index("- name: Import newly discovered workouts")
 
-    assert artifacts < coach
-    assert "github.event_name == 'workflow_dispatch' && inputs.include_granular" in coach_block
-    assert "python -m pipeline.coach_backfill --max-activities 10" in coach_block
+    assert restore < snapshot < fetch < import_workouts
+    assert "python -m pipeline.manual_activity_refresh process" in workflow
+    assert "github.event_name == 'workflow_dispatch' && inputs.include_granular" in workflow
 
 
 def test_upstream_check_is_notification_only_for_independent_history():
