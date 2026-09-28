@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { refreshReportSchema } from "./refresh-report";
 
 const nullableNumber = z.number().finite().nullable();
 const nullableString = z.string().nullable();
@@ -470,6 +471,8 @@ export const outputSchemas = {
     data_ready: z.boolean(),
     should_continue_polling: z.boolean(),
     poll_after_seconds: z.number().int().positive().optional(),
+    activity_ready: z.boolean().nullable().optional(),
+    activity_refresh: refreshReportSchema.optional(),
   }),
   refresh_status: z.object({
     available: z.boolean(),
@@ -479,6 +482,8 @@ export const outputSchemas = {
     data_ready: z.boolean(),
     should_continue_polling: z.boolean(),
     poll_after_seconds: z.number().int().positive().optional(),
+    activity_ready: z.boolean().nullable().optional(),
+    activity_refresh: refreshReportSchema.optional(),
   }),
 } as const;
 
