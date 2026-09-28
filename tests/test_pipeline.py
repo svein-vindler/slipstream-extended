@@ -9,6 +9,8 @@ import types
 import zipfile
 from datetime import date, datetime, timezone
 
+import pytest
+
 from pipeline.activity_backfill import (
     is_job_stopping_error,
     progress_key,
@@ -1381,6 +1383,21 @@ def test_normalize_body_composition_preserves_each_weigh_in_and_units():
     assert average["measurements"][0]["weight_kg"] == 81
     assert average["measurements"][0]["is_daily_average"] is True
 
+    dayview = normalize_body_composition("2026-09-27", {
+        "dateWeightList": [
+            {"calendarDate": "2026-09-27", "weight": 81000,
+             "timestampGMT": "2026-09-27T06:16:00Z", "samplePk": 1},
+            {"calendarDate": "2026-09-27", "weight": 81200,
+             "timestampGMT": "2026-09-27T12:13:00Z", "samplePk": 2},
+            {"calendarDate": "2026-09-27", "weight": 81400,
+             "timestampGMT": "2026-09-27T21:11:00Z", "samplePk": 3},
+        ],
+        "totalAverage": {"weight": 81200},
+    })
+    assert dayview["measurement_count"] == 3
+    assert [item["measurement_id"] for item in dayview["measurements"]] == [1, 2, 3]
+    assert all(not item["is_daily_average"] for item in dayview["measurements"])
+
 
 def test_health_detail_dates_only_include_populated_summary_days():
     summary = (
@@ -1428,11 +1445,11 @@ def test_health_detail_backfill_writes_bounded_sleep_and_body_batches():
             self.sleep_calls.append(day)
             return {"dailySleepDTO": {"sleepTimeSeconds": 26000}}
 
-        def get_body_composition(self, start, end=None):
-            self.body_calls.append((start, end))
+        def get_daily_weigh_ins(self, day):
+            self.body_calls.append(day)
             return {
                 "dateWeightList": [
-                    {"calendarDate": start, "weight": 80000},
+                    {"calendarDate": day, "weight": 80000},
                 ]
             }
 
@@ -1446,7 +1463,7 @@ def test_health_detail_backfill_writes_bounded_sleep_and_body_batches():
     )
 
     assert garmin.sleep_calls == ["2026-09-21"]
-    assert garmin.body_calls == [("2026-09-21", "2026-09-21")]
+    assert garmin.body_calls == ["2026-09-21"]
     assert result["sleep"]["remaining_days"] == 1
     assert result["body_composition"]["remaining_days"] == 0
     sleep_key = HEALTH_DETAIL_STREAMS["sleep"].object_key("2026-09-21")
@@ -1455,7 +1472,7 @@ def test_health_detail_backfill_writes_bounded_sleep_and_body_batches():
     assert json.loads(gzip.decompress(store.objects[body_key]))["measurement_count"] == 1
 
 
-def test_body_composition_backfill_fetches_sparse_dates_in_one_range():
+def test_body_composition_backfill_fetches_each_dayview():
     summary = (
         b"Date,Sleep Seconds,Weight KG\n"
         b"2026-09-01,,80.2\n"
@@ -1480,12 +1497,11 @@ def test_body_composition_backfill_fetches_sparse_dates_in_one_range():
         def __init__(self):
             self.calls = []
 
-        def get_body_composition(self, start, end):
-            self.calls.append((start, end))
+        def get_daily_weigh_ins(self, day):
+            self.calls.append(day)
             return {
                 "dateWeightList": [
-                    {"calendarDate": day, "weight": 80000}
-                    for day in ("2026-09-01", "2026-09-10", "2026-09-21")
+                    {"calendarDate": day, "weight": 80000},
                 ]
             }
 
@@ -1498,9 +1514,124 @@ def test_body_composition_backfill_fetches_sparse_dates_in_one_range():
         garmin=garmin,
     )
 
-    assert garmin.calls == [("2026-09-01", "2026-09-21")]
+    assert garmin.calls == ["2026-09-21", "2026-09-10", "2026-09-01"]
     assert result["body_composition"]["complete_days"] == 3
     assert result["body_composition"]["remaining_days"] == 0
+
+
+def test_body_composition_repair_refetches_only_requested_existing_days():
+    summary = (
+        b"Date,Sleep Seconds,Weight KG\n"
+        b"2026-09-25,,80.0\n"
+        b"2026-09-26,,80.0\n"
+        b"2026-09-27,,80.0\n"
+    )
+    stream = HEALTH_DETAIL_STREAMS["body_composition"]
+    plan = json.dumps({
+        "status": "complete",
+        "target_dates": ["2026-09-27", "2026-09-26", "2026-09-25"],
+        "failures": {},
+    }).encode()
+
+    class FakeStore:
+        def __init__(self):
+            self.objects = {
+                "summary/health_daily.csv": summary,
+                stream.plan_key: plan,
+                **{
+                    stream.object_key(day): gzip_json({"date": day, "measurements": [{}]})
+                    for day in ("2026-09-25", "2026-09-26", "2026-09-27")
+                },
+            }
+
+        def list_keys(self, prefix=""):
+            return {key for key in self.objects if key.startswith(prefix)}
+
+        def get(self, key):
+            return self.objects[key]
+
+        def put(self, key, data, content_type, *, encoding=None):
+            self.objects[key] = data
+
+    class FakeGarmin:
+        def __init__(self):
+            self.calls = []
+
+        def get_daily_weigh_ins(self, day):
+            self.calls.append(day)
+            count = 3 if day == "2026-09-27" else 2
+            return {"dateWeightList": [
+                {"calendarDate": day, "weight": 80000 + i * 100,
+                 "timestampGMT": f"{day}T0{i + 6}:00:00Z", "samplePk": i + 1}
+                for i in range(count)
+            ]}
+
+        def __getattr__(self, name):
+            raise AssertionError(f"Unexpected Garmin call: {name}")
+
+    store = FakeStore()
+    garmin = FakeGarmin()
+    result = run_health_detail_backfill(
+        max_body_days=3,
+        repair_body_start="2026-09-25",
+        repair_body_end="2026-09-27",
+        store=store,
+        garmin=garmin,
+    )
+    assert garmin.calls == ["2026-09-27", "2026-09-26", "2026-09-25"]
+    assert result["body_composition"]["refreshed_existing_this_run"] == 3
+    repaired = json.loads(gzip.decompress(store.objects[stream.object_key("2026-09-27")]))
+    assert repaired["measurement_count"] == 3
+
+
+def test_body_composition_repair_preserves_existing_object_if_dayview_is_empty():
+    stream = HEALTH_DETAIL_STREAMS["body_composition"]
+    day = "2026-09-27"
+    key = stream.object_key(day)
+    original = gzip_json({"date": day, "measurements": [{"weight_kg": 80.0}]})
+
+    class FakeStore:
+        def __init__(self):
+            self.objects = {
+                "summary/health_daily.csv": b"Date,Sleep Seconds,Weight KG\n2026-09-27,,80.0\n",
+                stream.plan_key: json.dumps({
+                    "status": "complete", "target_dates": [day], "failures": {},
+                }).encode(),
+                key: original,
+            }
+
+        def list_keys(self, prefix=""):
+            return {item for item in self.objects if item.startswith(prefix)}
+
+        def get(self, item):
+            return self.objects[item]
+
+        def put(self, item, data, content_type, *, encoding=None):
+            self.objects[item] = data
+
+    class FakeGarmin:
+        def get_daily_weigh_ins(self, date):
+            assert date == day
+            return {"dateWeightList": [], "totalAverage": {"weight": 80000}}
+
+    store = FakeStore()
+    result = run_health_detail_backfill(
+        repair_body_start=day, repair_body_end=day, store=store,
+        garmin=FakeGarmin(),
+    )
+    assert store.objects[key] == original
+    assert result["body_composition"]["refreshed_existing_this_run"] == 0
+    assert len(result["body_composition"]["failed_this_run"]) == 1
+
+
+@pytest.mark.parametrize("start,end", [
+    ("2026-09-25", None),
+    ("2026-09-28", "2026-09-25"),
+    ("2026-08-01", "2026-09-27"),
+])
+def test_body_composition_repair_rejects_unbounded_or_incomplete_dates(start, end):
+    with pytest.raises(ValueError):
+        run_health_detail_backfill(repair_body_start=start, repair_body_end=end)
 
 
 def test_completed_health_detail_backfills_do_not_contact_garmin_or_write():
@@ -1581,9 +1712,9 @@ def test_completed_health_details_can_refresh_recent_existing_dates():
             self.sleep_calls.append(day)
             return {"dailySleepDTO": {"sleepTimeSeconds": 27000}}
 
-        def get_body_composition(self, start, end):
-            self.body_calls.append((start, end))
-            return {"dateWeightList": [{"calendarDate": start, "weight": 79500}]}
+        def get_daily_weigh_ins(self, day):
+            self.body_calls.append(day)
+            return {"dateWeightList": [{"calendarDate": day, "weight": 79500}]}
 
     store = FakeStore()
     garmin = FakeGarmin()
@@ -1596,7 +1727,7 @@ def test_completed_health_details_can_refresh_recent_existing_dates():
     )
 
     assert garmin.sleep_calls == ["2026-09-21"]
-    assert garmin.body_calls == [("2026-09-21", "2026-09-21")]
+    assert garmin.body_calls == ["2026-09-21"]
     assert result["sleep"]["refreshed_existing_this_run"] == 1
     assert result["body_composition"]["refreshed_existing_this_run"] == 1
     assert result["sleep"]["status"] == "complete"

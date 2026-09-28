@@ -122,8 +122,11 @@ Older canonical objects remain readable but need targeted refetch to recover
 their discarded local times. Body measurements are stored under
 `health/body-composition/v1/`, preserving multiple measurements per day and the
 available weight, BMI, fat, water, muscle, bone and metabolic fields. Each
-stream processes at most 100 dates per run, pauses a persistent date after three
-failures, and shares the global Garmin/R2 limits.
+body date uses Garmin's daily weigh-in view (not its latest-only date-range
+summary). Existing latest-only objects can be repaired in explicit windows of
+at most 31 calendar days. Each stream processes at most 100 dates per run,
+pauses a persistent date after three failures, and shares the global Garmin/R2
+limits.
 
 For efficient longitudinal queries, `pipeline.health_history_index` converts
 the canonical per-night HRV and sleep objects into versioned, gzip-compressed
@@ -177,9 +180,9 @@ R2 inventory. Activities whose endurance object explicitly reports unavailable
 telemetry are recorded as processed but do not receive an empty coach analysis.
 The canonical versioned coach objects remain immutable outputs.
 
-The local path uses Garmin date-range calls where the API supports them:
-activity discovery is fetched by year and missing body-composition dates are
-grouped into bounded windows. HRV and sleep remain daily Garmin calls, but one
+The local path uses Garmin date-range calls where the API retains the required
+detail: activity discovery is fetched by year. Body composition, HRV and sleep
+use daily Garmin calls so individual measurements and stages are retained. One
 authenticated process owns the requested history and streams normalized,
 compressed days to R2. A separate local import adapter can seed canonical HRV
 and sleep objects from existing raw JSON exports. It uses the same normalizers,
