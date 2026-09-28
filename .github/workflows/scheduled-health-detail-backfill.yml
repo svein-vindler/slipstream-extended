@@ -20,6 +20,14 @@ on:
         required: true
         default: false
         type: boolean
+      repair_body_start:
+        description: "Optional first date to re-fetch all individual weigh-ins (YYYY-MM-DD)"
+        required: false
+        type: string
+      repair_body_end:
+        description: "Optional last repair date; maximum 31 calendar days per run"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -45,6 +53,8 @@ jobs:
       MAX_SLEEP_DAYS: ${{ inputs.max_sleep_days || '100' }}
       MAX_BODY_DAYS: ${{ inputs.max_body_days || '100' }}
       RETRY_FAILURES: ${{ inputs.retry_failures || 'false' }}
+      REPAIR_BODY_START: ${{ inputs.repair_body_start }}
+      REPAIR_BODY_END: ${{ inputs.repair_body_end }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -61,5 +71,8 @@ jobs:
           )
           if [[ "$RETRY_FAILURES" == "true" ]]; then
             args+=(--retry-failures)
+          fi
+          if [[ -n "$REPAIR_BODY_START" || -n "$REPAIR_BODY_END" ]]; then
+            args+=(--repair-body-start "$REPAIR_BODY_START" --repair-body-end "$REPAIR_BODY_END")
           fi
           python -m pipeline.health_detail_backfill "${args[@]}"

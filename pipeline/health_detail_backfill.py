@@ -9,7 +9,7 @@ import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from .activity_backfill import is_job_stopping_error
@@ -39,6 +39,15 @@ class DetailStream:
         return f"{self.prefix}/{day[:4]}/{day[5:7]}/{day}.json"
 
 
+def _daily_weigh_ins(garmin: Any, day: str) -> dict[str, Any]:
+    raw = garmin.get_daily_weigh_ins(day)
+    if not isinstance(raw, dict) or not isinstance(raw.get("dateWeightList"), list):
+        raise ValueError(f"Garmin returned an invalid weigh-in dayview for {day}")
+    if not raw["dateWeightList"]:
+        raise ValueError(f"Garmin returned no individual weigh-ins for {day}")
+    return raw
+
+
 STREAMS = {
     "sleep": DetailStream(
         name="sleep",
@@ -53,9 +62,10 @@ STREAMS = {
         summary_column="Weight KG",
         plan_key="backfill/body-composition/v1/plan.json",
         prefix="health/body-composition/v1",
-        fetch=lambda garmin, day: garmin.get_body_composition(day),
+        # dateRange contains the day's latest reading, not every weigh-in.
+        # Garmin's dayview endpoint returns the individual measurements.
+        fetch=_daily_weigh_ins,
         normalize=normalize_body_composition,
-        range_fetch=lambda garmin, start, end: garmin.get_body_composition(start, end),
     ),
 }
 
@@ -198,6 +208,7 @@ def run_stream(
     get_garmin: Callable[[], Any],
     retry_failures: bool = False,
     refresh_recent_days: int = 0,
+    repair_dates: frozenset[str] = frozenset(),
     request_pause: float = 0.15,
 ) -> dict[str, Any]:
     if not 1 <= max_days <= MAX_DAYS_PER_STREAM:
@@ -217,7 +228,7 @@ def run_stream(
         changed = _refresh_plan_dates(stream, plan, health_csv)
         if previous_status in {"complete", "complete_with_blocked"}:
             retrying = previous_status == "complete_with_blocked" and retry_failures
-            if not changed and not retrying and refresh_recent_days == 0:
+            if not changed and not retrying and refresh_recent_days == 0 and not repair_dates:
                 passive = dict(plan)
                 passive.update({
                     "attempted_this_run": 0,
@@ -241,16 +252,22 @@ def run_stream(
     failures = plan.get("failures")
     if not isinstance(failures, dict):
         failures = {}
-    refresh_dates = frozenset(target_dates[:refresh_recent_days])
+    refresh_dates = frozenset(target_dates[:refresh_recent_days]) | repair_dates
+    selected_dates = (
+        [day for day in target_dates if day in repair_dates]
+        if repair_dates else target_dates
+    )
+    if len(selected_dates) > max_days and repair_dates:
+        raise ValueError("Body-composition repair exceeds max_body_days")
 
     existing_keys = store.list_keys(stream.prefix + "/")
     batch = select_batch(
         stream,
-        target_dates,
+        selected_dates,
         existing_keys,
         failures,
         limit=max_days,
-        retry_failures=retry_failures,
+        retry_failures=retry_failures or bool(repair_dates),
         refresh_dates=refresh_dates,
     )
     completed = []
@@ -270,6 +287,12 @@ def run_stream(
     def store_day(day: str, raw: Any) -> None:
         nonlocal refreshed_existing
         payload = stream.normalize(day, raw)
+        if stream.name == "body_composition" and not any(
+            item.get("weight_kg") is not None
+            and not item.get("is_daily_average")
+            for item in payload["measurements"]
+        ):
+            raise ValueError(f"Garmin returned no individual weights for {day}")
         data = gzip_json(payload)
         key = stream.object_key(day)
         replacing = key in existing_keys
@@ -359,6 +382,11 @@ def run_stream(
     if status in {"complete", "complete_with_blocked"}:
         plan["completed_at"] = now
     store.put(stream.plan_key, json_bytes(plan), "application/json")
+    if repair_dates:
+        plan.update({
+            "repair_requested_days": len(repair_dates),
+            "repair_eligible_days": len(selected_dates),
+        })
     return plan
 
 
@@ -368,9 +396,26 @@ def run(
     max_body_days: int = 100,
     retry_failures: bool = False,
     refresh_recent_days: int = 0,
+    repair_body_start: str | None = None,
+    repair_body_end: str | None = None,
     store: R2Store | None = None,
     garmin=None,
 ) -> dict[str, Any]:
+    if (repair_body_start is None) != (repair_body_end is None):
+        raise ValueError("Both repair_body_start and repair_body_end are required")
+    repair_dates: frozenset[str] = frozenset()
+    if repair_body_start is not None and repair_body_end is not None:
+        try:
+            first = date.fromisoformat(repair_body_start)
+            last = date.fromisoformat(repair_body_end)
+        except ValueError as exc:
+            raise ValueError("Body-composition repair dates must use YYYY-MM-DD") from exc
+        if first > last or (last - first).days >= 31:
+            raise ValueError("Body-composition repair must span 1-31 calendar days")
+        repair_dates = frozenset(
+            (first + timedelta(days=offset)).isoformat()
+            for offset in range((last - first).days + 1)
+        )
     store = store or R2Store()
     health_csv = store.get("summary/health_daily.csv")
     shared = garmin
@@ -400,6 +445,8 @@ def run(
             get_garmin=get_garmin,
             retry_failures=retry_failures,
             refresh_recent_days=refresh_recent_days,
+            repair_dates=repair_dates,
+            request_pause=0.75,
         ),
     }
     report = {
@@ -424,6 +471,8 @@ def main():
     parser.add_argument("--max-body-days", type=int, default=100)
     parser.add_argument("--retry-failures", action="store_true")
     parser.add_argument("--refresh-recent-days", type=int, default=0)
+    parser.add_argument("--repair-body-start")
+    parser.add_argument("--repair-body-end")
     args = parser.parse_args()
     try:
         run(
@@ -431,6 +480,8 @@ def main():
             max_body_days=args.max_body_days,
             retry_failures=args.retry_failures,
             refresh_recent_days=args.refresh_recent_days,
+            repair_body_start=args.repair_body_start,
+            repair_body_end=args.repair_body_end,
         )
     except ValueError as exc:
         parser.error(str(exc))

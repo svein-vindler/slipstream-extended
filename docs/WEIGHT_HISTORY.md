@@ -7,6 +7,15 @@ therefore needs several consecutive, non-overlapping requests rather than one
 MCP call for every date. `body_composition(date)` remains available when all
 stored measurements for one particular day are needed.
 
+The health-detail pipeline fetches Garmin's **daily weigh-in view** for each
+date, which contains individual measurements. Garmin's body-composition
+date-range summary can contain only the latest measurement for each day; using
+that summary alone would make an earlier morning weigh-in disappear when a
+later weigh-in was recorded. The daily view is fetched sequentially with a
+pause between requests. The existing bounded batch and Garmin error handling
+still apply. No additional R2 objects are created per measurement: a date's
+measurements remain together in its existing body-composition object.
+
 Inputs are `start_date`, `end_date`, optional `morning_start` and `morning_end`
 (`HH:MM`, default `04:00`–`12:00`, start inclusive and end exclusive), and
 optional IANA `timezone`. Dates must be real calendar dates. The timezone
@@ -66,4 +75,12 @@ separate history index. Both list pages and object sizes are bounded, and the
 existing per-identity MCP rate limit still applies. If Garmin supplied only a
 daily summary or a latest weight for an older date, this tool cannot recover
 individual morning measurements from that object; a targeted Garmin re-fetch
-may be needed after inspecting coverage.
+is needed after inspecting coverage. To repair existing data, dispatch
+`scheduled-health-detail-backfill.yml` with `repair_body_start` and
+`repair_body_end` (both `YYYY-MM-DD`). One run accepts at most 31 calendar
+days and re-fetches only dates with a weight in the health summary. It
+replaces those dates' canonical body-composition objects with Garmin's full
+daily view. Start with a short canary range and check `body_composition(date)`
+and `weight_history` before repairing older history in further 31-day chunks.
+The normal scheduled run does not re-fetch all historical dates after its
+backfill is complete; regular refreshes continue to re-fetch recent dates.
