@@ -49,6 +49,9 @@ import {
 import { outputSchemas, structuredToolResult } from "./mcp-output";
 import { authenticateMcpRequest } from "./mcp-auth";
 import { nightContext, validatedHealthTimezone } from "./night-context";
+import {
+  buildWeightDay, invalidWeightDay, missingWeightDay, resolveWeightRequest,
+} from "./weight-history";
 
 export { RefreshCoordinator } from "./refresh-coordinator";
 
@@ -588,7 +591,7 @@ class FitnessService {
     });
 
     server.registerTool("daily_health", {
-      description: "List daily health summaries. For sleep/overnight HRV, date is the morning wake-date; sleep_night and hrv_night prefer Garmin's per-night local timestamps, with HEALTH_TIMEZONE as fallback.",
+      description: "List daily health summaries. weight_kg is one Garmin daily value (normally latestWeight), not a computed daily mean or standardized morning measurement; use weight_history for the latter. For sleep/overnight HRV, date is the morning wake-date; sleep_night and hrv_night prefer Garmin's per-night local timestamps, with HEALTH_TIMEZONE as fallback.",
       inputSchema: z.object({
         start_date: dateRange, end_date: dateRange,
         limit: z.number().int().min(1).max(366).default(30),
@@ -614,6 +617,7 @@ class FitnessService {
       const hrvRows = contexts?.[1].status === "fulfilled" ? contexts[1].value : emptyContext();
       return this.text({ matched: rows.length, showing: Math.min(args.limit, rows.length),
         timezone,
+        weight_kg_semantics: "garmin_daily_latest_or_summary_fallback",
         night_context_limited: contextMonths.size > 13,
         night_context_unavailable: contexts?.some((result) => result.status === "rejected") ?? false,
         days: displayed.map((row) => {
@@ -638,7 +642,7 @@ class FitnessService {
     });
 
     server.registerTool("health_trends", {
-      description: "Summarize health metrics over a date range, optionally grouped by month or year.",
+      description: "Summarize health metrics over a date range, optionally grouped by month or year. Weight statistics use Garmin's one daily value (normally latestWeight), not standardized morning measurements; use weight_history for those.",
       inputSchema: z.object({
         start_date: dateRange, end_date: dateRange,
         group_by: z.enum(["month", "year"]).optional(),
@@ -936,6 +940,91 @@ class FitnessService {
         date: typeof payload.date === "string" ? payload.date : args.date,
         measurement_count: measurements.length,
         measurements,
+      });
+    });
+
+    server.registerTool("weight_history", {
+      description: "Read up to 31 days of stored body-composition data in one call. Select the first actual weighing in a local morning window (default 04:00-12:00), never a Garmin daily average. Garmin local timestamps take priority; UTC-only records use the configured HEALTH_TIMEZONE or an explicit IANA timezone. Each day reports selection provenance, coverage, missing data and intraday weight range. Use body_composition(date) for all individual measurements on a selected day.",
+      inputSchema: z.object({
+        start_date: exactDate,
+        end_date: exactDate,
+        morning_start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("04:00"),
+        morning_end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("12:00"),
+        timezone: z.string().min(1).max(64).optional(),
+      }),
+      outputSchema: outputSchemas.weight_history,
+      annotations: PRIVATE_READ_TOOL_ANNOTATIONS,
+    }, async (args) => {
+      const request = resolveWeightRequest(args.start_date, args.end_date,
+        args.morning_start, args.morning_end, args.timezone, this.env.HEALTH_TIMEZONE);
+      const prefixes = [...new Set(request.dates.map((date) =>
+        `health/body-composition/v1/${date.slice(0, 4)}/${date.slice(5, 7)}/`))];
+      const requestedDates = new Set(request.dates);
+      const canonicalKeys = new Set(request.dates.flatMap(bodyCompositionObjectKeys));
+      const keys = new Map<string, string[]>();
+      let listOperations = 0;
+      for (const prefix of prefixes) {
+        let cursor: string | undefined;
+        do {
+          const listed = await this.env.SLIPSTREAM_DATA.list({
+            prefix, limit: 1000, ...(cursor ? { cursor } : {}),
+          });
+          listOperations += 1;
+          for (const object of listed.objects) {
+            const match = /(\d{4}-\d{2}-\d{2})\.json(?:\.gz)?$/.exec(object.key);
+            if (!match || !requestedDates.has(match[1])
+              || !canonicalKeys.has(object.key)) continue;
+            const candidates = keys.get(match[1]) ?? [];
+            candidates.push(object.key);
+            keys.set(match[1], candidates);
+          }
+          if (listed.truncated && (!listed.cursor || listOperations >= 6)) {
+            throw new Error("Body-composition listing exceeded its bounded page limit.");
+          }
+          cursor = listed.truncated ? listed.cursor : undefined;
+        } while (cursor);
+      }
+      let sourceObjectsRead = 0;
+      const days = [];
+      for (const date of request.dates) {
+        const candidates = keys.get(date)?.sort((a, b) => a.length - b.length) ?? [];
+        if (!candidates.length) {
+          days.push(missingWeightDay(date));
+          continue;
+        }
+        let day = invalidWeightDay(date);
+        for (const key of candidates) {
+          try {
+            sourceObjectsRead += 1;
+            const stored = await this.getR2Json([key], {
+              stored: 256 * 1024, decoded: 512 * 1024,
+            });
+            if (!stored) continue;
+            day = buildWeightDay(date, stored.data, request.timezone,
+              request.startMinute, request.endMinute);
+            if (day.status !== "invalid_schema") break;
+          } catch (error) {
+            if (!(error instanceof SyntaxError || error instanceof PayloadTooLargeError
+              || error instanceof Error && error.message.includes("exceeds the stored-size limit"))) {
+              throw error;
+            }
+            console.error(JSON.stringify({
+              message: "Invalid body-composition history object", key,
+              error: error instanceof Error ? error.message : String(error),
+            }));
+          }
+        }
+        days.push(day);
+      }
+      return this.text({
+        start_date: args.start_date, end_date: args.end_date,
+        timezone: request.timezone,
+        morning_start: args.morning_start, morning_end: args.morning_end,
+        requested_days: days.length,
+        selected_days: days.filter((day) => day.status === "selected").length,
+        source_objects_read: sourceObjectsRead,
+        source_list_operations: listOperations,
+        days,
       });
     });
 

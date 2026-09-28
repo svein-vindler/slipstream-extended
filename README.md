@@ -18,7 +18,7 @@ own infrastructure.
 - Minute-level overnight HRV curves
 - Sleep stages, sleep score components, respiration, SpO2 and stress
 - Bounded HRV and sleep history with automatic weekly summaries for long ranges
-- Weight and body-composition measurements
+- Weight and body-composition measurements, plus bounded morning-weight history
 - Strength exercises, sets, reps, weight, work time and rest time
 - Endurance laps, kilometre splits, heart-rate distribution and drift
 - Versioned coach profiles, append-only RPE/context and prepared coach-input JSON

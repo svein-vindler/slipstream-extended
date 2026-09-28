@@ -19,6 +19,7 @@ const TOOL_NAMES = [
   "sleep_detail",
   "sleep_history",
   "body_composition",
+  "weight_history",
   "strength_session",
   "endurance_session",
   "coach_profile",
