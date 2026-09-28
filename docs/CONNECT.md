@@ -54,6 +54,12 @@ For Friday/Saturday night comparisons, use `sleep_history`'s
 `HEALTH_TIMEZONE` as a fallback for older records. Newly imported Garmin
 nights use their recorded local times, including during travel.
 
+For weight trends, use `weight_history` in consecutive chunks of at most 31
+days. It picks the first stored individual weighing in a local morning window
+and reports missing/uncertain days and the time source. `daily_health.weight_kg`
+is normally Garmin's latest daily value, not a daily mean or a standardized
+morning measurement. See [WEIGHT_HISTORY.md](WEIGHT_HISTORY.md).
+
 For a refresh test, ask it to refresh today's Garmin data and wait until the
 run completes. This requires the optional GitHub Worker secrets described in
 [INSTALL.md](INSTALL.md#11-optional-allow-chat-triggered-refresh).

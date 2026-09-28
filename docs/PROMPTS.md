@@ -79,6 +79,11 @@ your data at once:
 - *"Compare daily sleep score, sleep duration and nightly HRV for the last 30
   days. Clearly distinguish Garmin metrics from Slipstream-derived HRV
   statistics."*
+- *"Using Slipstream, analyze my weight trend from June through September.
+  Use `weight_history` in non-overlapping chunks of at most 31 days, select
+  individual morning weighings rather than `daily_health.weight_kg`, and show
+  the number of observed days behind each 7-, 14- and 28-day trend. Flag days
+  with no usable morning measurement and any timezone fallback."*
 
 ## Training load and progression
 
