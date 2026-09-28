@@ -20,6 +20,7 @@ const activitySummary = z.object({
 
 const activityStats = z.object({
   activities: z.number().int().nonnegative(),
+  filter_warning: z.string().optional(),
   total_distance_km: z.number().finite(),
   total_moving_time: z.string(),
   total_elevation_gain_m: z.number().finite(),
@@ -299,6 +300,7 @@ export const outputSchemas = {
   list_activities: z.object({
     matched: z.number().int().nonnegative(),
     showing: z.number().int().nonnegative(),
+    filter_warning: z.string().optional(),
     activities: z.array(activitySummary),
   }),
   activity_stats: z.object({

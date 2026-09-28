@@ -25,7 +25,7 @@ import { createMcpHandler } from "agents/mcp/server";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
-  Activity, HealthDay, parseCsv, parseHealthCsv, filterActs, filterHealth,
+  Activity, HealthDay, parseCsv, parseHealthCsv, filterActs, activityFilterWarning, filterHealth,
   summarize, summarizeHealth, toSummary, toHealthSummary, bucketKey, healthBucketKey,
   rawGarminActivityId, hrvObjectKeys, activityJsonObjectKeys,
   activityEnduranceObjectKeys, sleepObjectKeys, bodyCompositionObjectKeys,
@@ -453,7 +453,7 @@ class FitnessService {
     const exactDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("YYYY-MM-DD");
     const dateRange = exactDate.optional();
     const sport = z.string().trim().min(1).max(64)
-      .describe('e.g. "Run", "Ride", "Swim", "Yoga"').optional();
+      .describe('Garmin sport type, e.g. "Run", "Ride", "Swim", "Yoga"; "Running"/"Løping" and "Cycling"/"Sykling" are also accepted').optional();
 
     server.registerTool("data_status", {
       description: "Check the fitness data is connected; returns count, date range, sources.",
@@ -492,7 +492,9 @@ class FitnessService {
         distance_asc: (a, b) => (a.distanceKm ?? 0) - (b.distanceKm ?? 0),
       };
       rows = [...rows].sort(cmp[args.sort]);
+      const warning = activityFilterWarning(rows.length, args);
       return this.text({ matched: rows.length, showing: Math.min(args.limit, rows.length),
+        ...(warning ? { filter_warning: warning } : {}),
         activities: rows.slice(0, args.limit).map(toSummary) });
     });
 
@@ -506,7 +508,10 @@ class FitnessService {
       annotations: PRIVATE_READ_TOOL_ANNOTATIONS,
     }, async (args) => {
       const rows = filterActs(await this.getActivities(), args);
-      const result: Record<string, unknown> = { overall: summarize(rows) };
+      const warning = activityFilterWarning(rows.length, args);
+      const result: Record<string, unknown> = {
+        overall: { ...summarize(rows), ...(warning ? { filter_warning: warning } : {}) },
+      };
       if (args.group_by) {
         const buckets: Record<string, Activity[]> = {};
         for (const a of rows) { const k = bucketKey(a, args.group_by); if (k) (buckets[k] ??= []).push(a); }
