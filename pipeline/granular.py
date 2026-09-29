@@ -115,10 +115,13 @@ def normalize_hrv(day: str, raw: Any) -> dict[str, Any]:
 
 
 def activity_type(activity: dict[str, Any]) -> str:
-    raw = activity.get("activityType")
-    if isinstance(raw, dict):
-        return str(raw.get("typeKey") or "").lower()
-    return str(raw or "").lower()
+    for field in ("activityType", "activityTypeDTO"):
+        raw = activity.get(field)
+        if isinstance(raw, dict):
+            raw = raw.get("typeKey") or raw.get("typeName")
+        if raw:
+            return str(raw).lower()
+    return ""
 
 
 def is_endurance_activity(kind: str) -> bool:

@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .activity_backfill import is_job_stopping_error
+from .activity_backfill import is_job_stopping_error, is_supported_activity
 from .activity_refresh import refresh_activity
 from .coach_backfill import run as run_coach_backfill
 from .granular import activity_type
@@ -79,6 +79,28 @@ def _missing_artifacts(row: dict[str, str], keys: set[str]) -> bool:
     return False
 
 
+def _complete_activity_details(
+    activity: dict[str, Any], row: dict[str, str]
+) -> dict[str, Any]:
+    """Fill fields omitted by Garmin's detail endpoint from its saved summary."""
+    activity_id = row["Activity ID"].removeprefix("garmin-")
+    if str(activity.get("activityId") or "") != activity_id:
+        raise ValueError("Garmin activity details do not match the requested ID")
+    complete = dict(activity)
+    summary_type = row.get("Activity Type", "").strip()
+    if not is_supported_activity(complete) and is_supported_activity(
+        {"activityType": summary_type}
+    ):
+        complete["activityType"] = {"typeKey": summary_type}
+    if not (complete.get("startTimeLocal") or complete.get("startTimeGMT")):
+        summary_date = row.get("Activity Date", "").strip()
+        if summary_date:
+            complete["startTimeLocal"] = summary_date
+    if not complete.get("activityName"):
+        complete["activityName"] = row.get("Activity Name", "")
+    return complete
+
+
 def run(
     *,
     baseline: Path,
@@ -129,6 +151,7 @@ def run(
             activity = garmin.get_activity(activity_id)
             if not isinstance(activity, dict):
                 raise ValueError("Garmin did not return activity details")
+            activity = _complete_activity_details(activity, row)
             refreshed = refresh_activity(
                 activity,
                 garmin=garmin,
