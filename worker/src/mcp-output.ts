@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { refreshReportSchema } from "./refresh-report";
+import { latestActivityReportSchema } from "./latest-activity-report";
 
 const nullableNumber = z.number().finite().nullable();
 const nullableString = z.string().nullable();
@@ -474,6 +475,19 @@ export const outputSchemas = {
     activity_ready: z.boolean().nullable().optional(),
     activity_refresh: refreshReportSchema.optional(),
   }),
+  sync_latest_activity: z.object({
+    accepted: z.boolean(),
+    reason: z.enum(["cooldown", "daily_limit"]).optional(),
+    retry_after_seconds: z.number().int().positive().optional(),
+    message: z.string(),
+    run: refreshRun.nullable().optional(),
+    terminal: z.boolean(),
+    data_ready: z.boolean(),
+    should_continue_polling: z.boolean(),
+    poll_after_seconds: z.number().int().positive().optional(),
+    activity_ready: z.boolean().nullable().optional(),
+    latest_activity: latestActivityReportSchema.optional(),
+  }),
   refresh_status: z.object({
     available: z.boolean(),
     message: z.string(),
@@ -484,6 +498,7 @@ export const outputSchemas = {
     poll_after_seconds: z.number().int().positive().optional(),
     activity_ready: z.boolean().nullable().optional(),
     activity_refresh: refreshReportSchema.optional(),
+    latest_activity: latestActivityReportSchema.optional(),
   }),
 } as const;
 

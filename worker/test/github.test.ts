@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  RefreshConfig, dispatchRefresh, getRefreshRun, latestRefreshRun, normalizeRefreshRun,
+  RefreshConfig, dispatchLatestActivity, dispatchRefresh, getRefreshRun, latestRefreshRun, normalizeRefreshRun,
   pollRefreshRun, refreshDecision, refreshProgress,
 } from "../src/github";
 
@@ -162,6 +162,31 @@ describe("GitHub refresh helpers", () => {
       return Response.json({ ...RUN, path: ".github/workflows/refresh.yml" });
     };
     await expect(dispatchRefresh(CONFIG, fetcher)).resolves.toEqual(RUN);
+  });
+
+  it("dispatches a bounded latest-activity import with an optional exact ID", async () => {
+    let request = 0;
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      request += 1;
+      if (request === 1) {
+        expect(JSON.parse(String(init?.body))).toEqual({
+          ref: "main",
+          inputs: {
+            latest_activity_only: true, latest_new_activity_expected: true,
+            latest_activity_id: "123",
+          },
+          return_run_details: true,
+        });
+        return Response.json({ workflow_run_id: RUN.id });
+      }
+      return Response.json({ ...RUN, path: ".github/workflows/refresh.yml" });
+    };
+    await expect(dispatchLatestActivity(CONFIG, {
+      activityId: "123", newActivityExpected: true,
+    }, fetcher)).resolves.toEqual(RUN);
+    await expect(dispatchLatestActivity(CONFIG, {
+      activityId: "../../bad", newActivityExpected: true,
+    }, fetcher)).rejects.toThrow("numeric Garmin ID");
   });
 
   it("rejects a malformed workflow-dispatch receipt", async () => {

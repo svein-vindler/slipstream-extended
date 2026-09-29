@@ -55,6 +55,21 @@ steps and the laps actually performed are separate. If no Garmin workout or
 explicit correction exists, the first version treats the continuous activity as
 one main section; it does not guess intervals from pace or heart rate.
 
+After a new workout, request the targeted import rather than waiting for the
+nightly detailed-file job:
+
+> Using Slipstream, sync today's latest Garmin workout now. Wait for the same job to
+> finish, then confirm that its detailed files and Coach Input are ready for
+> the exact activity ID before analyzing it. If Garmin has not supplied the
+> files yet, tell me what is missing instead of analyzing only the summary.
+
+This explicitly authorizes `sync_latest_activity` to update private R2. A
+question about an already stored workout does not authorize a Garmin sync.
+The targeted import searches only the most recent week. When you say "today",
+the assistant should pass that local date as `expected_date`, preventing an
+older session from being presented as the new one. An exact recent Garmin
+activity ID can also be supplied.
+
 These single prompts do a lot, because you are handing the assistant a role and
 your data at once:
 

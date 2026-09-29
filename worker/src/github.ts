@@ -213,6 +213,33 @@ export async function dispatchRefresh(
   config: RefreshConfig,
   fetcher: Fetcher = fetch,
 ): Promise<RefreshRun | null> {
+  return dispatchWithInputs(config, { include_granular: true }, fetcher);
+}
+
+export async function dispatchLatestActivity(
+  config: RefreshConfig,
+  options: { activityId?: string; newActivityExpected: boolean; expectedDate?: string },
+  fetcher: Fetcher = fetch,
+): Promise<RefreshRun | null> {
+  if (options.activityId && !/^\d{1,20}$/.test(options.activityId)) {
+    throw new Error("Activity ID must be a numeric Garmin ID.");
+  }
+  if (options.expectedDate && !/^\d{4}-\d{2}-\d{2}$/.test(options.expectedDate)) {
+    throw new Error("Expected date must use YYYY-MM-DD.");
+  }
+  return dispatchWithInputs(config, {
+    latest_activity_only: true,
+    latest_new_activity_expected: options.newActivityExpected,
+    ...(options.expectedDate ? { latest_expected_date: options.expectedDate } : {}),
+    ...(options.activityId ? { latest_activity_id: options.activityId } : {}),
+  }, fetcher);
+}
+
+async function dispatchWithInputs(
+  config: RefreshConfig,
+  inputs: Record<string, boolean | string>,
+  fetcher: Fetcher,
+): Promise<RefreshRun | null> {
   const payload = await githubJson(
     config,
     `${workflowPath(config)}/dispatches`,
@@ -220,7 +247,7 @@ export async function dispatchRefresh(
       method: "POST",
       body: JSON.stringify({
         ref: config.ref,
-        inputs: { include_granular: true },
+        inputs,
         return_run_details: true,
       }),
     },

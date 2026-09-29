@@ -95,7 +95,8 @@ def _complete_activity_details(
     if not (complete.get("startTimeLocal") or complete.get("startTimeGMT")):
         summary_date = row.get("Activity Date", "").strip()
         if summary_date:
-            complete["startTimeLocal"] = summary_date
+            # activities.csv stores UTC, not the device's local time.
+            complete["startTimeGMT"] = summary_date
     if not complete.get("activityName"):
         complete["activityName"] = row.get("Activity Name", "")
     return complete

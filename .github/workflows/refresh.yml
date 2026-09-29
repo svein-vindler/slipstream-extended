@@ -28,6 +28,24 @@ on:
         required: false
         default: false
         type: boolean
+      latest_activity_only:
+        description: "Import only the latest recent Garmin activity, its files and Coach Input"
+        required: false
+        default: false
+        type: boolean
+      latest_activity_id:
+        description: "Optional numeric Garmin activity ID within the recent window"
+        required: false
+        type: string
+      latest_new_activity_expected:
+        description: "Report no new workout instead of re-importing a complete older one"
+        required: false
+        default: true
+        type: boolean
+      latest_expected_date:
+        description: "Optional Garmin-local date of the expected workout (YYYY-MM-DD)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -56,6 +74,9 @@ jobs:
       HEALTH_END: ${{ inputs.health_end }}
       BACKFILL_START_YEAR: ${{ inputs.backfill_start_year }}
       BACKFILL_END_YEAR: ${{ inputs.backfill_end_year }}
+      LATEST_ACTIVITY_ID: ${{ inputs.latest_activity_id }}
+      LATEST_NEW_ACTIVITY_EXPECTED: ${{ inputs.latest_new_activity_expected }}
+      LATEST_EXPECTED_DATE: ${{ inputs.latest_expected_date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -66,11 +87,12 @@ jobs:
       - name: Restore current summaries from private R2
         run: python -m pipeline.summary_restore --data-dir data
       - name: Remember activities already stored before an on-demand refresh
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular && !inputs.latest_activity_only }}
         run: |
           python -m pipeline.manual_activity_refresh snapshot \
             --summary data/activities.csv --output .granular/on-demand-baseline.json
       - name: Fetch + write data/
+        if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only }}
         run: |
           if [ -n "$BACKFILL_START_YEAR" ] || [ -n "$BACKFILL_END_YEAR" ]; then
             if [ -z "$BACKFILL_START_YEAR" ] || [ -z "$BACKFILL_END_YEAR" ]; then
@@ -106,14 +128,17 @@ jobs:
               --health-days "$HEALTH_DAYS_BACK"
           fi
       - name: Upload summaries and daily snapshot to private R2
+        if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only }}
         run: python -m pipeline.summary_export --data-dir data
       - name: Refresh recent detailed sleep and body composition
+        if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only }}
         run: |
           python -m pipeline.health_detail_backfill \
             --max-sleep-days 3 \
             --max-body-days 3 \
             --refresh-recent-days 3
       - name: Refresh recent detailed HRV
+        if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only }}
         run: |
           python -m pipeline.granular_export \
             --hrv-days 3 \
@@ -122,12 +147,34 @@ jobs:
             --strength-count 0 \
             --upload-r2
       - name: Import newly discovered workouts and missing recent files
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular && !inputs.latest_activity_only }}
         run: |
           python -m pipeline.manual_activity_refresh process \
             --baseline .granular/on-demand-baseline.json \
             --summary data/activities.csv \
             --run-id "$GITHUB_RUN_ID"
+      - name: Import one recent activity and its coach input
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.latest_activity_only }}
+        run: |
+          args=(--run-id "$GITHUB_RUN_ID" --data-dir data --lookback-days 7)
+          if [[ "$LATEST_NEW_ACTIVITY_EXPECTED" == "false" ]]; then
+            args+=(--new-activity-expected false)
+          fi
+          if [[ -n "$LATEST_EXPECTED_DATE" ]]; then
+            if ! [[ "$LATEST_EXPECTED_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+              echo "latest_expected_date must use YYYY-MM-DD."
+              exit 2
+            fi
+            args+=(--expected-date "$LATEST_EXPECTED_DATE")
+          fi
+          if [[ -n "$LATEST_ACTIVITY_ID" ]]; then
+            if ! [[ "$LATEST_ACTIVITY_ID" =~ ^[0-9]{1,20}$ ]]; then
+              echo "latest_activity_id must be a numeric Garmin ID."
+              exit 2
+            fi
+            args+=(--activity-id "$LATEST_ACTIVITY_ID")
+          fi
+          python -m pipeline.latest_activity "${args[@]}"
       - name: Reconcile health history indexes with canonical R2 objects
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && (github.event_name == 'schedule' || !inputs.latest_activity_only) }}
         run: python -m pipeline.health_history_index

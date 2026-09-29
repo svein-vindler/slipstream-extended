@@ -63,6 +63,21 @@ morning measurement. See [WEIGHT_HISTORY.md](WEIGHT_HISTORY.md).
 For a refresh test, ask it to refresh today's Garmin data and wait until the
 run completes. This requires the optional GitHub Worker secrets described in
 [INSTALL.md](INSTALL.md#11-optional-allow-chat-triggered-refresh).
+For coaching right after training, ask: **"Sync today's latest Garmin workout, wait
+until its detailed files and Coach Input are ready, then analyze that exact
+activity."** The `sync_latest_activity` tool fetches a recent Garmin summary,
+then imports only the selected activity's FIT/TCX and Coach Input. It checks
+the same activity ID throughout and returns a specific incomplete status if
+Garmin has not made the files available or Coach Input cannot be generated.
+If you say a new workout is expected but Garmin still shows only an older,
+already complete workout, it returns `no_new_activity` instead of calling the
+older workout the new one. When the date is known, the client passes
+`expected_date` and a different Garmin-local date returns
+`expected_activity_missing` even if the older workout is complete.
+It may be requested at most once every five minutes and twelve times per UTC
+day. Use `refresh_status` with the returned run ID until the job finishes;
+only then read `coach_input` and `endurance_session` for that ID. Simply asking
+about data already stored in Slipstream should remain a read-only request.
 If a recent workout is missing, say so explicitly: `refresh_today` can use a
 five-minute minimum interval for that case instead of the usual 30-minute
 cooldown. Its result distinguishes a completed summary refresh from newly
