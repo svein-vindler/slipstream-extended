@@ -66,11 +66,11 @@ def build_summary_exports(
     return objects, manifest
 
 
-def run(data_dir: str = "data") -> dict[str, Any]:
+def run(data_dir: str = "data", *, store=None) -> dict[str, Any]:
     from .r2_store import R2Store
 
     objects, manifest = build_summary_exports(data_dir)
-    store = R2Store()
+    store = store or R2Store()
     for item in objects:
         store.put(
             item["key"], item["data"], item["content_type"],

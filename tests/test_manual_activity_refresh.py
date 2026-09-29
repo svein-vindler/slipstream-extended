@@ -147,7 +147,7 @@ def test_on_demand_uses_summary_type_when_detail_omits_it(monkeypatch, tmp_path)
 
     def refresh(activity, *, existing_keys, **kwargs):
         assert activity["activityType"] == {"typeKey": "Run"}
-        assert activity["startTimeLocal"].startswith("2026-09-28")
+        assert activity["startTimeGMT"].startswith("2026-09-28")
         for key in (
             "activity.fit", "activity.v1.json", "activity.tcx",
             "activity.endurance.v1.json",

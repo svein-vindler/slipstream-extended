@@ -57,6 +57,8 @@ class Activity:
     avg_watts: float | None = None
     calories: float | None = None
     track_file: str | None = None
+    local_start_date: str | None = None
+    local_start_time: str | None = None
 
     def __post_init__(self):
         self.start = to_utc(self.start)

@@ -54,11 +54,18 @@ def _download_track(g, activity_id, data_dir: str) -> str | None:
         return None
 
 
-def fetch(days_back: int = 30, download_tracks: bool = False, data_dir: str = "data") -> list[Activity]:
-    g = _login()
-    start = (date.today() - timedelta(days=days_back)).isoformat()
-    end = date.today().isoformat()
-    raw_list = g.get_activities_by_date(start, end)
+def fetch(
+    days_back: int = 30,
+    download_tracks: bool = False,
+    data_dir: str = "data",
+    *,
+    client=None,
+    end_date: date | None = None,
+) -> list[Activity]:
+    g = client or _login()
+    requested_end = end_date or date.today()
+    start = (requested_end - timedelta(days=days_back)).isoformat()
+    raw_list = g.get_activities_by_date(start, requested_end.isoformat())
 
     out: list[Activity] = []
     for r in raw_list:
@@ -82,5 +89,14 @@ def fetch(days_back: int = 30, download_tracks: bool = False, data_dir: str = "d
             avg_watts=r.get("avgPower") or r.get("averagePower"),
             calories=r.get("calories"),
             track_file=_download_track(g, aid, data_dir) if download_tracks else None,
+            local_start_date=(
+                str(r.get("startTimeLocal"))[:10]
+                if isinstance(r.get("startTimeLocal"), str)
+                and len(r["startTimeLocal"]) >= 10 else None
+            ),
+            local_start_time=(
+                r.get("startTimeLocal")
+                if isinstance(r.get("startTimeLocal"), str) else None
+            ),
         ))
     return out
