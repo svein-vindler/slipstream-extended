@@ -2,7 +2,8 @@ import csv
 from datetime import date
 from pathlib import Path
 
-from pipeline.manual_activity_refresh import run, snapshot
+from pipeline.granular import activity_type
+from pipeline.manual_activity_refresh import _complete_activity_details, run, snapshot
 
 
 def _summary(path: Path, rows: list[tuple[str, str, str]]) -> None:
@@ -131,3 +132,76 @@ def test_snapshot_rejects_missing_activity_id(tmp_path):
         assert "Activity ID" in str(exc)
     else:
         raise AssertionError("snapshot should reject invalid summaries")
+
+
+def test_on_demand_uses_summary_type_when_detail_omits_it(monkeypatch, tmp_path):
+    summary = tmp_path / "activities.csv"
+    baseline = tmp_path / "baseline.json"
+    _summary(summary, [("2", "2026-09-28", "Run")])
+    baseline.write_text("[]", encoding="utf-8")
+    store = FakeStore()
+
+    class GarminWithoutSummaryFields:
+        def get_activity(self, activity_id):
+            return {"activityId": activity_id}
+
+    def refresh(activity, *, existing_keys, **kwargs):
+        assert activity["activityType"] == {"typeKey": "Run"}
+        assert activity["startTimeLocal"].startswith("2026-09-28")
+        for key in (
+            "activity.fit", "activity.v1.json", "activity.tcx",
+            "activity.endurance.v1.json",
+        ):
+            existing_keys.add(f"activities/2026/2/{key}")
+        return {"status": "refreshed"}
+
+    def coach(*, priority_activity_ids, **kwargs):
+        assert priority_activity_ids == {"2"}
+        store.put(
+            "activities/2026/2/coach-input/v1/canonical/test.json",
+            b"{}", "application/json",
+        )
+        return {"processed_sources": {"2": "signature"},
+                "blocked_activities": [], "skipped_this_run": []}
+
+    monkeypatch.setattr("pipeline.manual_activity_refresh.refresh_activity", refresh)
+    monkeypatch.setattr("pipeline.manual_activity_refresh.run_coach_backfill", coach)
+    result = run(
+        baseline=baseline,
+        summary=summary,
+        store=store,
+        garmin=GarminWithoutSummaryFields(),
+        today=date(2026, 9, 28),
+    )
+
+    assert result["activities"][0]["files_ready"] is True
+    assert result["activities"][0]["coach_status"] == "ready"
+
+
+def test_detail_type_fallback_preserves_explicit_supported_type():
+    row = {
+        "Activity ID": "garmin-123",
+        "Activity Date": "2026-09-28 10:00:00",
+        "Activity Type": "Run",
+    }
+    detail = {
+        "activityId": 123,
+        "activityType": {"typeKey": "cycling"},
+        "startTimeLocal": "2026-09-28 10:05:00",
+    }
+    complete = _complete_activity_details(detail, row)
+    assert activity_type(complete) == "cycling"
+    assert complete["startTimeLocal"] == "2026-09-28 10:05:00"
+
+
+def test_detail_type_fallback_recognizes_dto_and_unknown_detail_type():
+    row = {
+        "Activity ID": "garmin-123",
+        "Activity Date": "2026-09-28 10:00:00",
+        "Activity Type": "Run",
+    }
+    assert activity_type({"activityTypeDTO": {"typeKey": "running"}}) == "running"
+    complete = _complete_activity_details(
+        {"activityId": 123, "activityType": {"typeKey": "other"}}, row
+    )
+    assert activity_type(complete) == "run"
