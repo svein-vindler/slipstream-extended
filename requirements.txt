@@ -320,9 +320,9 @@ curl-cffi==0.16.3 \
     --hash=sha256:f3b63da797912bc82911e34dfe449725514e4281527fb516931fc457087cfb44 \
     --hash=sha256:fe87b66e324ed7318166698e02169f3208dbda32b872a27d2bc61a9c19b335eb
     # via garminconnect
-garmin-fit-sdk==21.214.0 \
-    --hash=sha256:9fa66c8bc6983808e784ba5058c550831c2621862097f41998a3ba129b7b7c6d \
-    --hash=sha256:c64c61c5582fc3e609a09a64ff9ff1ee78126da91dfc72ceefd378a92bb290ce
+garmin-fit-sdk==21.217.0 \
+    --hash=sha256:382bc4cba7cc3e26bd6d65fbf5ad6864cf15feeafcf21dd226e2697df1063e96 \
+    --hash=sha256:df88c37cb0b28cdebbb1b0aeb9c514b078c832a0ab4e4f4ca14d19ccecd27ed2
     # via -r requirements.in
 garminconnect==0.3.16 \
     --hash=sha256:2a5e838bf19608ff62329ef9845658bfed0c4974d7b1e486e3a49595438b69c5 \
