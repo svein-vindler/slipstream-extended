@@ -135,11 +135,18 @@ seven days.
 Source object revisions are recorded inside each private index. Re-running the
 builder skips unchanged months at the current builder revision, making it safe
 and resumable while still allowing corrected summaries to be rebuilt. Normal HRV and
-sleep ingestion updates only affected months automatically. The six-hour and
-on-demand refresh workflow also performs a final full reconciliation. It reads
-revision metadata first and rewrites only changed months, so a process that was
-interrupted between writing a daily object and its index repairs itself on the
-next refresh.
+sleep ingestion updates only affected months automatically. The six-hour
+scheduled refresh performs a final check of the current and previous calendar
+months, including the next month when a Garmin-local date can be ahead of UTC
+at a month boundary. Manual general refresh repairs its own affected months.
+Initial, missing, invalid or at-least-seven-day-old full-check receipts trigger
+a full R2 index reconciliation instead. The next scheduled run executes that
+due check; the existing schedule can defer it beyond exactly seven days.
+Streams are planned independently. Receipt/builder version changes also force
+a full check. Interrupted writes, storage errors and invalid canonical schemas
+cannot advance the affected stream's full-check receipt. Invalid source rows
+are retried, and removed source months produce empty derived indexes. Canonical
+objects are never deleted or changed by this maintenance.
 
 ## Initial index build
 
@@ -154,6 +161,27 @@ from the repository root after configuring `.env.local-bootstrap`:
 It is safe to stop and rerun. Unchanged months are skipped. To build only recent
 months, add `--recent-months 3`. Users who prefer GitHub Actions can run
 **Build health history indexes** once with `stream=all` and `recent_months=0`.
+Its default `mode=full` retains immediate full repair. `mode=scheduled` exercises
+the same recent/weekly policy as the six-hour refresh and cannot be combined
+with date/month filters. Locally, add `--scheduled` for that policy. Full manual
+builds do not advance scheduling receipts; the next scheduled full check still
+establishes its own successful checkpoint.
+
+Small private receipts at
+`refresh/checks/v1/health-index/{hrv|sleep}/reconciliation.json` record only
+schema/policy/builder versions, stream, full scope, status and check time. They
+describe consistency with stored R2 data, not Garmin freshness or completeness.
+Recent repeats retain the receipt bytes and do not write them again.
+
+`python scripts/benchmark_health_indexes.py` compares full and recent checks
+over 120 synthetic months per stream and 28 days per month, with 1,000-object
+LIST pagination and real `R2Store` guards. Unchanged full/recent checks consider
+240/4 months, perform 240/6 GETs and 10/4 LIST pages, and write zero objects.
+These exclude other refresh stages and are not production cost/latency claims.
+Reports count successful LIST pages (including budget inventory), listed object
+entries and GET/HEAD/PUT SDK invocations; SDK/HTTP internal retries are excluded.
+Any actual write still performs the existing full-bucket budget inventory once
+per store instance. A successful weekly full check adds two small receipt PUTs.
 
 ## Repair selected nights after travel
 
@@ -195,7 +223,7 @@ rather than about 180 daily objects.
 Read-through adds at most two bounded monthly prefix scans. A summary request
 normally performs no extra object read when index ETags match; the worst case is
 31 canonical reads for a daily query or seven for a weekly query. A normal
-refresh's reconciliation lists revisions and skips unchanged months. These
+refresh's recent/weekly reconciliation lists revisions and skips unchanged months. These
 bounds keep the self-healing behavior comfortably below the existing Worker
 subrequest and project R2 budgets.
 

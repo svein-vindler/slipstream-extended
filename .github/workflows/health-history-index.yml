@@ -9,6 +9,12 @@ on:
         default: all
         type: choice
         options: [all, hrv, sleep]
+      mode:
+        description: "Full repair, or recent months with automatic weekly full repair"
+        required: true
+        default: full
+        type: choice
+        options: [full, scheduled]
       start_date:
         description: "Optional first date (YYYY-MM-DD)"
         required: false
@@ -45,6 +51,7 @@ jobs:
       R2_MAX_WRITES_PER_RUN: "250"
       R2_MAX_WRITE_BYTES_PER_RUN: "536870912"
       STREAM: ${{ inputs.stream }}
+      MODE: ${{ inputs.mode }}
       START_DATE: ${{ inputs.start_date }}
       END_DATE: ${{ inputs.end_date }}
       RECENT_MONTHS: ${{ inputs.recent_months }}
@@ -59,6 +66,13 @@ jobs:
         shell: bash
         run: |
           args=()
+          if [[ "$MODE" == "scheduled" ]]; then
+            if [[ -n "$START_DATE" || -n "$END_DATE" || "$RECENT_MONTHS" != "0" ]]; then
+              echo "Scheduled maintenance requires no date/month filters."
+              exit 2
+            fi
+            args+=(--scheduled)
+          fi
           if [[ "$STREAM" != "all" ]]; then args+=(--stream "$STREAM"); fi
           if [[ -n "$START_DATE" ]]; then args+=(--start-date "$START_DATE"); fi
           if [[ -n "$END_DATE" ]]; then args+=(--end-date "$END_DATE"); fi

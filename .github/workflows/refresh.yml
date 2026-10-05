@@ -209,7 +209,7 @@ jobs:
           if [[ -n "$SYNC_REQUEST_ID" ]]; then args+=(--request-id "$SYNC_REQUEST_ID"); fi
           python -m pipeline.latest_night "${args[@]}"
       - name: Reconcile health history indexes with canonical R2 objects
-        # Manual imports repair their own affected months; broad reconciliation
-        # remains attached to the existing scheduled refresh.
+        # Manual imports repair their affected months. Scheduled maintenance
+        # checks recent months, with a successful full reconciliation weekly.
         if: ${{ !cancelled() && github.event_name == 'schedule' }}
-        run: python -m pipeline.health_history_index
+        run: python -m pipeline.health_history_index --scheduled
