@@ -141,13 +141,54 @@ The benchmark also reports local elapsed time. One local run for unchanged
 metadata measured 0.876 ms before and 0.465 ms after; these are in-memory Python
 timings, not production network latency. This change reduces actual downloads
 and analyzer work; it does not parallelize existing calls or reduce LIST counts.
-PUTs were already skipped for unchanged analyses. Summary exports and scheduled
-source windows require separate incremental improvements.
+PUTs were already skipped for unchanged targeted analyses. Scheduled source
+windows and reconciliation require separate incremental improvements.
 
 The pipeline logs `targeted_coach_input` with only the `analysis_reused` boolean
 so a private canary can confirm the reuse branch. It logs no activity IDs or
 fitness values. Run one known activity to upgrade a legacy pointer, then repeat
 the same targeted request and check that reuse is true and the package is ready.
+
+## Incremental general manual refresh
+
+The older `refresh_today` tool still dispatches the broad refresh workflow, but
+its selected new/recent running activities now use the same single-activity
+Coach Input pipeline and input signature. It keeps the existing ten-activity
+limit, file-fingerprint checks and source observations. Missing profiles or
+artifacts remain explicit; failed analysis does not turn a successful
+file import into a file failure. Missing Garmin-local dates may be recovered
+from matching canonical metadata; the UTC summary date is never a local date.
+
+This path no longer invokes the historical coach backfill or modifies its plan.
+The initial activity inventory used to choose candidates remains unchanged.
+The broad health steps and their recent reconciliation windows remain active;
+the integration checks recent source data instead of assuming a modified-since
+feed. Thus "incremental" means reusing unchanged artifacts and analyses, not
+eliminating all Garmin observations.
+
+Summary export, shared by general, scheduled and targeted activity updates,
+now skips objects whose single-PUT content checksum, size, type and encoding
+match. It uses HEAD requests and retains all write-budget guards for changed,
+missing or unrecognized objects. A repeated unchanged export preserves the
+manifest's `generated_at`: this records content generation, not source-check
+freshness. Each new UTC day still gets its two recovery snapshots. The manifest
+is written last, so an interrupted export can resume without rewriting completed
+objects. Missing files are repaired even if the manifest claims unchanged data.
+
+`python scripts/benchmark_summary_reuse.py --baseline` reproduces the original
+always-write export; omit `--baseline` to measure the new path with synthetic
+CSV files and no external services. For an unchanged repeat, the baseline uses
+five PUTs and one inventory LIST; the new path uses one manifest GET, five HEADs,
+zero PUTs and zero inventory LISTs. Initial generation still writes five objects
+and adds metadata checks. A changed CSV writes its current object, today's
+snapshot and the manifest; a new day writes two snapshots and the manifest.
+These are local operation counts, not production latency or total-cost claims.
+
+The metadata checks follow [R2's S3 compatibility](https://developers.cloudflare.com/r2/api/s3/api/)
+and [S3's ETag semantics](https://docs.aws.amazon.com/AmazonS3/latest/API/API_Object.html).
+Multipart, missing or unexpected ETags conservatively write through the guards.
+Private-canary diagnostics log only summary objects written/unchanged and the
+coach reuse boolean; no private fitness values are added to these diagnostics.
 
 ## Measurement and private-canary validation
 

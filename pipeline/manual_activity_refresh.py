@@ -11,8 +11,9 @@ from typing import Any
 
 from .activity_backfill import is_job_stopping_error, is_supported_activity
 from .activity_refresh import refresh_activity
-from .coach_backfill import run as run_coach_backfill
-from .granular import activity_type
+from .coach_backfill import _float, _json
+from .coach_backfill import run_one as run_coach_one
+from .granular import activity_prefix, activity_type
 from .granular_export import activity_artifact_keys
 from .r2_store import R2BudgetError, R2Store
 from .sources.garmin import _login
@@ -102,6 +103,27 @@ def _complete_activity_details(
     return complete
 
 
+def _coach_metadata(activity: dict[str, Any], row: dict[str, str], store) -> dict[str, Any] | None:
+    """Use Garmin-local dates, including a canonical fallback, never CSV UTC."""
+    local = activity.get("startTimeLocal")
+    if not local:
+        canonical = _json(store, f"{activity_prefix(activity)}/activity.v1.json")
+        canonical_activity = canonical.get("activity", {})
+        if str(canonical_activity.get("id")) != str(activity["activityId"]):
+            return None
+        local = canonical_activity.get("start_time_local")
+    try:
+        day = date.fromisoformat(str(local)[:10]).isoformat()
+    except ValueError:
+        return None
+    moving = _float(row.get("Moving Time"))
+    if moving is not None and moving.is_integer():
+        moving = int(moving)
+    return {"id": str(activity["activityId"]), "date": day,
+            "name": activity.get("activityName"), "type": activity_type(activity),
+            "moving_seconds": moving}
+
+
 def run(
     *,
     baseline: Path,
@@ -136,7 +158,6 @@ def run(
     candidates = (new_rows + fallback_rows)[:max_activities]
     garmin = garmin or (_login() if candidates else None)
     results: list[dict[str, Any]] = []
-    running_ids: set[str] = set()
 
     for row in candidates:
         activity_id = row["Activity ID"].removeprefix("garmin-")
@@ -165,8 +186,25 @@ def run(
                 key in existing_keys for key in activity_artifact_keys(activity)
             ) if refreshed["status"] != "unsupported" else False
             if "run" in activity_type(activity):
-                running_ids.add(activity_id)
                 result["coach_status"] = "pending" if result["files_ready"] else "missing_artifacts"
+                if result["files_ready"]:
+                    try:
+                        metadata = _coach_metadata(activity, row, store)
+                        if metadata is None:
+                            result["coach_status"] = "activity_date_unknown"
+                        else:
+                            plan = run_coach_one(activity=metadata, store=store)
+                            blocked = plan.get("blocked_activities", [])
+                            result["coach_status"] = (
+                                "ready" if activity_id in plan.get("processed_sources", {})
+                                else str(blocked[0]["reason"]) if blocked else "pending"
+                            )
+                            result["coach_reused"] = activity_id in plan.get("reused_sources", {})
+                    except R2BudgetError:
+                        raise
+                    except Exception as exc:
+                        result["coach_status"] = "error"
+                        print(f"On-demand coach input failed: {type(exc).__name__}")
         except R2BudgetError:
             raise
         except Exception as exc:
@@ -177,38 +215,6 @@ def run(
             if "run" in row.get("Activity Type", "").lower():
                 result["coach_status"] = "error"
         results.append(result)
-
-    # Prioritize the specific workouts that this refresh just imported. The
-    # ordinary scheduled coach backfill still handles the remaining history.
-    coach_plan = run_coach_backfill(
-        max_activities=MAX_ACTIVITIES,
-        store=store,
-        priority_activity_ids=running_ids,
-    ) if running_ids else None
-    processed = coach_plan.get("processed_sources", {}) if coach_plan else {}
-    skipped = {
-        item.get("activity_id")
-        for item in coach_plan.get("skipped_this_run", [])
-    } if coach_plan else set()
-    blocked = {
-        item.get("activity_id"): item.get("reason")
-        for item in coach_plan.get("blocked_activities", [])
-    } if coach_plan else {}
-    for result in results:
-        activity_id = result["activity_id"].removeprefix("garmin-")
-        if activity_id not in running_ids or not result["files_ready"]:
-            continue
-        coach_prefix = (
-            f"activities/{result['date'][:4]}/{activity_id}/coach-input/v1/canonical/"
-        )
-        if (
-            activity_id in processed
-            and activity_id not in skipped
-            and store.list_keys(coach_prefix)
-        ):
-            result["coach_status"] = "ready"
-        else:
-            result["coach_status"] = str(blocked.get(activity_id) or "pending")
 
     report = {
         "schema_version": 1,
