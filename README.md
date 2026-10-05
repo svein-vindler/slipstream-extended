@@ -107,10 +107,14 @@ and quiesce automatically when complete.
 
 Each six-hour summary refresh also refreshes the three most recent HRV and
 detailed-sleep dates. A chat-triggered refresh performs the same recent-health
-steps, checks recent activity artifacts and generates coach input for refreshed
-running activities. Therefore `data_ready` means these related R2 outputs have
-finished—not merely that the summary CSV was written. A configured coach profile
-and usable endurance artifacts are still required for an analysis.
+steps, checks recent activity artifacts and prepares coach input for selected
+new/recent running activities. Unchanged activity files and ready analyses are
+reused; unchanged summaries and same-day snapshots skip uploads. Recent source
+data is still checked so late changes can be reconciled.
+
+`data_ready` reports workflow completion. Check each activity's `files_ready`
+and `coach_status` before claiming its files and analysis are ready. A configured
+coach profile and usable endurance artifacts are still required for an analysis.
 
 For a new installation with years of history, an optional
 [local overnight bootstrap](docs/LOCAL_BOOTSTRAP.md) can advance the same R2
@@ -119,14 +123,16 @@ guards, and requires the scheduled cloud jobs to be paused while it runs. The
 same local tooling can seed canonical HRV and sleep objects from existing raw
 Garmin JSON exports, skipping anything already present in R2.
 
-Coach generation runs as a separate R2-only consumer after activity-producing
-workflows. It keeps a per-activity source index, so unchanged FIT/TCX artifacts
-are not reread on every historical backfill cycle.
+Historical coach generation runs as a separate R2-only consumer after scheduled
+refresh and other activity-producing workflows. Manual refresh prepares its
+selected analyses directly and skips the automatic historical follow-up. The
+historical consumer keeps a per-activity source index, so unchanged FIT/TCX
+artifacts are not reread on every backfill cycle.
 
 Manual refresh:
 
 ```bash
-gh workflow run refresh.yml
+gh workflow run refresh.yml -f include_granular=true
 ```
 
 Optional chat-triggered refresh requires a fine-grained, single-repository
