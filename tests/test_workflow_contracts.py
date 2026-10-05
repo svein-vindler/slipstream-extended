@@ -52,3 +52,12 @@ def test_targeted_night_excludes_broad_fetch_export_and_backfill():
     assert 'cron: "0 */6 * * *"' in workflow
     reconciliation = next(step for step in steps if step.startswith("Reconcile health history"))
     assert "github.event_name == 'schedule'" in next(line for line in reconciliation.splitlines() if "if:" in line)
+
+
+def test_general_body_refresh_uses_bounded_dayviews_without_historical_backfill():
+    workflow = (ROOT / ".github/workflows/refresh.yml").read_text(encoding="utf-8")
+    body = next(step for step in workflow.split("      - name: ") if step.startswith("Refresh recent body composition"))
+    assert "pipeline.recent_body --max-days 3 --summary data/health_daily.csv" in body
+    assert "health_detail_backfill" not in workflow
+    assert "github.event_name == 'schedule'" in body
+    assert "!inputs.latest_activity_only && !inputs.latest_night_only" in body

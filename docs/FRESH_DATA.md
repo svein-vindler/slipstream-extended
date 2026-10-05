@@ -256,6 +256,61 @@ historical plans and prior immutable activity analyses/snapshots are preserved.
 Changed-source and failure/recovery cases are covered with synthetic fixtures;
 do not edit private fitness data just to manufacture a canary source change.
 
+## Incremental recent individual weigh-ins
+
+General manual and scheduled refresh use `pipeline.recent_body --max-days 3`
+with the freshly fetched local health summary. Standalone calls without
+`--summary` read the current R2 health summary instead. This retains the existing
+three most recent measurement dates, rather than assuming daily weigh-ins or a
+three-calendar-day window. Dates are selected directly from Garmin's populated
+weight summary rows; the runner permits a source-local day one day ahead of its
+clock. Missing older dates are handled by the existing explicit backfill jobs.
+
+The importer uses `get_daily_weigh_ins`, whose dayview request includes all
+individual measurements. It keeps every actual sample and its original clocks,
+ID and optional composition fields. Dayview rows and nested metric lists must
+all be usable: positive individual weights, valid timestamps and consistent
+declared/local dates. Empty responses, aggregates-only, latest-only wrappers,
+malformed/mixed-date rows and incomplete required sample fields preserve the
+previous canonical object and successful receipt. Optional composition fields
+may be absent on legitimate weight-only measurements. An empty day is not
+interpreted as permission to delete existing data.
+
+Canonical keys and schema remain `health/body-composition/v1/YYYY/MM/day.json`.
+Normalized samples are sorted deterministically without deduplication, so
+provider ordering alone is not a content change and repeated wall clocks during
+DST retain both actual samples. A formerly stored different array order can
+require one guarded write for a selected day. Full valid nonempty dayviews
+replace the selected day's representation when samples are added, corrected
+or removed; no other days are rewritten. The shared checksum/size/type/encoding
+comparison skips identical canonical PUTs. Existing storage/write guards apply.
+
+Successful receipts use the shared per-stream/date format at
+`refresh/checks/v1/health/body_composition/day.json`. Receipt times reflect actual
+checks, including unchanged results, and advance only after canonical storage
+success. No body index or combined night receipt is created. Ordinary refresh
+does not read or modify any historical backfill plan or inventory the body
+source prefix. Explicit historical backfill and repair retain their existing
+entrypoints and behavior. Sleep/HRV defaults and targeted requests are unchanged.
+
+`python scripts/benchmark_body_reuse.py --baseline` runs the actual prior
+body-only backfill routine on synthetic data; omit `--baseline` for the new
+routine with a local summary, as in the workflow. An unchanged three-date
+repeat retains three source calls. Baseline: 2 GET / 0 HEAD / 3 LIST / 3 canonical
+PUT / 1 plan PUT. New path: 0 GET / 3 HEAD / 1 LIST / 0 canonical or plan PUT /
+3 small receipt PUT. The one new-path LIST is the unchanged bucket-budget
+inventory. Standalone R2-summary fallback adds one GET. Initial imports add
+three receipt writes to the three canonical writes. These are synthetic counts,
+not production latency or total-cost claims; wider source-window tuning remains
+separate work.
+
+Private canary: preserve the body historical plan, selected canonical objects,
+sleep/HRV checks and prior activity history before ordinary refresh. Repeat the
+same refresh and compare unchanged sample contents, advancing successful body
+receipts and preserved historical plan. All measurement times/IDs and optional
+fields must remain readable. Provider edit, partial-response and interrupted
+write cases use synthetic fixtures instead of editing real fitness data.
+
 ## Measurement and private-canary validation
 
 Responses and structured diagnostics expose canonical JSON GETs, canonical
