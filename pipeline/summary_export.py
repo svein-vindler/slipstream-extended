@@ -8,7 +8,10 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from botocore.exceptions import ClientError
+
 from .granular import gzip_bytes, json_bytes, sha256
+from .r2_store import missing_object
 
 SUMMARY_FILES = (
     ("activities.csv", "summary/activities.csv"),
@@ -71,11 +74,38 @@ def run(data_dir: str = "data", *, store=None) -> dict[str, Any]:
 
     objects, manifest = build_summary_exports(data_dir)
     store = store or R2Store()
+    try:
+        previous_bytes = store.get("summary/manifest.json")
+    except KeyError:  # In-memory adapters use KeyError for a missing object.
+        previous_bytes = None
+    except ClientError as exc:
+        if not missing_object(exc):
+            raise
+        previous_bytes = None
+    try:
+        previous = json.loads(previous_bytes) if previous_bytes is not None else None
+    except (ValueError, UnicodeDecodeError):
+        previous = None
+    try:
+        previous_time = datetime.fromisoformat(previous["generated_at"]) if isinstance(previous, dict) else None
+    except (KeyError, TypeError, ValueError):
+        previous_time = None
+    if (isinstance(previous, dict) and previous.get("schema_version") == 1
+            and previous.get("snapshot_date") == manifest["snapshot_date"]
+            and previous.get("files") == manifest["files"]
+            and previous_time is not None and previous_time.tzinfo is not None):
+        manifest = previous
+        objects[-1]["data"] = previous_bytes
+    written = 0
+    write = getattr(store, "put_if_changed", None)
     for item in objects:
-        store.put(
-            item["key"], item["data"], item["content_type"],
-            encoding=item["encoding"],
-        )
+        if callable(write):
+            written += bool(write(item["key"], item["data"], item["content_type"], encoding=item["encoding"]))
+        else:
+            store.put(item["key"], item["data"], item["content_type"], encoding=item["encoding"])
+            written += 1
+    print(json.dumps({"event": "summary_export", "objects_written": written,
+                      "objects_unchanged": len(objects) - written}))
     print(json.dumps(manifest, indent=2, ensure_ascii=False))
     return manifest
 

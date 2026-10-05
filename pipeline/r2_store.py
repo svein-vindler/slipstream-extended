@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
+
+from botocore.exceptions import ClientError
 
 GIB = 1024**3
 MIB = 1024**2
@@ -11,6 +14,11 @@ DEFAULT_MAX_BUCKET_BYTES = 5 * GIB
 DEFAULT_MAX_BUCKET_OBJECTS = 100_000
 DEFAULT_MAX_WRITES_PER_RUN = 250
 DEFAULT_MAX_WRITE_BYTES_PER_RUN = 512 * MIB
+
+
+def missing_object(error: ClientError) -> bool:
+    """Only a missing object is recoverable; authorization/service errors are not."""
+    return str(error.response.get("Error", {}).get("Code")) in {"404", "NoSuchKey", "NotFound"}
 
 
 class R2BudgetError(RuntimeError):
@@ -145,6 +153,27 @@ class R2Store:
     def get(self, key: str) -> bytes:
         response = self.client.get_object(Bucket=self.bucket, Key=key)
         return response["Body"].read()
+
+    def put_if_changed(self, key: str, data: bytes, content_type: str, *, encoding: str | None = None) -> bool:
+        """Skip identical single-PUT objects, including their serving metadata."""
+        try:
+            previous = self.client.head_object(Bucket=self.bucket, Key=key)
+        except ClientError as exc:
+            if not missing_object(exc):
+                raise
+            previous = {}
+        digest = hashlib.md5(data, usedforsecurity=False).hexdigest()
+        etag = previous.get("ETag")
+        if (isinstance(etag, str) and etag.strip('"') == digest
+                and previous.get("ContentLength") == len(data)
+                and previous.get("ContentType") == content_type
+                and (previous.get("ContentEncoding") or None) == (encoding or None)
+                and not previous.get("SSECustomerAlgorithm")
+                and not previous.get("ServerSideEncryption")):
+            return False
+        # Unknown/multipart ETags conservatively write through the existing guards.
+        self.put(key, data, content_type, encoding=encoding)
+        return True
 
     def put(self, key: str, data: bytes, content_type: str, *, encoding: str | None = None):
         self._check_write_budget(data)
