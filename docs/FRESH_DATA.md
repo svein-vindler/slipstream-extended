@@ -198,6 +198,64 @@ Multipart, missing or unexpected ETags conservatively write through the guards.
 Private-canary diagnostics log only summary objects written/unchanged and the
 coach reuse boolean; no private fitness values are added to these diagnostics.
 
+## Incremental recent sleep and HRV
+
+General manual and scheduled refresh now use `pipeline.recent_health --days 3`
+for an overlapping three-calendar-day sleep/HRV check. The same per-day import
+core is used by targeted night requests. Both paths validate Garmin's requested
+calendar date and preserve local timestamps; UTC is never substituted for the
+wake-date. Sleep requires positive duration, a valid UTC window and a stage
+within that window; an explicitly unconfirmed night is incomplete. Empty or
+incomplete sleep, empty/invalid HRV readings, malformed responses and
+wrong-date responses preserve existing canonical data and successful per-stream
+checks. The recent importer never reads or changes sleep/HRV historical plans.
+Explicit historical backfill remains available through its existing entrypoints.
+
+Canonical gzip content uses the shared checksum/size/type/encoding comparison,
+so identical data skips PUT. Scoped index repair lists only the affected source
+months and directly reads those monthly indexes. Existing summaries for days
+with the same source key/revision and builder revision are reused; changed or
+missing day summaries are rebuilt from their canonical objects. Missing/corrupt
+indexes are repaired even when canonical data is unchanged. Unrelated months
+are not scanned by the scoped path. The existing scheduled whole-history index
+reconciliation remains; general manual refresh no longer invokes it.
+
+After canonical storage and index success, each usable date records a small
+receipt at `refresh/checks/v1/health/{sleep|hrv}/{YYYY-MM-DD}.json`, including its
+actual check time and canonical checksum. Failed or incomplete dates keep their
+previous receipt. Checks are independent per datatype/date, rather than a
+window-wide success inferred from an otherwise completed job. When both sleep
+and HRV for one date succeeded in the same recent batch, the existing night
+checkpoint is also updated using the older component check time. The deployed
+Worker can consume that checkpoint without a code change or redeployment.
+Targeted-night successful negative checks retain their existing bounded retry
+semantics; positive per-stream receipts remain separate from those negatives.
+
+Freshness metadata is deliberately written on successful repeats: canonical
+reuse is not proof that Garmin was just checked. A three-day unchanged repeat
+writes six per-stream receipts plus three complete-night receipts, while
+canonical and index PUT counts are zero. All actual writes retain storage,
+object-count and per-run write/byte guards. Source observations are still made;
+this increment does not assume a complete Garmin modified-since feed, alter the
+health-summary window or optimize body-composition data.
+
+`python scripts/benchmark_health_reuse.py --baseline` reproduces the previous
+unconditional recent day writes and global index inventories, excluding legacy
+plans and other workflow stages. The synthetic three-day repeat has six source
+calls in either mode. Baseline: 2 GET, 5 LIST, 6 canonical PUT. Incremental:
+2 GET, 6 HEAD, 3 LIST, 0 canonical/index PUT and 9 checkpoint PUT. One LIST in
+each mode is the unchanged write-budget bucket inventory. This intentionally
+adds freshness metadata requests while avoiding canonical uploads and global
+health inventories; it is not a claim of zero total writes or lower latency/cost.
+
+Private canary: run the ordinary broad refresh, repeat it, verify canonical
+ETags and index bodies remain stable when source content is unchanged, confirm
+receipts advance for usable days, and request a recently checked complete night
+to verify no extra dispatch. Inspect missing/partial days separately and confirm
+historical plans and prior immutable activity analyses/snapshots are preserved.
+Changed-source and failure/recovery cases are covered with synthetic fixtures;
+do not edit private fitness data just to manufacture a canary source change.
+
 ## Measurement and private-canary validation
 
 Responses and structured diagnostics expose canonical JSON GETs, canonical

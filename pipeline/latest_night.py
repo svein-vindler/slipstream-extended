@@ -6,9 +6,7 @@ import argparse
 
 from .activity_backfill import is_job_stopping_error
 from .freshness import publish, receipt, recent_day
-from .granular import gzip_json, normalize_hrv
-from .health_detail import normalize_sleep_detail
-from .health_history_index import sync_dates
+from .health_sync import HealthNotReady, finalize_days, store_day
 from .r2_store import R2BudgetError, R2Store
 from .sources.garmin import _login
 
@@ -27,32 +25,16 @@ def run(*, run_id: str, wake_date: str, request_id: str | None = None,
         try:
             raw = (garmin.get_sleep_data(wake_date) if stream == "sleep"
                    else garmin.get_hrv_data(wake_date))
-            if not isinstance(raw, dict):
-                raise ValueError("Invalid provider response")
-            dto = raw.get("dailySleepDTO", {}) if stream == "sleep" else raw.get("hrvSummary", {})
-            provider_date = dto.get("calendarDate") if isinstance(dto, dict) else None
-            if provider_date and provider_date != wake_date:
-                source_checked = False
-                report[f"{stream}_status"] = "wrong_date"
-                continue
             try:
-                payload = (normalize_sleep_detail(wake_date, raw) if stream == "sleep"
-                           else normalize_hrv(wake_date, raw))
-            except ValueError:
-                report[f"{stream}_status"] = "garmin_not_ready"
+                record = store_day(store, stream, wake_date, raw)
+            except HealthNotReady as exc:
+                report[f"{stream}_status"] = exc.status
+                if exc.status != "garmin_not_ready":
+                    source_checked = False
                 continue
-            duration = payload.get("summary", {}).get("sleep_seconds")
-            has_data = (isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration > 0 if stream == "sleep"
-                        else payload.get("reading_count", 0) > 0)
-            if not has_data:
-                report[f"{stream}_status"] = "garmin_not_ready"
-                continue
-            root = "health/sleep/v1" if stream == "sleep" else "health/hrv"
-            key = f"{root}/{wake_date[:4]}/{wake_date[5:7]}/{wake_date}.json"
-            store.put(key, gzip_json(payload), "application/json", encoding="gzip")
+            finalize_days(store, stream, [record])
             report[f"{stream}_status"] = "stored"
-            if hasattr(store, "list_object_revisions"):
-                sync_dates(store, stream, [wake_date])
+            report[f"{stream}_reused"] = not record["written"]
         except R2BudgetError:
             raise
         except Exception as exc:

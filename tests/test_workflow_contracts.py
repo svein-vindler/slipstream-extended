@@ -40,8 +40,8 @@ def test_upstream_issue_body_stays_inside_yaml_run_literal():
 def test_targeted_night_excludes_broad_fetch_export_and_backfill():
     workflow = (ROOT / ".github/workflows/refresh.yml").read_text(encoding="utf-8")
     broad_names = ["Fetch + write data/", "Upload summaries", "Refresh recent detailed sleep",
-                   "Refresh recent detailed HRV", "Import newly discovered workouts",
-                   "Reconcile health history"]
+                   "Import newly discovered workouts",
+                   "Refresh recent body composition"]
     steps = workflow.split("      - name: ")
     for name in broad_names:
         step = next(step for step in steps if step.startswith(name))
@@ -50,3 +50,5 @@ def test_targeted_night_excludes_broad_fetch_export_and_backfill():
     assert 'python -m pipeline.latest_night "${args[@]}"' in workflow
     assert "group: garmin-sync" in workflow
     assert 'cron: "0 */6 * * *"' in workflow
+    reconciliation = next(step for step in steps if step.startswith("Reconcile health history"))
+    assert "github.event_name == 'schedule'" in next(line for line in reconciliation.splitlines() if "if:" in line)
