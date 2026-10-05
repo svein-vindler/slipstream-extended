@@ -54,6 +54,8 @@ AI client ◄── MCP + Managed OAuth ── Cloudflare Access ── Worker
 - The Worker validates Cloudflare Access assertions before reading R2.
 - Its shared storage reader bounds payloads and checks summary revisions before
   reusing parsed data, so warm chats see updated imports.
+- Sleep/HRV and activity/coach tools live in focused modules with shared storage
+  and unchanged tool contracts, making the connector easier to maintain.
 - A rate limiter, payload bounds and a Durable Object refresh lease protect the
   installation from abuse and duplicate dispatches.
 

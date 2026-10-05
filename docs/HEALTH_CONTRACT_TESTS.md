@@ -68,6 +68,11 @@ These tests verify storage and reader compatibility in the local Workers
 runtime. They complement private installation validation; they do not exercise
 Garmin's live API, Cloudflare's edge OAuth flow or a production deployment.
 
+`worker/test-runtime/tool-catalog.test.ts` fingerprints the complete authenticated
+tool catalog with coach writes enabled and disabled. Its pre-refactor snapshots
+cover tool order, descriptions, input/output schemas and safety annotations,
+so moving domain registrations cannot silently change client contracts.
+
 `worker/test-runtime/r2-storage.test.ts` also exercises the shared storage
 module directly against local R2. It counts HEAD/GET operations across separate
 request readers, checks changed activity summaries and explicit cache clearing,
