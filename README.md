@@ -52,6 +52,8 @@ AI client ◄── MCP + Managed OAuth ── Cloudflare Access ── Worker
   committed to Git.
 - R2 is the source of truth for summaries, detailed exports and backfill state.
 - The Worker validates Cloudflare Access assertions before reading R2.
+- Its shared storage reader bounds payloads and checks summary revisions before
+  reusing parsed data, so warm chats see updated imports.
 - A rate limiter, payload bounds and a Durable Object refresh lease protect the
   installation from abuse and duplicate dispatches.
 

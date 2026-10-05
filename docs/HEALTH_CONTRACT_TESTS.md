@@ -67,3 +67,12 @@ Changing a derived index alone does not claim a new successful Garmin check.
 These tests verify storage and reader compatibility in the local Workers
 runtime. They complement private installation validation; they do not exercise
 Garmin's live API, Cloudflare's edge OAuth flow or a production deployment.
+
+`worker/test-runtime/r2-storage.test.ts` also exercises the shared storage
+module directly against local R2. It counts HEAD/GET operations across separate
+request readers, checks changed activity summaries and explicit cache clearing,
+and verifies deletion, malformed replacements and metadata failures do not
+return old cached data. Additional cases cover ordered object aliases,
+missing objects, exact stored/decoded size boundaries, gzip decoding and invalid
+JSON/compressed objects. These checks preserve the reader's existing errors and
+limits when moving storage logic between modules.
