@@ -357,6 +357,9 @@ def run_stream(
         and hasattr(store, "list_object_revisions")
     ):
         sync_dates(store, "sleep", (item["date"] for item in completed))
+    elif stream.name == "body_composition" and completed and hasattr(store, "list_object_revisions"):
+        from .weight_index import sync_dates as sync_weight_dates
+        sync_weight_dates(store, (item["date"] for item in completed))
     remaining = total - complete
     status = (
         "complete"

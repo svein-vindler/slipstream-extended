@@ -89,6 +89,11 @@ finally {
     Pop-Location
 }
 
+& $Python scripts/check_installation.py
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not complete the local installation check."
+}
+
 Write-Host ""
 Write-Host "Local preparation is complete." -ForegroundColor Green
 Write-Host ""

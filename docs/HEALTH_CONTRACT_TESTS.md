@@ -73,6 +73,12 @@ tool catalog with coach writes enabled and disabled. Its pre-refactor snapshots
 cover tool order, descriptions, input/output schemas and safety annotations,
 so moving domain registrations cannot silently change client contracts.
 
+The same generation command also runs `scripts/build_weight_contract.py`.
+`worker/test-runtime/weight-index.test.ts` loads exact Python canonical/index
+bytes into real local R2 and verifies all weighings, alternative morning windows,
+travel, DST, New Year, changed/deleted sources, repeated reads and missing/corrupt
+indexes. These ordinary reads are checked to perform no writes.
+
 `worker/test-runtime/r2-storage.test.ts` also exercises the shared storage
 module directly against local R2. It counts HEAD/GET operations across separate
 request readers, checks changed activity summaries and explicit cache clearing,

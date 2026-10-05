@@ -2,7 +2,9 @@
 
 `weight_history` reads existing private R2 body-composition objects for a
 calendar range of **at most 31 days**. It does not contact Garmin, write R2,
-start a backfill or require a new storage index. A June–September analysis
+start a backfill or require a storage migration. Optional compact monthly indexes
+reduce repeated canonical downloads while retaining every individual weighing
+and timestamp. A June–September analysis
 therefore needs several consecutive, non-overlapping requests rather than one
 MCP call for every date. `body_composition(date)` remains available when all
 stored measurements for one particular day are needed.
@@ -69,9 +71,10 @@ standardized morning weight. `health_trends.weight_kg` summarizes those same
 daily-summary values.
 
 Canonical R2 objects remain the source of truth. Each request lists only the
-relevant monthly body-composition prefixes and reads existing objects for its
-31-day window, so a newly written or corrected object does not wait for a
-separate history index. Both list pages and object sizes are bounded, and the
+relevant monthly body-composition prefixes and verifies source ETags. Matching
+index entries can answer without downloading each day; missing, corrupt or stale
+entries read canonical objects directly. Deleted sources never survive as old
+index measurements. Both list pages and object sizes are bounded, and the
 existing per-identity MCP rate limit still applies. If Garmin supplied only a
 daily summary or a latest weight for an older date, this tool cannot recover
 individual morning measurements from that object; a targeted Garmin re-fetch
@@ -84,3 +87,26 @@ daily view. Start with a short canary range and check `body_composition(date)`
 and `weight_history` before repairing older history in further 31-day chunks.
 The normal scheduled run does not re-fetch all historical dates after its
 backfill is complete; regular refreshes continue to re-fetch recent dates.
+
+Recent body ingestion and active body backfill update affected monthly indexes
+under `health/indexes/body-composition/v1/`. The index keeps every actual weight,
+local/UTC clock, average flag, measurement identity and source type. Selection is
+computed at query time, so custom morning windows, travel and timezone fallback
+work exactly as with canonical data. Other body metrics remain in canonical
+objects and `body_composition`. Reads never repair indexes or write R2.
+
+For existing history, index construction is optional and R2-only. With the
+normal private R2 credentials loaded, run bounded chunks of at most 366 days:
+
+```bash
+python -m pipeline.weight_index --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+```
+
+Building a month initially reads its canonical objects; repeats use revision
+metadata and the current compact index, with no unchanged canonical downloads or
+PUTs. Source edits reread affected objects only. Existing aliases remain readable.
+The per-month index is limited to 512 KiB; an oversized month stays on canonical
+reads. Missing indexes add a small lookup before the existing read-through path.
+`source_objects_read` counts index and canonical GET attempts; list-operation
+counts retain their existing meaning. No extra Garmin calls or per-measurement
+objects are introduced. Index writes use the existing storage and write budgets.

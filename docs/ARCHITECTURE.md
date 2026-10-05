@@ -246,8 +246,8 @@ I/O. Object keys, schemas and stored/decoded payload limits are unchanged.
   and endurance tools. Every MCP tool includes an explicit output schema.
 - `weight_history` scans at most the relevant monthly R2 prefixes for a
   31-day request and returns one provenance-labelled morning selection per
-  day. It reads canonical body-composition objects directly rather than
-  relying on a potentially stale separate index. Missing or untimed records
+  day. Its optional compact index is verified against canonical LIST ETags;
+  stale/missing entries read through the original objects. Missing or untimed records
   are explicit; Garmin daily averages are never selected as raw weighings.
 - Its canonical Streamable HTTP endpoint is `/mcp`, protected at the edge by
   Cloudflare Access Managed OAuth. Access handles discovery, dynamic client

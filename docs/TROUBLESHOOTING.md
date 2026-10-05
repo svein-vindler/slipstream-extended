@@ -3,6 +3,14 @@
 Start with the failing layer: GitHub Actions fetches data, R2 stores it,
 Cloudflare Access authenticates, and the Worker serves MCP.
 
+Start with `python scripts/check_installation.py`; add `--online --repo
+<you>/<repo> --worker-url https://<your-worker-host>` for read-only cloud checks.
+Fix the first reported step and rerun to resume. The check never changes secrets,
+workflows or storage, and its ignored report excludes personal values. Once the
+checks pass, verify authenticated tools and coach profile selection in your client.
+For slow or incomplete refreshes, inspect the sanitized per-stage report described
+in [REFRESH_PIPELINE.md](REFRESH_PIPELINE.md).
+
 ## Local setup
 
 **`python` or `pytest` is missing.** Activate `.venv` or use its Python directly.

@@ -51,8 +51,9 @@ import {
   LatestActivityReport, latestActivityMessage, latestActivityReportSchema,
 } from "./latest-activity-report";
 import {
-  buildWeightDay, invalidWeightDay, missingWeightDay, resolveWeightRequest,
+  resolveWeightRequest,
 } from "./weight-history";
+import { WeightHistoryReader } from "./weight-history-reader";
 import {
   R2Storage, R2ReadLimits, clearSummaryCaches, GRANULAR_R2_LIMITS,
 } from "./r2-storage";
@@ -329,65 +330,9 @@ class FitnessService {
     }, async (args) => {
       const request = resolveWeightRequest(args.start_date, args.end_date,
         args.morning_start, args.morning_end, args.timezone, this.env.HEALTH_TIMEZONE);
-      const prefixes = [...new Set(request.dates.map((date) =>
-        `health/body-composition/v1/${date.slice(0, 4)}/${date.slice(5, 7)}/`))];
-      const requestedDates = new Set(request.dates);
-      const canonicalKeys = new Set(request.dates.flatMap(bodyCompositionObjectKeys));
-      const keys = new Map<string, string[]>();
-      let listOperations = 0;
-      for (const prefix of prefixes) {
-        let cursor: string | undefined;
-        do {
-          const listed = await this.env.SLIPSTREAM_DATA.list({
-            prefix, limit: 1000, ...(cursor ? { cursor } : {}),
-          });
-          listOperations += 1;
-          for (const object of listed.objects) {
-            const match = /(\d{4}-\d{2}-\d{2})\.json(?:\.gz)?$/.exec(object.key);
-            if (!match || !requestedDates.has(match[1])
-              || !canonicalKeys.has(object.key)) continue;
-            const candidates = keys.get(match[1]) ?? [];
-            candidates.push(object.key);
-            keys.set(match[1], candidates);
-          }
-          if (listed.truncated && (!listed.cursor || listOperations >= 6)) {
-            throw new Error("Body-composition listing exceeded its bounded page limit.");
-          }
-          cursor = listed.truncated ? listed.cursor : undefined;
-        } while (cursor);
-      }
-      let sourceObjectsRead = 0;
-      const days = [];
-      for (const date of request.dates) {
-        const candidates = keys.get(date)?.sort((a, b) => a.length - b.length) ?? [];
-        if (!candidates.length) {
-          days.push(missingWeightDay(date));
-          continue;
-        }
-        let day = invalidWeightDay(date);
-        for (const key of candidates) {
-          try {
-            sourceObjectsRead += 1;
-            const stored = await this.getR2Json([key], {
-              stored: 256 * 1024, decoded: 512 * 1024,
-            });
-            if (!stored) continue;
-            day = buildWeightDay(date, stored.data, request.timezone,
-              request.startMinute, request.endMinute);
-            if (day.status !== "invalid_schema") break;
-          } catch (error) {
-            if (!(error instanceof SyntaxError || error instanceof PayloadTooLargeError
-              || error instanceof Error && error.message.includes("exceeds the stored-size limit"))) {
-              throw error;
-            }
-            console.error(JSON.stringify({
-              message: "Invalid body-composition history object", key,
-              error: error instanceof Error ? error.message : String(error),
-            }));
-          }
-        }
-        days.push(day);
-      }
+      const { days, sourceObjectsRead, listOperations } = await new WeightHistoryReader(
+        this.env.SLIPSTREAM_DATA, this.storage,
+      ).read(request);
       return this.text({
         start_date: args.start_date, end_date: args.end_date,
         timezone: request.timezone,
