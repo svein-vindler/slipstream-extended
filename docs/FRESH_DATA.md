@@ -144,6 +144,11 @@ and analyzer work; it does not parallelize existing calls or reduce LIST counts.
 PUTs were already skipped for unchanged analyses. Summary exports and scheduled
 source windows require separate incremental improvements.
 
+The pipeline logs `targeted_coach_input` with only the `analysis_reused` boolean
+so a private canary can confirm the reuse branch. It logs no activity IDs or
+fitness values. Run one known activity to upgrade a legacy pointer, then repeat
+the same targeted request and check that reuse is true and the package is ready.
+
 ## Measurement and private-canary validation
 
 Responses and structured diagnostics expose canonical JSON GETs, canonical
