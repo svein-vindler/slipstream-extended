@@ -61,3 +61,12 @@ def test_general_body_refresh_uses_bounded_dayviews_without_historical_backfill(
     assert "health_detail_backfill" not in workflow
     assert "github.event_name == 'schedule'" in body
     assert "!inputs.latest_activity_only && !inputs.latest_night_only" in body
+
+
+def test_general_summary_refresh_exports_before_checkpointing_and_retains_explicit_backfill():
+    workflow = (ROOT / ".github/workflows/refresh.yml").read_text(encoding="utf-8")
+    assert "python -m pipeline.refresh_summaries --data-dir data" in workflow
+    assert 'python -m pipeline.fetch --skip-activities' in workflow
+    upload = next(step for step in workflow.split("      - name: ") if step.startswith("Upload summaries"))
+    assert "inputs.health_start || inputs.health_end || inputs.backfill_start_year || inputs.backfill_end_year" in upload
+    assert "!inputs.latest_activity_only && !inputs.latest_night_only" in upload

@@ -48,11 +48,13 @@ def _date_of(row: dict[str, Any]):
     return _first(row, "calendarDate", "date", "summaryDate")
 
 
-def _call(label: str, fn: Callable[[], Any], pause: float):
+def _call(label: str, fn: Callable[[], Any], pause: float, diagnostics: dict | None = None):
     """Retry rate limits, while allowing unavailable metrics to be skipped."""
     delays = (30, 60, 120)
     for attempt in range(len(delays) + 1):
         try:
+            if diagnostics is not None:
+                diagnostics["sdk_calls"] = diagnostics.get("sdk_calls", 0) + 1
             result = fn()
             if pause:
                 time.sleep(pause)
@@ -64,7 +66,9 @@ def _call(label: str, fn: Callable[[], Any], pause: float):
                 print(f"[garmin-health] rate limited in {label}; waiting {wait}s", file=sys.stderr)
                 time.sleep(wait)
                 continue
-            print(f"[garmin-health] skipped {label}: {exc}", file=sys.stderr)
+            if diagnostics is not None:
+                diagnostics["source_errors"] = diagnostics.get("source_errors", 0) + 1
+            print(f"[garmin-health] skipped {label}: {type(exc).__name__}", file=sys.stderr)
             return None
     return None
 
@@ -136,14 +140,43 @@ def _weight_rows(raw: Any):
     return normalized
 
 
-def fetch(start: date, end: date, *, request_pause: float = 0.15) -> list[dict[str, object]]:
+def fetch(start: date, end: date, *, request_pause: float = 0.15,
+          client=None, diagnostics: dict | None = None) -> list[dict[str, object]]:
     if start > end:
         raise ValueError("health start date cannot be after end date")
-    g = _login()
+    g = client or _login()
     rows: dict[str, dict[str, object]] = {}
+
+    def call(label, fn, pause):
+        failures = diagnostics.get("source_errors", 0) if diagnostics is not None else 0
+        result = _call(label, fn, pause, diagnostics)
+        expected = (list, dict) if label == "HRV" else (list,) if label in {"steps", "sleep", "Body Battery"} else (dict,)
+        if not isinstance(result, expected) and diagnostics is not None and diagnostics.get("source_errors", 0) == failures:
+            diagnostics["source_errors"] = failures + 1
+        requested_day = label.rsplit(" ", 1)[-1]
+        if isinstance(result, dict) and len(requested_day) == 10:
+            objects = [result]
+            if isinstance(result.get("dailySleepDTO"), dict):
+                objects.append(result["dailySleepDTO"])
+            if any(item.get(key) is not None and str(item[key])[:10] != requested_day
+                   for item in objects for key in ("calendarDate", "summaryDate")):
+                if diagnostics is not None:
+                    diagnostics["invalid_dates"] = diagnostics.get("invalid_dates", 0) + 1
+                return {}
+        return result
 
     def merge(day: Any, values: dict[str, Any]):
         day = str(day or "")[:10]
+        try:
+            valid_day = date.fromisoformat(day)
+        except ValueError:
+            if diagnostics is not None:
+                diagnostics["invalid_dates"] = diagnostics.get("invalid_dates", 0) + 1
+            return
+        if not start <= valid_day <= end:
+            if diagnostics is not None:
+                diagnostics["invalid_dates"] = diagnostics.get("invalid_dates", 0) + 1
+            return
         clean = {key: value for key, value in values.items() if value is not None and value != ""}
         if not day or not clean:
             return
@@ -152,7 +185,7 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15) -> list[dict[s
     for chunk_start, chunk_end in _chunks(start, end):
         first, last = chunk_start.isoformat(), chunk_end.isoformat()
 
-        for item in _call(
+        for item in call(
             "steps",
             lambda first=first, last=last: g.get_daily_steps(first, last),
             request_pause,
@@ -160,7 +193,7 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15) -> list[dict[s
             if isinstance(item, dict):
                 merge(_date_of(item), {"Steps": _first(item, "totalSteps", "steps")})
 
-        for item in _call(
+        for item in call(
             "sleep",
             lambda first=first, last=last: g.get_sleep_daily(first, last),
             request_pause,
@@ -168,7 +201,7 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15) -> list[dict[s
             if isinstance(item, dict):
                 merge(_date_of(item), _sleep_fields(item))
 
-        for item in _hrv_rows(_call(
+        for item in _hrv_rows(call(
             "HRV",
             lambda first=first, last=last: g.get_hrv_data_range(first, last),
             request_pause,
@@ -180,7 +213,7 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15) -> list[dict[s
                     "HRV Status": item.get("status"),
                 })
 
-        for item in _call(
+        for item in call(
             "Body Battery",
             lambda first=first, last=last: g.get_body_battery(first, last),
             request_pause,
@@ -201,7 +234,7 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15) -> list[dict[s
                 "Body Battery Drained": _first(item, "drained", "bodyBatteryDrainedValue"),
             })
 
-        weights = _call(
+        weights = call(
             "weight",
             lambda first=first, last=last: g.get_weigh_ins(first, last),
             request_pause,
@@ -215,7 +248,7 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15) -> list[dict[s
         if index == 1 or index % 30 == 0 or index == total_days:
             print(f"[garmin-health] daily summaries {index}/{total_days}: {day}", file=sys.stderr)
 
-        stats = _call(f"daily stats {day}", lambda d=day: g.get_stats(d), request_pause) or {}
+        stats = call(f"daily stats {day}", lambda d=day: g.get_stats(d), request_pause) or {}
         if isinstance(stats, dict):
             merge(day, {
                 "Steps": _first(stats, "totalSteps", "steps"),
@@ -231,12 +264,12 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15) -> list[dict[s
                 "Stress Duration Seconds": stats.get("stressDuration"),
             })
 
-        sleep = _call(f"sleep details {day}", lambda d=day: g.get_sleep_data(d), request_pause) or {}
+        sleep = call(f"sleep details {day}", lambda d=day: g.get_sleep_data(d), request_pause) or {}
         if isinstance(sleep, dict):
             dto = sleep.get("dailySleepDTO") if isinstance(sleep.get("dailySleepDTO"), dict) else sleep
             merge(_date_of(dto) or day, _sleep_fields(sleep))
 
-        heart = _call(f"heart rate {day}", lambda d=day: g.get_heart_rates(d), request_pause) or {}
+        heart = call(f"heart rate {day}", lambda d=day: g.get_heart_rates(d), request_pause) or {}
         if isinstance(heart, dict):
             values = _heart_values(heart)
             minimum = heart.get("minHeartRate")
@@ -248,7 +281,7 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15) -> list[dict[s
                 "Average Heart Rate": _number(sum(values) / len(values), 1) if values else None,
             })
 
-        respiration = _call(f"respiration {day}", lambda d=day: g.get_respiration_data(d), request_pause) or {}
+        respiration = call(f"respiration {day}", lambda d=day: g.get_respiration_data(d), request_pause) or {}
         if isinstance(respiration, dict):
             merge(day, {
                 "Average Respiration": _first(respiration, "avgWakingRespirationValue", "averageRespirationValue", "avgRespirationValue"),

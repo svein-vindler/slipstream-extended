@@ -256,6 +256,65 @@ historical plans and prior immutable activity analyses/snapshots are preserved.
 Changed-source and failure/recovery cases are covered with synthetic fixtures;
 do not edit private fitness data just to manufacture a canary source change.
 
+## Bounded summary windows and daily reconciliation
+
+Ordinary general chat, manual and scheduled refresh now run
+`pipeline.refresh_summaries`. The initial run, an expired/missing/invalid successful
+reconciliation receipt, a missing local summary, or `--force-reconcile` uses the
+previous wide summary windows: activity `days_back=30` (31 inclusive calendar
+dates, as in the existing adapter) and 14 health calendar dates. After a successful
+wide check, subsequent refreshes for less than 24 hours use activity `days_back=7`
+(8 inclusive dates) and 3 health dates. Each stream is planned independently.
+The six-hour refresh schedule remains unchanged. No historical plan is read or
+modified by this planner; scheduled global index reconciliation and existing
+historical jobs remain separate and retain their existing schedules.
+
+The wide check is performed by the next normal refresh once 24 hours have elapsed,
+including manual refresh. Failed or partial checks remain due for another wide
+attempt. This retains overlap for delayed uploads and catches older edits within
+the previous 30/14 summary windows at least once per successful daily cycle.
+It is not a complete Garmin modified-since feed: edits outside those windows,
+older detailed sleep/HRV/body objects, and source-side deletion are not guaranteed
+to be discovered. Explicit date/year imports and historical repair remain available.
+No automatic deletion of old summary rows is introduced.
+
+Separate `refresh/checks/v1/summary/<activities|health>/reconciliation.json`
+receipts record successful wide-window retrieval; `recent.json` records the latest
+successful summary scope, including a wide check. They are written only after
+summary export, recovery snapshots and the manifest succeed. Activity retrieval
+must complete with serializable IDs/start times. Health must have no exhausted
+source failures, invalid response shapes or out-of-range dates, and at least one
+populated summary row for every requested day. Optional metrics can be absent;
+these receipts do not assert complete sleep, HRV or individual weighing data and
+do not replace those streams' own freshness receipts. Failed scopes retain their
+previous positive checks and missing values retain previous CSV values.
+Recovered transient rate-limit failures may be checkpointed after final success.
+
+Missing local summaries are restored from a checksum-validated existing R2
+manifest before any export. Initial creation is allowed only when no unmanifested
+current R2 summary would be overwritten. Local and scheduled execution use the
+same adapters/writers/export as general chat refresh; targeted activity/night
+paths and explicit historical imports keep their existing entrypoints. The
+existing `pipeline.fetch` CLI still defaults to the wider windows.
+
+`summary-window-refresh` diagnostics expose window modes, counts, source errors
+and elapsed time without personal values or request parameters. Garmin call
+counts record SDK `connectapi` invocations, including activity pagination; login
+and internal SDK/HTTP retries are outside that counter. One login/client is shared
+by both summary adapters. No permissions or Worker deployment change is required.
+
+Run `python scripts/benchmark_summary_windows.py` for a reproducible synthetic
+comparison using the real adapters, SDK activity pagination, writers and R2Store.
+Its fixture has two activities/day: previous repeat uses 66 recorded Garmin calls;
+recent repeat uses 19 (health SDK calls 61 versus 17). Unchanged summary content
+still skips all five summary PUTs. Compared with the previous summary step's
+1 GET / 5 HEAD / 0 LIST / 0 PUT, recent repeat adds two receipt GETs, two small
+receipt PUTs and one required bucket-budget LIST. Initial/due wide checks retain
+wide source volume and write up to four receipts. Synthetic timing is not a
+production latency or total-cost claim. Live validation must compare the initial
+wide check with recent repeats, preserve old CSV rows/plans/activity history and
+verify independent canonical health checks and activity readiness.
+
 ## Incremental recent individual weigh-ins
 
 Garmin dayview samples may include both an ISO `calendarDate` and an epoch-valued
