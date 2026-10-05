@@ -105,6 +105,45 @@ historical coach backfill plan remain readable. The single-activity coach path
 does not list the full activity inventory or replace the backfill plan. No data
 migration or deletion is needed to publish this code.
 
+## Incremental targeted Coach Input
+
+The single-activity pipeline records an additive `input_signature` on the
+ready pointer. It covers the supplied activity metadata, all three canonical
+source revisions, the complete historically effective profile, the selected
+context key and revision, and the analyzer version. Editing a profile or context
+under the same ID still invalidates reuse. A future profile does not invalidate
+an analysis for an earlier workout.
+
+When those inputs match and the immutable analysis still exists in the activity
+listing, the pipeline returns that ready analysis without downloading FIT JSON,
+endurance JSON or TCX, running the analyzer or writing R2. It still lists only
+the selected activity prefix and the profile prefix, and reads profiles and the
+small ready pointer. Reuse does not constitute a new Garmin source check.
+
+Legacy pointers are rebuilt once to acquire the signature. Missing source files
+or profiles remain blocked, a missing analysis is regenerated, and stores with
+incomplete revision metadata conservatively rebuild. `run_one(..., force=True)`
+bypasses reuse for recovery. Existing immutable versions and the historical
+backfill plan are preserved. A repair without Garmin summary metadata retains
+known moving time only while the FIT and TCX source hashes are unchanged.
+
+Run `python scripts/benchmark_coach_reuse.py` from the repository root for a
+synthetic 1 MiB TCX fixture with no Garmin or external storage calls. The same
+fixture run with the pre-change `coach_backfill.py` provides the baseline:
+
+| Targeted call | GET before/after | LIST before/after | PUT before/after | Download bytes before/after |
+| --- | --- | --- | --- | --- |
+| Initial generation | 4 / 4 | 2 / 2 | 2 / 2 | 1,048,820 / 1,048,820 |
+| Unchanged metadata | 5 / 2 | 2 / 2 | 0 / 0 | 1,049,320 / 714 |
+| Repeated R2-only repair | 7 / 2 | 2 / 2 | 0 / 0 | 1,050,678 / 714 |
+
+The benchmark also reports local elapsed time. One local run for unchanged
+metadata measured 0.876 ms before and 0.465 ms after; these are in-memory Python
+timings, not production network latency. This change reduces actual downloads
+and analyzer work; it does not parallelize existing calls or reduce LIST counts.
+PUTs were already skipped for unchanged analyses. Summary exports and scheduled
+source windows require separate incremental improvements.
+
 ## Measurement and private-canary validation
 
 Responses and structured diagnostics expose canonical JSON GETs, canonical

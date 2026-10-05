@@ -119,8 +119,25 @@ def _source_signature(
     return sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
 
 
-def run_one(*, activity: dict[str, Any], store: R2Store) -> dict[str, Any]:
-    """Analyze exactly one R2 prefix without touching the historical backfill plan."""
+def _single_input_signature(
+    activity: dict[str, Any], profile: dict[str, Any],
+    required: list[str], revisions: dict[str, str], context_key: str | None,
+) -> str | None:
+    """Reuse only when every selected input has a revision, including context."""
+    selected = [*required, *([context_key] if context_key else [])]
+    if any(not revisions.get(key) for key in selected):
+        return None
+    return sha256(json.dumps({
+        "signature_version": 1,
+        "analyzer_version": ANALYZER_VERSION,
+        "activity": activity,
+        "profile": profile,
+        "revisions": {key: revisions[key] for key in selected},
+    }, sort_keys=True, separators=(",", ":")).encode())
+
+
+def run_one(*, activity: dict[str, Any], store: R2Store, force: bool = False) -> dict[str, Any]:
+    """Analyze one prefix, reusing unchanged inputs unless recovery is forced."""
     activity_id = str(activity["id"])
     if not activity_id.isdigit() or len(activity_id) > 20:
         raise ValueError("Invalid activity ID")
@@ -141,20 +158,34 @@ def run_one(*, activity: dict[str, Any], store: R2Store) -> dict[str, Any]:
         return {"processed_sources": {}, "blocked_activities": [
             {"activity_id": activity_id, "reason": blocked},
         ]}
+    context_key = _latest_context_keys(keys).get(prefix)
+    pointer_key = f"{prefix}/coach-input/v1/latest-ready.json"
+    previous_pointer = _json(store, pointer_key) if pointer_key in keys else {}
+    # Fingerprint the caller's metadata before an R2-only repair restores a known
+    # moving time. Repeated calls with the same metadata reuse that successful result.
+    signature = _single_input_signature(activity, profile, required, revisions, context_key)
+    previous_key = previous_pointer.get("analysis_key")
+    canonical_prefix = f"{prefix}/coach-input/v1/canonical/"
+    if (not force and signature is not None
+            and previous_pointer.get("schema_version") == 1
+            and previous_pointer.get("input_signature") == signature
+            and isinstance(previous_key, str) and previous_key.startswith(canonical_prefix)
+            and previous_key.endswith(".json") and previous_key in keys):
+        identifier = previous_key[len(canonical_prefix):-5]
+        if len(identifier) == 24 and all(char in "0123456789abcdef" for char in identifier):
+            return {"processed_sources": {activity_id: identifier}, "blocked_activities": [],
+                    "skipped_this_run": [], "reused_sources": {activity_id: identifier}}
     endurance = _json(store, required[1])
     if endurance.get("available") is False:
         return {"processed_sources": {}, "blocked_activities": [
             {"activity_id": activity_id, "reason": "endurance_data_unavailable"},
         ]}
-    context_key = _latest_context_keys(keys).get(prefix)
     decoded = _json(store, required[0])
     tcx_hash = sha256(store.get(required[2]))
-    pointer_key = f"{prefix}/coach-input/v1/latest-ready.json"
     # An R2-only repair has no Garmin summary. Preserve an already known moving
     # time only when both source files are unchanged; never infer it from elapsed time.
     if activity.get("moving_seconds") is None and pointer_key in keys:
-        previous_key = _json(store, pointer_key).get("analysis_key")
-        if isinstance(previous_key, str) and previous_key.startswith(f"{prefix}/coach-input/v1/canonical/") and previous_key in keys:
+        if isinstance(previous_key, str) and previous_key.startswith(canonical_prefix) and previous_key in keys:
             previous = _json(store, previous_key)
             source = previous.get("source", {})
             if (source.get("fit_sha256") == decoded.get("source_fit_sha256")
@@ -183,11 +214,13 @@ def run_one(*, activity: dict[str, Any], store: R2Store) -> dict[str, Any]:
                    "profile_id": profile["profile_id"],
                    "context_id": coach.get("user_context", {}).get("context_id")
                    if coach.get("user_context") else None}
-        if pointer_key not in keys or _json(store, pointer_key) != pointer:
+        if signature is not None:
+            pointer["input_signature"] = signature
+        if previous_pointer != pointer:
             store.put(pointer_key, json.dumps(pointer, separators=(",", ":")).encode(),
                       "application/json")
     return {"processed_sources": {activity_id: coach["analysis_id"]},
-            "blocked_activities": [], "skipped_this_run": []}
+            "blocked_activities": [], "skipped_this_run": [], "reused_sources": {}}
 
 
 def run(
