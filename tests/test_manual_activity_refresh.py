@@ -70,6 +70,7 @@ def test_on_demand_prioritizes_new_run_and_verifies_its_coach(monkeypatch, tmp_p
 
     def refresh(activity, *, existing_keys, **kwargs):
         if activity["activityId"] == "1":
+            store.objects["activities/2026/1/activity.v1.json"] = b'{"activity":{"id":"1","start_time_local":"2026-09-28 10:00:00"}}'
             return {"status": "unchanged"}
         for name in ("activity.fit", "activity.v1.json", "activity.tcx",
                      "activity.endurance.v1.json"):
@@ -120,6 +121,7 @@ def test_on_demand_reports_no_new_workout_without_claiming_coach(monkeypatch, tm
         "activities/2026/1/activity.endurance.v1.json",
     })
     garmin = FakeGarmin()
+    store.objects["activities/2026/1/activity.v1.json"] = b'{"activity":{"id":"1","start_time_local":"2026-09-28 10:00:00"}}'
     monkeypatch.setattr(
         "pipeline.manual_activity_refresh.refresh_activity",
         lambda *args, **kwargs: {"status": "unchanged"},
@@ -373,3 +375,59 @@ def test_analyzer_error_preserves_successful_file_status(incremental, monkeypatc
     result = run(**arguments)
     assert result["activities"][0]["files_ready"] is True
     assert result["activities"][0]["coach_status"] == "error"
+
+
+def test_nested_garmin_dates_preserve_local_year_and_explicit_timestamps():
+    row = {"Activity ID": "garmin-123", "Activity Date": "2025-12-31 23:30:00",
+           "Activity Type": "Run"}
+    details = {"activityId": 123, "activityTypeDTO": {"typeKey": "running"},
+               "summaryDTO": {"startTimeLocal": "2026-01-01 00:30:00",
+                              "startTimeGMT": "2025-12-31 23:30:00"}}
+    complete = _complete_activity_details(details, row)
+    assert complete["startTimeLocal"] == "2026-01-01 00:30:00"
+    assert _coach_metadata(complete, row, FakeStore())["date"] == "2026-01-01"
+    assert "startTimeLocal" not in details  # Do not mutate the source response.
+    details["startTimeLocal"] = "2026-01-02 00:30:00"
+    assert _complete_activity_details(details, row)["startTimeLocal"] == details["startTimeLocal"]
+
+
+@pytest.mark.parametrize("summary_dto", [None, [], "invalid"])
+def test_malformed_nested_summary_never_invents_a_local_date(summary_dto):
+    complete = _complete_activity_details(
+        {"activityId": 123, "summaryDTO": summary_dto},
+        {"Activity ID": "garmin-123", "Activity Date": "2026-09-30 10:00:00"},
+    )
+    assert not complete.get("startTimeLocal")
+    assert complete["startTimeGMT"] == "2026-09-30 10:00:00"
+
+
+def test_general_refresh_nested_source_dates_are_ready_and_reused(incremental):
+    arguments, detail, builds = incremental
+    local = detail.pop("startTimeLocal")
+    detail["summaryDTO"] = {"startTimeLocal": local, "startTimeGMT": "2026-09-30 08:00:00"}
+    first = run(**arguments)
+    second = run(**arguments)
+    assert first["activities"][0]["coach_status"] == "ready"
+    assert second["activities"][0]["file_status"] == "unchanged"
+    assert second["activities"][0]["coach_reused"] is True
+    assert len(builds) == 1
+
+
+def test_general_refresh_repairs_missing_canonical_local_metadata_without_download(incremental):
+    import gzip
+
+    arguments, _, builds = incremental
+    store = arguments["store"]
+    key = "activities/2026/1/activity.v1.json"
+    canonical = json.loads(store.objects[key])
+    canonical["activity"] = {"id": "1"}
+    store.objects[key] = json.dumps(canonical).encode()
+    first = run(**arguments)
+    assert first["activities"][0]["file_status"] == "baseline"
+    assert first["activities"][0]["coach_status"] == "ready"
+    repaired = json.loads(gzip.decompress(store.objects[key]))
+    assert repaired["activity"]["start_time_local"] == "2026-09-30 10:00:00"
+    store.reset_counts()
+    second = run(**arguments)
+    assert second["activities"][0]["coach_reused"] is True
+    assert store.counts["put"] == 0 and len(builds) == 1

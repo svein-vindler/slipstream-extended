@@ -13,7 +13,7 @@ from .activity_backfill import is_job_stopping_error, is_supported_activity
 from .activity_refresh import refresh_activity
 from .coach_backfill import _float, _json
 from .coach_backfill import run_one as run_coach_one
-from .granular import activity_prefix, activity_type
+from .granular import activity_prefix, activity_type, gzip_json
 from .granular_export import activity_artifact_keys
 from .r2_store import R2BudgetError, R2Store
 from .sources.garmin import _login
@@ -88,6 +88,13 @@ def _complete_activity_details(
     if str(activity.get("activityId") or "") != activity_id:
         raise ValueError("Garmin activity details do not match the requested ID")
     complete = dict(activity)
+    # Garmin's single-activity endpoint nests source timestamps in summaryDTO;
+    # the activity-list endpoint exposes the same fields at the top level.
+    source_summary = activity.get("summaryDTO")
+    if isinstance(source_summary, dict):
+        for field in ("startTimeLocal", "startTimeGMT"):
+            if not complete.get(field) and source_summary.get(field):
+                complete[field] = source_summary[field]
     summary_type = row.get("Activity Type", "").strip()
     if not is_supported_activity(complete) and is_supported_activity(
         {"activityType": summary_type}
@@ -189,6 +196,15 @@ def run(
                 result["coach_status"] = "pending" if result["files_ready"] else "missing_artifacts"
                 if result["files_ready"]:
                     try:
+                        if refreshed["status"] in {"baseline", "unchanged"} and activity.get("startTimeLocal"):
+                            canonical_key = f"{activity_prefix(activity)}/activity.v1.json"
+                            canonical = _json(store, canonical_key)
+                            metadata = canonical.get("activity", {})
+                            if (isinstance(metadata, dict)
+                                    and str(metadata.get("id")) == activity_id
+                                    and not metadata.get("start_time_local")):
+                                metadata["start_time_local"] = activity["startTimeLocal"]
+                                store.put(canonical_key, gzip_json(canonical), "application/json", encoding="gzip")
                         metadata = _coach_metadata(activity, row, store)
                         if metadata is None:
                             result["coach_status"] = "activity_date_unknown"
