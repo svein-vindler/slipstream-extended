@@ -50,6 +50,8 @@ AI client ◄── MCP + Managed OAuth ── Cloudflare Access ── Worker
 
 - GitHub Actions supplies scheduled compute; generated fitness data is not
   committed to Git.
+- Chat dispatch, schedules and local refresh share one bounded Python pipeline,
+  with per-stage timing and provider/storage call counts for troubleshooting.
 - R2 is the source of truth for summaries, detailed exports and backfill state.
 - The Worker validates Cloudflare Access assertions before reading R2.
 - Its shared storage reader bounds payloads and checks summary revisions before

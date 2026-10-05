@@ -22,7 +22,10 @@ by the installer. There is no shared backend.
 
 ## 1. Fetch (`pipeline/`)
 
-A scheduled GitHub Action runs `python -m pipeline.fetch`:
+Scheduled, chat-triggered and local refresh use `pipeline.refresh`, which calls
+the existing importers with the same bounds and checkpoint rules. GitHub Actions
+is a thin input adapter. [REFRESH_PIPELINE.md](REFRESH_PIPELINE.md) describes the
+shared modes, local execution and sanitized per-stage measurements.
 
 - `sources/garmin.py` logs into Garmin Connect using a **saved session token**
   (`GARMINTOKENS`) - no password is stored - and pulls the last N days of
