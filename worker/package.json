@@ -9,6 +9,7 @@
     "typecheck": "wrangler types && tsc --noEmit",
     "test": "npm run test:unit && npm run test:runtime",
     "test:unit": "vitest run --config vitest.config.ts",
+    "pretest:runtime": "node scripts/build-health-contract.mjs",
     "test:runtime": "vitest run --config vitest.worker.config.mts"
   },
   "dependencies": {
