@@ -19,13 +19,14 @@
  *   GITHUB_REPOSITORY     optional owner/repository for on-demand refresh
  *   HEALTH_TIMEZONE       optional IANA zone for local sleep-night context
  *
- * Pure data helpers live in ./lib (unit-tested); this file is the MCP wiring.
+ * Pure data helpers live in ./lib; bounded reads and summary reuse live in
+ * ./r2-storage. This file wires those services to MCP tools.
  */
 import { createMcpHandler } from "agents/mcp/server";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
-  Activity, HealthDay, parseCsv, parseHealthCsv, filterActs, activityFilterWarning, filterHealth,
+  Activity, HealthDay, filterActs, activityFilterWarning, filterHealth,
   summarize, summarizeHealth, toSummary, toHealthSummary, bucketKey, healthBucketKey,
   rawGarminActivityId, hrvObjectKeys, activityJsonObjectKeys,
   activityEnduranceObjectKeys, sleepObjectKeys, bodyCompositionObjectKeys,
@@ -45,31 +46,29 @@ import {
 import { RefreshCoordinator } from "./refresh-coordinator";
 import { FreshDataService, requestIdSchema } from "./fresh-data";
 import {
-  PayloadTooLargeError, decodePossiblyGzippedText, limitRequestBody,
+  PayloadTooLargeError, limitRequestBody,
   secureResponse,
 } from "./security";
 import { outputSchemas, structuredToolResult } from "./mcp-output";
 import { authenticateMcpRequest } from "./mcp-auth";
 import { nightContext, validatedHealthTimezone } from "./night-context";
+import { activityReady, refreshReportMessage, refreshReportSchema } from "./refresh-report";
 import {
   LatestActivityReport, latestActivityMessage, latestActivityReportSchema,
 } from "./latest-activity-report";
 import {
   buildWeightDay, invalidWeightDay, missingWeightDay, resolveWeightRequest,
 } from "./weight-history";
-import { activityReady, refreshReportMessage, refreshReportSchema } from "./refresh-report";
+import {
+  R2Storage, R2ReadLimits, clearSummaryCaches, GRANULAR_R2_LIMITS,
+  HISTORY_INDEX_R2_LIMITS, COACH_CONFIG_R2_LIMITS,
+} from "./r2-storage";
 
 export { RefreshCoordinator } from "./refresh-coordinator";
 
-const R2_CSV_PATH = "summary/activities.csv";
-const R2_HEALTH_CSV_PATH = "summary/health_daily.csv";
 const COACH_PROFILE_PREFIX = "coach/profiles/v1/";
 const COACH_PROFILE_INDEX_KEY = "coach/indexes/profiles-v1.json";
 const REQUEST_BODY_LIMIT_BYTES = 256 * 1024;
-const SUMMARY_R2_LIMITS = { stored: 2 * 1024 * 1024, decoded: 16 * 1024 * 1024 };
-const GRANULAR_R2_LIMITS = { stored: 8 * 1024 * 1024, decoded: 32 * 1024 * 1024 };
-const HISTORY_INDEX_R2_LIMITS = { stored: 512 * 1024, decoded: 2 * 1024 * 1024 };
-const COACH_CONFIG_R2_LIMITS = { stored: 256 * 1024, decoded: 512 * 1024 };
 const REFRESH_LEASE_TTL_MS = 2 * 60 * 1000;
 const REFRESH_POLL_ATTEMPTS = 5;
 const REFRESH_POLL_INTERVAL_MS = 4_000;
@@ -83,7 +82,6 @@ const PRIVATE_READ_TOOL_ANNOTATIONS = {
   idempotentHint: true,
   openWorldHint: false,
 } as const;
-type SummaryStorage = "r2" | "none";
 
 async function contentId(value: unknown): Promise<string> {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
@@ -91,12 +89,6 @@ async function contentId(value: unknown): Promise<string> {
   return [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 24);
 }
-
-// Per-isolate caches retain parsed summaries, while an inexpensive R2 HEAD
-// check prevents a different warm isolate from serving a stale post-refresh
-// view for several minutes.
-let activityCache: { etag: string; data: Activity[] } | undefined;
-let healthCache: { etag: string; data: HealthDay[] } | undefined;
 
 function refreshControl(run: RefreshRun | null) {
   const progress = refreshProgress(run);
@@ -110,18 +102,18 @@ function refreshControl(run: RefreshRun | null) {
 
 function clearSummaryCachesWhenReady(run: RefreshRun | null): void {
   if (!refreshProgress(run).dataReady) return;
-  activityCache = undefined;
-  healthCache = undefined;
+  clearSummaryCaches();
 }
 
 class FitnessService {
-  private activityStorage: SummaryStorage = "none";
-  private healthStorage: SummaryStorage = "none";
+  private readonly storage: R2Storage;
 
   constructor(
     private readonly env: Env,
     private readonly actorKey: string,
-  ) {}
+  ) {
+    this.storage = new R2Storage(env.SLIPSTREAM_DATA);
+  }
 
   private refreshConfig(): RefreshConfig {
     const cooldownMinutes = Number.parseInt(this.env.REFRESH_COOLDOWN_MINUTES, 10);
@@ -142,78 +134,25 @@ class FitnessService {
   }
 
   async getActivities(): Promise<Activity[]> {
-    try {
-      const metadata = await this.env.SLIPSTREAM_DATA.head(R2_CSV_PATH);
-      if (activityCache && metadata?.etag === activityCache.etag) {
-        this.activityStorage = "r2";
-        return activityCache.data;
-      }
-      const stored = await this.getR2Text([R2_CSV_PATH], SUMMARY_R2_LIMITS);
-      if (!stored) throw new Error(`R2 object ${R2_CSV_PATH} was not found.`);
-      const data = parseCsv(stored.text);
-      if (!data.length && !stored.text.startsWith("Activity ID,")) {
-        throw new Error("R2 activity summary has an invalid CSV header.");
-      }
-      this.activityStorage = "r2";
-      activityCache = { etag: stored.etag, data };
-      return data;
-    } catch (error) {
-      console.error(JSON.stringify({
-        message: "R2 activity summary unavailable",
-        error: error instanceof Error ? error.message : String(error),
-      }));
-      throw new Error("Activity data is unavailable in private R2.");
-    }
+    return this.storage.getActivities();
   }
 
   async getHealth(): Promise<HealthDay[]> {
-    try {
-      const metadata = await this.env.SLIPSTREAM_DATA.head(R2_HEALTH_CSV_PATH);
-      if (healthCache && metadata?.etag === healthCache.etag) {
-        this.healthStorage = "r2";
-        return healthCache.data;
-      }
-      const stored = await this.getR2Text([R2_HEALTH_CSV_PATH], SUMMARY_R2_LIMITS);
-      if (!stored) throw new Error(`R2 object ${R2_HEALTH_CSV_PATH} was not found.`);
-      const data = parseHealthCsv(stored.text);
-      if (!data.length && !stored.text.startsWith("Date,")) {
-        throw new Error("R2 health summary has an invalid CSV header.");
-      }
-      this.healthStorage = "r2";
-      healthCache = { etag: stored.etag, data };
-      return data;
-    } catch (error) {
-      console.error(JSON.stringify({
-        message: "R2 health summary unavailable",
-        error: error instanceof Error ? error.message : String(error),
-      }));
-      throw new Error("Health data is unavailable in private R2.");
-    }
+    return this.storage.getHealth();
   }
 
   async getR2Text(
     keys: string[],
-    limits = GRANULAR_R2_LIMITS,
+    limits: R2ReadLimits = GRANULAR_R2_LIMITS,
   ): Promise<{ key: string; text: string; etag: string } | null> {
-    for (const key of keys) {
-      const object = await this.env.SLIPSTREAM_DATA.get(key);
-      if (!object) continue;
-      if (object.size > limits.stored) {
-        throw new Error(`R2 object ${key} exceeds the stored-size limit.`);
-      }
-      const buffer = await object.arrayBuffer();
-      const text = await decodePossiblyGzippedText(buffer, limits.decoded);
-      return { key, text, etag: object.etag };
-    }
-    return null;
+    return this.storage.getR2Text(keys, limits);
   }
 
   async getR2Json(
     keys: string[],
-    limits = GRANULAR_R2_LIMITS,
+    limits: R2ReadLimits = GRANULAR_R2_LIMITS,
   ): Promise<{ key: string; data: unknown } | null> {
-    const stored = await this.getR2Text(keys, limits);
-    return stored ? { key: stored.key, data: JSON.parse(stored.text) as unknown } : null;
+    return this.storage.getR2Json(keys, limits);
   }
 
   private async completedRefreshDetails(run: RefreshRun | null): Promise<{
@@ -525,7 +464,7 @@ class FitnessService {
         connected: true, count: a.length,
         earliest: dates.length ? new Date(Math.min(...dates)).toISOString().slice(0, 10) : null,
         latest: dates.length ? new Date(Math.max(...dates)).toISOString().slice(0, 10) : null,
-        by_source: srcs, storage: this.activityStorage,
+        by_source: srcs, storage: this.storage.activityStorage,
       });
     });
 
@@ -636,7 +575,7 @@ class FitnessService {
       return this.text({
         connected: true, days: rows.length,
         earliest: dates[0] ?? null, latest: dates[dates.length - 1] ?? null,
-        storage: this.healthStorage,
+        storage: this.storage.healthStorage,
         note: rows.length
           ? "This status covers daily summaries; detailed streams may be available through dedicated tools."
           : "No health backfill has completed yet.",

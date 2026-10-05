@@ -213,6 +213,21 @@ group, so GitHub queues rather than overlaps delayed runs.
 A Cloudflare Worker exposes the data over MCP (the open protocol both Claude and
 ChatGPT speak). It's built on the `agents` MCP runtime and the official MCP SDK.
 
+`src/r2-storage.ts` owns bounded text/JSON reads, summary CSV parsing and
+per-isolate parsed summary caches. It receives only the bucket's `get` and
+`head` methods; it has no dispatch, authentication or write responsibility.
+`src/index.ts` retains MCP registration, domain-specific index discovery and
+analysis, refresh coordination and optional append-only writes. The fresh-data
+service uses the same reader through its existing service interface.
+
+Each summary read checks R2 metadata before reusing parsed data. A changed
+ETag reloads the object; missing objects, failed metadata reads and invalid
+replacements keep their existing errors rather than returning an old cache.
+Storage-status reporting stays scoped to the current request. Refresh-ready
+handling clears both summary caches through the shared module. The caches hold
+only parsed summaries and revisions, never request state, bindings or in-flight
+I/O. Object keys, schemas and stored/decoded payload limits are unchanged.
+
 - Each request gets a fresh, stateless MCP SDK v2 server. On a tool call it
   reads the required summary or detailed object from R2 through a private
   binding and answers in-memory. Parsed summaries are cached per isolate, but
