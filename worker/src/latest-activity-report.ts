@@ -6,8 +6,9 @@ export const latestActivityReportSchema = z.object({
   checked_at: z.string(),
   status: z.enum([
     "ready", "no_recent_activity", "no_new_activity", "expected_activity_missing",
-    "files_unavailable", "coach_pending",
+    "files_unavailable", "coach_pending", "ambiguous_activity", "activity_date_unknown",
   ]),
+  candidate_ids: z.array(z.string()).optional(),
   activity_id: z.string().regex(/^garmin-\d{1,20}$/).nullable(),
   activity_date: z.string().nullable(),
   activity_started_at_utc: z.string().nullable(),
@@ -24,6 +25,8 @@ export const latestActivityReportSchema = z.object({
 export type LatestActivityReport = z.infer<typeof latestActivityReportSchema>;
 
 export function latestActivityMessage(report: LatestActivityReport): string {
+  if (report.status === "ambiguous_activity") return "Multiple workouts match the requested local day; select an exact activity ID before importing details.";
+  if (report.status === "activity_date_unknown") return "Garmin did not supply a reliable local workout date; readiness is unconfirmed.";
   if (report.status === "no_recent_activity") {
     return "Garmin returned no supported activity from the last seven days. No workout was imported.";
   }

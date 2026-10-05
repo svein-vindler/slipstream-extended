@@ -38,11 +38,12 @@ import {
   summarizeHrvPayload, summarizeSleepPayload,
 } from "./health-history";
 import {
-  RefreshConfig, RefreshRun, dispatchLatestActivity, dispatchRefresh,
+  RefreshConfig, RefreshRun, dispatchRefresh,
   latestRefreshRun, pollRefreshRun,
   refreshDecision, refreshProgress,
 } from "./github";
 import { RefreshCoordinator } from "./refresh-coordinator";
+import { FreshDataService, requestIdSchema } from "./fresh-data";
 import {
   PayloadTooLargeError, decodePossiblyGzippedText, limitRequestBody,
   secureResponse,
@@ -73,8 +74,6 @@ const REFRESH_LEASE_TTL_MS = 2 * 60 * 1000;
 const REFRESH_POLL_ATTEMPTS = 5;
 const REFRESH_POLL_INTERVAL_MS = 4_000;
 const REFRESH_STATUS_LEASE_TTL_MS = REFRESH_POLL_ATTEMPTS * REFRESH_POLL_INTERVAL_MS + 5_000;
-const LATEST_ACTIVITY_COOLDOWN_MS = 5 * 60 * 1000;
-const LATEST_ACTIVITY_DAILY_LIMIT = 12;
 const COACH_PROFILE_WRITE_TTL_MS = 60_000;
 const ACTIVITY_CONTEXT_WRITE_TTL_MS = 10_000;
 const DEFAULT_MCP_WRITE_DAILY_LIMIT = 60;
@@ -136,6 +135,10 @@ class FitnessService {
       token: this.env.GITHUB_ACTIONS_TOKEN,
       cooldownMinutes: Number.isFinite(cooldownMinutes) ? cooldownMinutes : 30,
     };
+  }
+
+  private freshData(): FreshDataService {
+    return new FreshDataService(this.env, this, this.refreshConfig());
   }
 
   async getActivities(): Promise<Activity[]> {
@@ -1331,95 +1334,31 @@ class FitnessService {
 
     if (this.env.GITHUB_ACTIONS_TOKEN && this.env.GITHUB_REPOSITORY) {
       server.registerTool("sync_latest_activity", {
-        title: "Import the latest Garmin workout",
-        description: "When the user asks to fetch their latest workout after training or explicitly sync it from Garmin, import one recent activity, its detailed files, and running Coach Input. Set expected_date when the user gives the local workout date (for example 'today'), so a workout from another day cannot be mistaken for it. Set new_activity_expected=true after a new session; without an expected date, this reports no_new_activity instead of presenting an older complete workout as new. Set false only to update the already known latest workout. If multiple workouts happened on the expected date, compare the returned name and Garmin-local start time with the user's description; ask if ambiguous. This does not refresh health history. Wait with refresh_status using the returned run ID while should_continue_polling is true. A successful GitHub run alone does not mean the activity is ready: check activity_ready and latest_activity.status. When ready, read coach_input and endurance_session for that same activity ID. Do not call for a merely read-only request about already stored data.",
+        title: "Fetch fresh data for the latest Garmin workout",
+        description: "Use only for an explicitly authorized fresh-data or Garmin sync request. Reads canonical private R2 first and checks completeness and the last successful source check before starting at most one bounded recent activity job. This can contact Garmin and update private R2. Pass expected_date for the Garmin-local workout day and activity_id to disambiguate multiple sessions. Without a date, a newly expected workout uses today's configured HEALTH_TIMEZONE day; during travel supply the explicit local date. Returns a coherent package for the same activity ID, including details, Coach Input and explicit user context. Older workouts and ambiguous dates are never presented as the requested new session. Compatible requests share a correlation/run ID. Follow refresh_status with request_id only while should_continue_polling; stop when false and report missing components and retry guidance.",
         inputSchema: z.object({
-          activity_id: z.string().regex(/^(garmin-)?\d{1,20}$/).optional()
-            .describe("Optional exact Garmin activity ID, if the user supplied it; otherwise select the latest supported workout from the last seven days"),
-          new_activity_expected: z.boolean().default(true)
-            .describe("True after a newly completed workout; false when rechecking an already known recent activity"),
-          expected_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()
-            .describe("Garmin-local date YYYY-MM-DD when the user identifies the workout day, such as today's training"),
+          activity_id: z.string().regex(/^(garmin-)?\d{1,20}$/).optional(),
+          new_activity_expected: z.boolean().default(true),
+          expected_date: exactDate.optional(),
         }),
         outputSchema: outputSchemas.sync_latest_activity,
-        annotations: {
-          readOnlyHint: false,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: true,
-        },
+        annotations: { readOnlyHint: false, destructiveHint: false,
+          idempotentHint: true, openWorldHint: true },
       }, async (args) => {
-        const coordinator = this.env.REFRESH_COORDINATOR.getByName("global");
-        const lease = await coordinator.reserveBudgeted(
-          "sync-latest-activity",
-          "sync-latest-activity",
-          Date.now(),
-          LATEST_ACTIVITY_COOLDOWN_MS,
-          LATEST_ACTIVITY_DAILY_LIMIT,
-        );
-        if (!lease.acquired || !lease.token) {
-          return this.text({
-            accepted: false,
-            reason: lease.reason ?? "cooldown",
-            retry_after_seconds: Math.max(1, Math.ceil((lease.retryAfterMs ?? 1000) / 1000)),
-            message: "A recent latest-workout request is already in progress or the daily safety limit is reached. Do not start a broad refresh as a workaround.",
-            terminal: true,
-            data_ready: false,
-            should_continue_polling: false,
-            activity_ready: null,
-          });
-        }
-        try {
-          const config = this.refreshConfig();
-          const previous = await latestRefreshRun(config);
-          const run = await dispatchLatestActivity(
-            config,
-            {
-              activityId: args.activity_id ? rawGarminActivityId(args.activity_id) : undefined,
-              newActivityExpected: args.new_activity_expected,
-              expectedDate: args.expected_date,
-            },
-          );
-          const polled = await pollRefreshRun(config, {
-            runId: run?.id,
-            excludeRunId: run ? undefined : previous?.id,
-            maxPolls: REFRESH_POLL_ATTEMPTS,
-            intervalMs: REFRESH_POLL_INTERVAL_MS,
-          });
-          clearSummaryCachesWhenReady(polled);
-          const control = refreshControl(polled);
-          const details = await this.completedRefreshDetails(polled);
-          return this.text({
-            accepted: true,
-            message: control.should_continue_polling
-              ? polled?.id
-                ? "The latest-workout import is running. Call refresh_status with this run ID in the same turn."
-                : "The latest-workout import was dispatched, but GitHub has not exposed its run ID yet. Call refresh_status without an ID in the same turn."
-              : control.data_ready ? details.message
-                : `The latest-workout import failed (${polled?.conclusion ?? "unknown"}); no activity readiness is confirmed.`,
-            run: polled,
-            ...control,
-            activity_ready: details.activity_ready,
-            ...(details.latest_activity ? { latest_activity: details.latest_activity } : {}),
-          });
-        } catch (error) {
-          await coordinator.release("sync-latest-activity", lease.token);
-          console.error(JSON.stringify({
-            message: "Could not request latest Garmin activity",
-            error: error instanceof Error ? error.message : String(error),
-          }));
-          return {
-            ...this.text({
-              accepted: false,
-              message: error instanceof Error ? error.message : "Could not request the latest Garmin activity.",
-              terminal: true,
-              data_ready: false,
-              should_continue_polling: false,
-              activity_ready: null,
-            }),
-            isError: true,
-          };
-        }
+        const fresh = this.freshData();
+        return this.text(await fresh.request(fresh.activityRequest(args)));
+      });
+
+      server.registerTool("sync_latest_night", {
+        title: "Fetch fresh sleep and HRV for the last night",
+        description: "Use only when the user explicitly authorizes fetching fresh sleep/night data or Garmin sync. Reads canonical private R2 sleep and associated HRV first, separately checks completeness and the last successful source check, and if needed imports exactly one recent wake-date. Can contact Garmin and update private storage. wake_date is the Garmin-local date on waking, not the date the night began. Omit it only when today's configured HEALTH_TIMEZONE wake-date is appropriate; supply an explicit wake-date during travel. Garmin local timestamps take priority with existing IANA/DST fallback. Compatible requests share a job. Follow refresh_status with request_id while should_continue_polling and stop when false. A successful workflow alone does not prove that Garmin has finalized sleep and HRV.",
+        inputSchema: z.object({ wake_date: exactDate.optional() }),
+        outputSchema: outputSchemas.sync_latest_night,
+        annotations: { readOnlyHint: false, destructiveHint: false,
+          idempotentHint: true, openWorldHint: true },
+      }, async (args) => {
+        const fresh = this.freshData();
+        return this.text(await fresh.request(fresh.nightRequest(args.wake_date)));
       });
 
       server.registerTool("refresh_today", {
@@ -1529,8 +1468,9 @@ class FitnessService {
 
       server.registerTool("refresh_status", {
       title: "Check Garmin refresh status",
-      description: "Wait briefly for a Garmin refresh or latest-workout import and report its status without starting a new job. Pass the run ID returned by refresh_today or sync_latest_activity. If should_continue_polling remains true, call this tool again in the same conversation turn instead of answering the user or asking them for another prompt. Stop when terminal is true.",
+      description: "Wait briefly for a Garmin refresh or latest-workout import and report its status without starting a new job. Pass request_id from a targeted activity/night request (preferred), or the returned run_id. Targeted jobs permit three short polling windows in total. Stop polling when should_continue_polling is false, even if terminal is false; report the state and retry guidance. Ordinary status checks start no Garmin job.",
       inputSchema: z.object({
+        request_id: requestIdSchema.optional(),
         run_id: z.number().int().positive().optional()
           .describe("GitHub Actions run ID returned by refresh_today or sync_latest_activity; omit only for a general latest-status check"),
       }),
@@ -1543,6 +1483,13 @@ class FitnessService {
       },
     }, async (args) => {
       const coordinator = this.env.REFRESH_COORDINATOR.getByName("global");
+      const freshJob = args.request_id ? await coordinator.freshJob(args.request_id)
+        : args.run_id ? await coordinator.freshJobForRun(args.run_id) : null;
+      if (args.request_id && !freshJob) {
+        return this.text({ available: false, message: "The targeted correlation ID was not found.",
+          terminal: true, data_ready: false, should_continue_polling: false });
+      }
+      if (freshJob) return this.text(await this.freshData().status(freshJob));
       const statusKey = `refresh-status:${this.actorKey}:${args.run_id ?? "latest"}`;
       const lease = await coordinator.reserve(
         statusKey,

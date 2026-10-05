@@ -218,7 +218,8 @@ export async function dispatchRefresh(
 
 export async function dispatchLatestActivity(
   config: RefreshConfig,
-  options: { activityId?: string; newActivityExpected: boolean; expectedDate?: string },
+  options: { activityId?: string; newActivityExpected: boolean; expectedDate?: string;
+    requestId?: string; repairOnly?: boolean },
   fetcher: Fetcher = fetch,
 ): Promise<RefreshRun | null> {
   if (options.activityId && !/^\d{1,20}$/.test(options.activityId)) {
@@ -230,9 +231,20 @@ export async function dispatchLatestActivity(
   return dispatchWithInputs(config, {
     latest_activity_only: true,
     latest_new_activity_expected: options.newActivityExpected,
+    ...(options.requestId ? { sync_request_id: options.requestId } : {}),
+    ...(options.repairOnly ? { latest_r2_only: true } : {}),
     ...(options.expectedDate ? { latest_expected_date: options.expectedDate } : {}),
     ...(options.activityId ? { latest_activity_id: options.activityId } : {}),
   }, fetcher);
+}
+
+export async function dispatchLatestNight(
+  config: RefreshConfig, wakeDate: string, requestId: string,
+  fetcher: Fetcher = fetch,
+): Promise<RefreshRun | null> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(wakeDate)) throw new Error("Invalid wake-date");
+  return dispatchWithInputs(config, { latest_night_only: true,
+    latest_wake_date: wakeDate, sync_request_id: requestId }, fetcher);
 }
 
 async function dispatchWithInputs(

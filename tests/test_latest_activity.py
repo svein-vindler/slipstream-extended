@@ -1,12 +1,26 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+
+import pytest
 
 from pipeline.latest_activity import run
 from pipeline.schema import Activity
 
 
+@pytest.fixture(autouse=True)
+def fixed_recent_window(monkeypatch):
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 9, 30)
+    monkeypatch.setattr("pipeline.freshness.date", FixedDate)
+
+
 class FakeStore:
     def __init__(self):
         self.objects = {}
+
+    def get(self, key):
+        return self.objects[key]
 
     def list_keys(self, prefix=""):
         return {key for key in self.objects if key.startswith(prefix)}
@@ -29,6 +43,7 @@ def _activity(activity_id, hour, sport="run", raw_sport="running"):
     return Activity(
         source="garmin", source_id=activity_id,
         start=datetime(2026, 9, 29, hour, tzinfo=timezone.utc),
+        local_start_date="2026-09-29", local_start_time=f"2026-09-29 {hour:02}:00:00",
         sport=sport, raw_sport=raw_sport, name=f"Workout {activity_id}",
     )
 
@@ -47,7 +62,7 @@ def test_latest_imports_only_newest_supported_activity_and_its_coach(monkeypatch
                         lambda **kwargs: fetched)
 
     def refresh(activity, *, existing_keys, force, **kwargs):
-        assert force is True
+        assert force is False
         assert activity["activityId"] == "2"
         assert activity["activityType"] == {"typeKey": "running"}
         for name in ("activity.fit", "activity.v1.json", "activity.tcx",
@@ -55,15 +70,15 @@ def test_latest_imports_only_newest_supported_activity_and_its_coach(monkeypatch
             existing_keys.add(f"activities/2026/2/{name}")
         return {"status": "refreshed"}
 
-    def coach(*, priority_activity_ids, **kwargs):
-        assert priority_activity_ids == {"2"}
+    def coach(*, activity, **kwargs):
+        assert activity["id"] == "2"
         store.put("activities/2026/2/coach-input/v1/canonical/result.json",
                   b"{}", "application/json")
         return {"processed_sources": {"2": "signature"},
                 "skipped_this_run": [], "blocked_activities": []}
 
     monkeypatch.setattr("pipeline.latest_activity.refresh_activity", refresh)
-    monkeypatch.setattr("pipeline.latest_activity.run_coach_backfill", coach)
+    monkeypatch.setattr("pipeline.latest_activity.run_coach_one", coach)
     result = run(run_id="123", data_dir=str(tmp_path),
                  store=store, garmin=garmin)
 
@@ -120,7 +135,7 @@ def test_latest_expected_local_date_rejects_older_workout(monkeypatch, tmp_path)
     result = run(run_id="129", data_dir=str(tmp_path),
                  expected_date="2026-09-29", store=store, garmin=garmin)
     assert result["status"] == "expected_activity_missing"
-    assert result["activity_date"] == "2026-09-28"
+    assert result["activity_date"] is None
     assert garmin.checked == []
 
 
@@ -146,7 +161,7 @@ def test_latest_expected_local_date_accepts_same_night_across_utc_date(monkeypat
         return {"processed_sources": {"2": "signature"},
                 "skipped_this_run": [], "blocked_activities": []}
 
-    monkeypatch.setattr("pipeline.latest_activity.run_coach_backfill", coach)
+    monkeypatch.setattr("pipeline.latest_activity.run_coach_one", coach)
     result = run(run_id="130", data_dir=str(tmp_path),
                  expected_date="2026-09-30", store=store, garmin=FakeGarmin())
     assert result["status"] == "ready"
@@ -160,7 +175,7 @@ def test_latest_reports_missing_files_without_claiming_coach(monkeypatch, tmp_pa
                         lambda **kwargs: [_activity("2", 10)])
     monkeypatch.setattr("pipeline.latest_activity.refresh_activity",
                         lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("no FIT")))
-    monkeypatch.setattr("pipeline.latest_activity.run_coach_backfill",
+    monkeypatch.setattr("pipeline.latest_activity.run_coach_one",
                         lambda **kwargs: (_ for _ in ()).throw(AssertionError("coach must wait")))
     result = run(run_id="125", data_dir=str(tmp_path),
                  store=store, garmin=FakeGarmin())
@@ -197,7 +212,7 @@ def test_latest_keeps_files_ready_when_coach_generation_fails(monkeypatch, tmp_p
         return {"status": "refreshed"}
 
     monkeypatch.setattr("pipeline.latest_activity.refresh_activity", refresh)
-    monkeypatch.setattr("pipeline.latest_activity.run_coach_backfill",
+    monkeypatch.setattr("pipeline.latest_activity.run_coach_one",
                         lambda **kwargs: (_ for _ in ()).throw(ValueError("bad profile")))
     result = run(run_id="127", data_dir=str(tmp_path),
                  store=store, garmin=FakeGarmin())

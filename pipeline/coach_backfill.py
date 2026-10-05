@@ -119,6 +119,65 @@ def _source_signature(
     return sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
 
 
+def run_one(*, activity: dict[str, Any], store: R2Store) -> dict[str, Any]:
+    """Analyze exactly one R2 prefix without touching the historical backfill plan."""
+    activity_id = str(activity["id"])
+    if not activity_id.isdigit() or len(activity_id) > 20:
+        raise ValueError("Invalid activity ID")
+    prefix = f"activities/{activity['date'][:4]}/{activity_id}"
+    revisions = (store.list_object_revisions(f"{prefix}/")
+                 if hasattr(store, "list_object_revisions") else {})
+    keys = set(revisions) if revisions else store.list_keys(f"{prefix}/")
+    profile = select_profile(_profiles(store), activity["date"])
+    blocked = None
+    if not profile:
+        blocked = "no_effective_profile"
+    required = [f"{prefix}/{name}" for name in (
+        "activity.v1.json", "activity.endurance.v1.json", "activity.tcx",
+    )]
+    if not blocked and any(key not in keys for key in required):
+        blocked = "missing_artifacts"
+    if blocked:
+        return {"processed_sources": {}, "blocked_activities": [
+            {"activity_id": activity_id, "reason": blocked},
+        ]}
+    endurance = _json(store, required[1])
+    if endurance.get("available") is False:
+        return {"processed_sources": {}, "blocked_activities": [
+            {"activity_id": activity_id, "reason": "endurance_data_unavailable"},
+        ]}
+    context_key = _latest_context_keys(keys).get(prefix)
+    coach = build_coach_input(
+        activity=activity, decoded_fit=_json(store, required[0]),
+        endurance=endurance, profile=profile,
+        tcx_sha256=sha256(store.get(required[2])),
+        context=_json(store, context_key) if context_key else None,
+    )
+    # Source hashes alone omit changed local dates, names and derived metadata.
+    # Include the deterministic content so targeted repairs never overwrite an
+    # older analysis under the same ID after such a change.
+    coach["analysis_id"] = sha256(json.dumps(
+        coach, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode())[:24]
+    key = f"{prefix}/coach-input/v1/canonical/{coach['analysis_id']}.json"
+    if key not in keys:
+        store.put(key, gzip_json(coach), "application/json", encoding="gzip")
+    # A derived pointer validates canonical revisions without downloading TCX
+    # during a chat read. Immutable analysis objects retain all older versions.
+    if revisions:
+        pointer = {"schema_version": 1, "analysis_key": key,
+                   "source_revisions": {source: revisions[source] for source in required},
+                   "profile_id": profile["profile_id"],
+                   "context_id": coach.get("user_context", {}).get("context_id")
+                   if coach.get("user_context") else None}
+        pointer_key = f"{prefix}/coach-input/v1/latest-ready.json"
+        if pointer_key not in keys or _json(store, pointer_key) != pointer:
+            store.put(pointer_key, json.dumps(pointer, separators=(",", ":")).encode(),
+                      "application/json")
+    return {"processed_sources": {activity_id: coach["analysis_id"]},
+            "blocked_activities": [], "skipped_this_run": []}
+
+
 def run(
     *,
     max_activities: int = 50,
