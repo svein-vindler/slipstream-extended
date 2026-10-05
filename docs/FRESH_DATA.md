@@ -217,8 +217,10 @@ months and directly reads those monthly indexes. Existing summaries for days
 with the same source key/revision and builder revision are reused; changed or
 missing day summaries are rebuilt from their canonical objects. Missing/corrupt
 indexes are repaired even when canonical data is unchanged. Unrelated months
-are not scanned by the scoped path. The existing scheduled whole-history index
-reconciliation remains; general manual refresh no longer invokes it.
+are not scanned by the scoped path. Scheduled index maintenance checks recent
+calendar months, retaining a separately checkpointed weekly full R2 repair;
+general manual refresh does not invoke that final maintenance step. See
+`HEALTH_HISTORY.md` for scope, recovery and measurement details.
 
 After canonical storage and index success, each usable date records a small
 receipt at `refresh/checks/v1/health/{sleep|hrv}/{YYYY-MM-DD}.json`, including its
@@ -266,8 +268,9 @@ dates, as in the existing adapter) and 14 health calendar dates. After a success
 wide check, subsequent refreshes for less than 24 hours use activity `days_back=7`
 (8 inclusive dates) and 3 health dates. Each stream is planned independently.
 The six-hour refresh schedule remains unchanged. No historical plan is read or
-modified by this planner; scheduled global index reconciliation and existing
-historical jobs remain separate and retain their existing schedules.
+modified by this planner; scheduled recent/weekly index reconciliation and
+existing historical jobs remain separate. Their six-hour refresh trigger and
+historical schedules remain unchanged.
 
 The wide check is performed by the next normal refresh once 24 hours have elapsed,
 including manual refresh. Failed or partial checks remain due for another wide

@@ -118,6 +118,15 @@ Stop publishing if any author or committer address is not intended to be
 public. Changing a later commit does not remove an address from existing Git
 history.
 
+## Clean up completed branches
+
+After a successful PR merge and release verification, delete its completed
+remote branch and local branch when no worktree still uses it. Confirm the tip
+is merged or its patches are preserved in the merged result when squash/rebase
+was used. A commit by itself does not finish a branch: retain unmerged work and
+branches checked out in other worktrees. Never merge a completed branch again
+just to remove it. Keep private and public cleanup separate.
+
 ## Bring public maintenance back to the canary
 
 Dependency, documentation and contributor changes may originate in public. Test

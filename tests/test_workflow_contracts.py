@@ -52,6 +52,15 @@ def test_targeted_night_excludes_broad_fetch_export_and_backfill():
     assert 'cron: "0 */6 * * *"' in workflow
     reconciliation = next(step for step in steps if step.startswith("Reconcile health history"))
     assert "github.event_name == 'schedule'" in next(line for line in reconciliation.splitlines() if "if:" in line)
+    assert "python -m pipeline.health_history_index --scheduled" in reconciliation
+
+
+def test_manual_health_index_build_retains_full_default_and_can_exercise_scheduled_policy():
+    workflow = (ROOT / ".github/workflows/health-history-index.yml").read_text(encoding="utf-8")
+    assert "default: full" in workflow and "options: [full, scheduled]" in workflow
+    assert "args+=(--scheduled)" in workflow
+    assert '"$RECENT_MONTHS" != "0"' in workflow
+    assert "group: garmin-sync" in workflow
 
 
 def test_general_body_refresh_uses_bounded_dayviews_without_historical_backfill():

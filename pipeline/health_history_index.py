@@ -12,6 +12,7 @@ import gzip
 import json
 import math
 import sys
+import time
 from collections.abc import Iterable
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -48,7 +49,10 @@ def _validate_stream(stream: str) -> None:
 
 def _decode_json(data: bytes, key: str) -> dict[str, Any]:
     if data[:2] == b"\x1f\x8b":
-        data = gzip.decompress(data)
+        try:
+            data = gzip.decompress(data)
+        except (OSError, EOFError) as exc:
+            raise ValueError(f"R2 gzip object is invalid: {key}") from exc
     try:
         value = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -340,7 +344,7 @@ def _cached_days(current: dict[str, Any] | None, stream: str, month: str) -> dic
         if day[:7] != month or day in result:
             return None
         status = item.get("status")
-        if status not in {"available", "no_data", "invalid_schema"}:
+        if status not in {"available", "no_data"}:
             continue
         if status == "available":
             fields = ("summary", "score_breakdown") if stream == "sleep" else ("garmin", "derived")
@@ -373,6 +377,20 @@ def _selected_months(
     return months
 
 
+def _indexed_months(stream: str, revisions: dict[str, str]) -> set[str]:
+    """Include indexes whose final source day was removed in a full repair."""
+    months = set()
+    for key in revisions:
+        suffix = key.removeprefix(INDEX_PREFIXES[stream])
+        try:
+            month = date.fromisoformat(suffix.removesuffix(".json").replace("/", "-") + "-01").isoformat()[:7]
+        except ValueError:
+            continue
+        if key == index_key(stream, month):
+            months.add(month)
+    return months
+
+
 def sync_stream(
     stream: str,
     *,
@@ -393,6 +411,9 @@ def sync_stream(
     else:
         source_revisions = store.list_object_revisions(SOURCE_PREFIXES[stream])
     grouped = _month_sources(source_revisions)
+    index_revisions = store.list_object_revisions(INDEX_PREFIXES[stream]) if requested is None else {}
+    for month in _indexed_months(stream, index_revisions):
+        grouped.setdefault(month, {})
     for month in requested or ():
         grouped.setdefault(month, {})
     selected = _selected_months(
@@ -404,9 +425,9 @@ def sync_stream(
     if requested is not None:
         selected = [month for month in selected if month in requested]
 
-    index_revisions = store.list_object_revisions(INDEX_PREFIXES[stream]) if requested is None else {}
     written: list[dict[str, Any]] = []
     unchanged: list[str] = []
+    invalid_days = 0
     for position, month in enumerate(selected, start=1):
         key = index_key(stream, month)
         expected_revisions = {
@@ -435,6 +456,7 @@ def sync_stream(
                     )
                 continue
         payload = build_month_index(stream, month, grouped[month], store, previous=current)
+        invalid_days += sum(item["status"] == "invalid_schema" for item in payload["days"])
         data = gzip_json(payload)
         store.put(key, data, "application/json", encoding="gzip")
         written.append({"month": month, "days": len(payload["days"]), "bytes": len(data)})
@@ -448,6 +470,7 @@ def sync_stream(
         "months_considered": len(selected),
         "months_written": written,
         "months_unchanged": unchanged,
+        "invalid_days": invalid_days,
     }
 
 
@@ -472,6 +495,8 @@ def run(
     store: R2Store | None = None,
 ) -> dict[str, Any]:
     store = store or R2Store()
+    started = time.perf_counter()
+    before = dict(store.operations)
     results = {
         stream: sync_stream(
             stream,
@@ -486,6 +511,8 @@ def run(
         "schema_version": SCHEMA_VERSION,
         "status": "complete",
         "results": results,
+        "r2_operations": {key: store.operations[key] - value for key, value in before.items()},
+        "elapsed_ms": round((time.perf_counter() - started) * 1000),
     }
     print(json.dumps(report, indent=2, ensure_ascii=False))
     return report
@@ -501,10 +528,20 @@ def main() -> None:
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
     parser.add_argument("--recent-months", type=int)
+    parser.add_argument("--scheduled", action="store_true", help="Recent months with weekly full reconciliation")
     parser.add_argument("--env-file", type=Path, default=Path(".env.local-bootstrap"))
     args = parser.parse_args()
     load_env_file(args.env_file)
     try:
+        if args.scheduled:
+            if args.start_date or args.end_date or args.recent_months is not None:
+                parser.error("--scheduled cannot be combined with date/month filters")
+            from .health_index_reconcile import run as reconcile
+
+            report = reconcile(streams=args.stream or STREAMS)
+            if report["status"] != "complete":
+                raise SystemExit(1)
+            return
         run(
             streams=args.stream or STREAMS,
             start_date=args.start_date,

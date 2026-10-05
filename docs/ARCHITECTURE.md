@@ -144,7 +144,9 @@ after that. It verifies every day in a daily request and the newest seven days
 in a weekly request against the canonical object, replacing a stale index row
 in memory and reporting the consistency state. Full HRV readings or sleep-stage
 timelines remain limited to seven days. The refresh workflow finishes with a
-revision-aware reconciliation of every history month. Together these safeguards
+revision-aware check of recent calendar months and a separately checkpointed
+weekly full reconciliation. Immediate full manual repair remains available.
+Together these safeguards
 make canonical R2 data self-healing while bounding R2 operations, Worker CPU and
 MCP response size.
 
