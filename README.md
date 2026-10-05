@@ -12,6 +12,12 @@ a Cloudflare Worker. Cloudflare Access Managed OAuth controls who may connect.
 There is no shared Slipstream service: every user installs and pays for their
 own infrastructure.
 
+Use it to discuss your latest workout, last night's recovery, training trends
+and weight history in ChatGPT or another compatible assistant. Fresh-data
+requests check what is already stored, import only the needed recent scope when
+necessary, and report whether the requested data is ready. Your historical data
+and prepared analyses remain available between refreshes.
+
 ## What it includes
 
 - Activity and daily-health summaries
@@ -134,6 +140,14 @@ due. Older summary rows are retained, and edits within the wider windows are
 picked up by this daily reconciliation. Detailed health checks and explicit
 historical imports keep their own scopes. See [fresh-data behavior](docs/FRESH_DATA.md)
 for the coverage limits and measured request/storage tradeoffs.
+
+Scheduled sleep/HRV index maintenance checks recent calendar months rather than
+scanning all history every six hours. It performs a full R2 repair at startup
+and when the last successful full check is at least seven days old. Missing or
+failed checks remain due, and immediate manual full repair remains available.
+This repairs indexes from stored data; it does not re-download Garmin history.
+See [health-history maintenance](docs/HEALTH_HISTORY.md) for recovery and
+reproducible operation counts.
 
 `data_ready` reports workflow completion. Check each activity's `files_ready`
 and `coach_status` before claiming its files and analysis are ready. A configured
