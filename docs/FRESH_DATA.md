@@ -258,6 +258,11 @@ do not edit private fitness data just to manufacture a canary source change.
 
 ## Incremental recent individual weigh-ins
 
+Garmin dayview samples may include both an ISO `calendarDate` and an epoch-valued
+`date`. The epoch field is validated as a timestamp, rather than compared as an
+ISO calendar declaration. The requested Garmin day and any explicit calendar
+dates still have to agree; UTC timestamps never replace the local calendar day.
+
 General manual and scheduled refresh use `pipeline.recent_body --max-days 3`
 with the freshly fetched local health summary. Standalone calls without
 `--summary` read the current R2 health summary instead. This retains the existing

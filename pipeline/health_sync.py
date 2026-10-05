@@ -20,6 +20,26 @@ class HealthNotReady(ValueError):
         self.status = status
 
 
+def _validate_body_dates(item: dict[str, Any], day: str) -> None:
+    for key in ("calendarDate", "date", "summaryDate"):
+        value = item.get(key)
+        if value is None:
+            continue
+        if key == "date" and _number(value) is not None:
+            # Garmin dayview rows also carry an epoch-valued `date`. It is a
+            # timestamp, not an ISO calendar declaration; never substitute its
+            # UTC date for the dayview's Garmin-local calendar date.
+            timestamp = _timestamp_seconds(value)
+            try:
+                if timestamp is None or timestamp <= 0:
+                    raise ValueError("Invalid epoch date")
+                datetime.fromtimestamp(timestamp, timezone.utc)
+            except (ValueError, OverflowError, OSError) as exc:
+                raise HealthNotReady("invalid_response") from exc
+        elif str(value)[:10] != day:
+            raise HealthNotReady("wrong_date")
+
+
 def _body_day(day: str, raw: dict[str, Any]) -> dict[str, Any]:
     """Validate the complete individual dayview before replacing a good day."""
     rows = raw.get("dateWeightList")
@@ -31,9 +51,7 @@ def _body_day(day: str, raw: dict[str, Any]) -> dict[str, Any]:
     for row in rows:
         if not isinstance(row, dict):
             raise HealthNotReady("invalid_response")
-        for key in ("calendarDate", "date", "summaryDate"):
-            if row.get(key) is not None and str(row[key])[:10] != day:
-                raise HealthNotReady("wrong_date")
+        _validate_body_dates(row, day)
         if "allWeightMetrics" in row:
             metrics = row["allWeightMetrics"]
             if not isinstance(metrics, list) or not metrics:
@@ -41,14 +59,12 @@ def _body_day(day: str, raw: dict[str, Any]) -> dict[str, Any]:
             if any(not isinstance(item, dict) for item in metrics):
                 raise HealthNotReady("invalid_response")
             for item in metrics:
-                for key in ("calendarDate", "date", "summaryDate"):
-                    if item.get(key) is not None and str(item[key])[:10] != day:
-                        raise HealthNotReady("wrong_date")
+                _validate_body_dates(item, day)
                 items.append({"calendarDate": day, **item})
         elif "latestWeight" in row or "totalAverage" in row:
             raise HealthNotReady("invalid_response")
         else:
-            items.append(row)
+            items.append({"calendarDate": day, **row})
     if any(not any((weight := _number(item.get(key))) is not None and weight > 0
                    for key in ("weight", "value")) for item in items):
         # An aggregate max/min/latest value is not an individual dayview sample.
