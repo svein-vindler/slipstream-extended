@@ -398,6 +398,7 @@ def run(
     refresh_recent_days: int = 0,
     repair_body_start: str | None = None,
     repair_body_end: str | None = None,
+    skip_sleep: bool = False,
     store: R2Store | None = None,
     garmin=None,
 ) -> dict[str, Any]:
@@ -436,7 +437,7 @@ def run(
             get_garmin=get_garmin,
             retry_failures=retry_failures,
             refresh_recent_days=refresh_recent_days,
-        ),
+        ) if not skip_sleep else {"status": "skipped", "attempted_this_run": 0},
         "body_composition": run_stream(
             STREAMS["body_composition"],
             health_csv=health_csv,
@@ -473,6 +474,7 @@ def main():
     parser.add_argument("--refresh-recent-days", type=int, default=0)
     parser.add_argument("--repair-body-start")
     parser.add_argument("--repair-body-end")
+    parser.add_argument("--skip-sleep", action="store_true")
     args = parser.parse_args()
     try:
         run(
@@ -482,6 +484,7 @@ def main():
             refresh_recent_days=args.refresh_recent_days,
             repair_body_start=args.repair_body_start,
             repair_body_end=args.repair_body_end,
+            skip_sleep=args.skip_sleep,
         )
     except ValueError as exc:
         parser.error(str(exc))

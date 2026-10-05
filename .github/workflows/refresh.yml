@@ -166,22 +166,16 @@ jobs:
       - name: Upload summaries and daily snapshot to private R2
         if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only && !inputs.latest_night_only }}
         run: python -m pipeline.summary_export --data-dir data
-      - name: Refresh recent detailed sleep and body composition
+      - name: Refresh recent detailed sleep and HRV
+        if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only && !inputs.latest_night_only }}
+        run: python -m pipeline.recent_health --days 3
+      - name: Refresh recent body composition
         if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only && !inputs.latest_night_only }}
         run: |
           python -m pipeline.health_detail_backfill \
-            --max-sleep-days 3 \
+            --skip-sleep \
             --max-body-days 3 \
             --refresh-recent-days 3
-      - name: Refresh recent detailed HRV
-        if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only && !inputs.latest_night_only }}
-        run: |
-          python -m pipeline.granular_export \
-            --hrv-days 3 \
-            --activity-days 0 \
-            --cardio-count 0 \
-            --strength-count 0 \
-            --upload-r2
       - name: Import newly discovered workouts and missing recent files
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular && !inputs.latest_activity_only && !inputs.latest_night_only }}
         run: |
@@ -220,5 +214,7 @@ jobs:
           if [[ -n "$SYNC_REQUEST_ID" ]]; then args+=(--request-id "$SYNC_REQUEST_ID"); fi
           python -m pipeline.latest_night "${args[@]}"
       - name: Reconcile health history indexes with canonical R2 objects
-        if: ${{ !cancelled() && (github.event_name == 'schedule' || !inputs.latest_activity_only && !inputs.latest_night_only) }}
+        # Manual imports repair their own affected months; broad reconciliation
+        # remains attached to the existing scheduled refresh.
+        if: ${{ !cancelled() && github.event_name == 'schedule' }}
         run: python -m pipeline.health_history_index

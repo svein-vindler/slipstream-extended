@@ -18,8 +18,10 @@ from pathlib import Path
 from statistics import mean, median
 from typing import Any
 
+from botocore.exceptions import ClientError
+
 from .granular import gzip_json
-from .r2_store import R2Store
+from .r2_store import R2Store, missing_object
 
 SCHEMA_VERSION = 1
 BUILDER_REVISION = 2
@@ -286,10 +288,16 @@ def build_month_index(
     month: str,
     sources: dict[str, tuple[str, str]],
     store: R2Store,
+    previous: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     _validate_stream(stream)
+    cached = _cached_days(previous, stream, month) or {}
+    previous_revisions = (previous or {}).get("source_revisions", {})
     days = []
-    for day, (key, _) in sorted(sources.items()):
+    for day, (key, revision) in sorted(sources.items()):
+        if day in cached and previous_revisions.get(key) == revision:
+            days.append(cached[day])
+            continue
         try:
             payload = _decode_json(store.get(key), key)
             summary = (
@@ -309,6 +317,37 @@ def build_month_index(
         "source_revisions": {key: revision for _, (key, revision) in sorted(sources.items())},
         "days": days,
     }
+
+
+def _cached_days(current: dict[str, Any] | None, stream: str, month: str) -> dict[str, dict] | None:
+    if (not isinstance(current, dict) or current.get("schema_version") != SCHEMA_VERSION
+            or current.get("builder_revision") != BUILDER_REVISION
+            or current.get("kind") != f"slipstream-{stream}-month-index"
+            or current.get("month") != month
+            or not isinstance(current.get("source_revisions"), dict)
+            or not isinstance(current.get("days"), list)):
+        return None
+    result = {}
+    for item in current["days"]:
+        if not isinstance(item, dict):
+            return None
+        day = item.get("date")
+        try:
+            if not isinstance(day, str) or date.fromisoformat(day).isoformat() != day:
+                return None
+        except ValueError:
+            return None
+        if day[:7] != month or day in result:
+            return None
+        status = item.get("status")
+        if status not in {"available", "no_data", "invalid_schema"}:
+            continue
+        if status == "available":
+            fields = ("summary", "score_breakdown") if stream == "sleep" else ("garmin", "derived")
+            if any(not isinstance(item.get(field), dict) for field in fields):
+                continue
+        result[day] = item
+    return result
 
 
 def _selected_months(
@@ -344,19 +383,28 @@ def sync_stream(
     only_dates: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     _validate_stream(stream)
-    source_revisions = store.list_object_revisions(SOURCE_PREFIXES[stream])
+    requested = None
+    if only_dates is not None:
+        requested = {date.fromisoformat(day).isoformat()[:7] for day in only_dates}
+        source_revisions = {}
+        for month in sorted(requested):
+            prefix = f"{SOURCE_PREFIXES[stream]}{month[:4]}/{month[5:7]}/"
+            source_revisions.update(store.list_object_revisions(prefix))
+    else:
+        source_revisions = store.list_object_revisions(SOURCE_PREFIXES[stream])
     grouped = _month_sources(source_revisions)
+    for month in requested or ():
+        grouped.setdefault(month, {})
     selected = _selected_months(
         grouped,
         start_date=start_date,
         end_date=end_date,
         recent_months=recent_months,
     )
-    if only_dates is not None:
-        requested = {date.fromisoformat(day).isoformat()[:7] for day in only_dates}
+    if requested is not None:
         selected = [month for month in selected if month in requested]
 
-    index_revisions = store.list_object_revisions(INDEX_PREFIXES[stream])
+    index_revisions = store.list_object_revisions(INDEX_PREFIXES[stream]) if requested is None else {}
     written: list[dict[str, Any]] = []
     unchanged: list[str] = []
     for position, month in enumerate(selected, start=1):
@@ -364,13 +412,19 @@ def sync_stream(
         expected_revisions = {
             source_key: revision for _, (source_key, revision) in sorted(grouped[month].items())
         }
-        if key in index_revisions:
+        current = None
+        if requested is not None or key in index_revisions:
             try:
                 current = _decode_json(store.get(key), key)
-            except ValueError:
+            except (ValueError, KeyError):
                 current = {}
+            except ClientError as exc:
+                if not missing_object(exc):
+                    raise
+                current = {}
+            cached = _cached_days(current, stream, month)
             if (
-                current.get("builder_revision") == BUILDER_REVISION
+                cached is not None and set(cached) == set(grouped[month])
                 and current.get("source_revisions") == expected_revisions
             ):
                 unchanged.append(month)
@@ -380,7 +434,7 @@ def sync_stream(
                         file=sys.stderr,
                     )
                 continue
-        payload = build_month_index(stream, month, grouped[month], store)
+        payload = build_month_index(stream, month, grouped[month], store, previous=current)
         data = gzip_json(payload)
         store.put(key, data, "application/json", encoding="gzip")
         written.append({"month": month, "days": len(payload["days"]), "bytes": len(data)})
