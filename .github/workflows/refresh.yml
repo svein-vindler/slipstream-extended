@@ -33,6 +33,24 @@ on:
         required: false
         default: false
         type: boolean
+      latest_night_only:
+        description: "Import sleep and HRV for one recent wake-date only"
+        required: false
+        default: false
+        type: boolean
+      latest_wake_date:
+        description: "Garmin wake-date (YYYY-MM-DD)"
+        required: false
+        type: string
+      sync_request_id:
+        description: "Correlation ID for the fresh-data request"
+        required: false
+        type: string
+      latest_r2_only:
+        description: "Repair one running Coach Input from canonical R2 only"
+        required: false
+        default: false
+        type: boolean
       latest_activity_id:
         description: "Optional numeric Garmin activity ID within the recent window"
         required: false
@@ -74,6 +92,9 @@ jobs:
       HEALTH_END: ${{ inputs.health_end }}
       BACKFILL_START_YEAR: ${{ inputs.backfill_start_year }}
       BACKFILL_END_YEAR: ${{ inputs.backfill_end_year }}
+      SYNC_REQUEST_ID: ${{ inputs.sync_request_id }}
+      LATEST_WAKE_DATE: ${{ inputs.latest_wake_date }}
+      LATEST_R2_ONLY: ${{ inputs.latest_r2_only }}
       LATEST_ACTIVITY_ID: ${{ inputs.latest_activity_id }}
       LATEST_NEW_ACTIVITY_EXPECTED: ${{ inputs.latest_new_activity_expected }}
       LATEST_EXPECTED_DATE: ${{ inputs.latest_expected_date }}
@@ -84,15 +105,30 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
+      - name: Validate targeted modes
+        env:
+          ACTIVITY_ONLY: ${{ inputs.latest_activity_only }}
+          NIGHT_ONLY: ${{ inputs.latest_night_only }}
+          R2_ONLY: ${{ inputs.latest_r2_only }}
+        run: |
+          if [[ "$ACTIVITY_ONLY" == "true" && "$NIGHT_ONLY" == "true" ]]; then
+            echo "Choose one targeted mode."
+            exit 2
+          fi
+          if [[ "$R2_ONLY" == "true" && "$ACTIVITY_ONLY" != "true" ]]; then
+            echo "R2-only repair requires targeted activity mode."
+            exit 2
+          fi
       - name: Restore current summaries from private R2
+        if: ${{ !inputs.latest_night_only && !inputs.latest_r2_only }}
         run: python -m pipeline.summary_restore --data-dir data
       - name: Remember activities already stored before an on-demand refresh
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular && !inputs.latest_activity_only }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular && !inputs.latest_activity_only && !inputs.latest_night_only }}
         run: |
           python -m pipeline.manual_activity_refresh snapshot \
             --summary data/activities.csv --output .granular/on-demand-baseline.json
       - name: Fetch + write data/
-        if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only }}
+        if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only && !inputs.latest_night_only }}
         run: |
           if [ -n "$BACKFILL_START_YEAR" ] || [ -n "$BACKFILL_END_YEAR" ]; then
             if [ -z "$BACKFILL_START_YEAR" ] || [ -z "$BACKFILL_END_YEAR" ]; then
@@ -128,17 +164,17 @@ jobs:
               --health-days "$HEALTH_DAYS_BACK"
           fi
       - name: Upload summaries and daily snapshot to private R2
-        if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only }}
+        if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only && !inputs.latest_night_only }}
         run: python -m pipeline.summary_export --data-dir data
       - name: Refresh recent detailed sleep and body composition
-        if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only }}
+        if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only && !inputs.latest_night_only }}
         run: |
           python -m pipeline.health_detail_backfill \
             --max-sleep-days 3 \
             --max-body-days 3 \
             --refresh-recent-days 3
       - name: Refresh recent detailed HRV
-        if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only }}
+        if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only && !inputs.latest_night_only }}
         run: |
           python -m pipeline.granular_export \
             --hrv-days 3 \
@@ -147,7 +183,7 @@ jobs:
             --strength-count 0 \
             --upload-r2
       - name: Import newly discovered workouts and missing recent files
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular && !inputs.latest_activity_only }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular && !inputs.latest_activity_only && !inputs.latest_night_only }}
         run: |
           python -m pipeline.manual_activity_refresh process \
             --baseline .granular/on-demand-baseline.json \
@@ -157,6 +193,8 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.latest_activity_only }}
         run: |
           args=(--run-id "$GITHUB_RUN_ID" --data-dir data --lookback-days 7)
+          if [[ -n "$SYNC_REQUEST_ID" ]]; then args+=(--request-id "$SYNC_REQUEST_ID"); fi
+          if [[ "$LATEST_R2_ONLY" == "true" ]]; then args+=(--repair-only); fi
           if [[ "$LATEST_NEW_ACTIVITY_EXPECTED" == "false" ]]; then
             args+=(--new-activity-expected false)
           fi
@@ -175,6 +213,12 @@ jobs:
             args+=(--activity-id "$LATEST_ACTIVITY_ID")
           fi
           python -m pipeline.latest_activity "${args[@]}"
+      - name: Import one recent night
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.latest_night_only }}
+        run: |
+          args=(--run-id "$GITHUB_RUN_ID" --wake-date "$LATEST_WAKE_DATE")
+          if [[ -n "$SYNC_REQUEST_ID" ]]; then args+=(--request-id "$SYNC_REQUEST_ID"); fi
+          python -m pipeline.latest_night "${args[@]}"
       - name: Reconcile health history indexes with canonical R2 objects
-        if: ${{ !cancelled() && (github.event_name == 'schedule' || !inputs.latest_activity_only) }}
+        if: ${{ !cancelled() && (github.event_name == 'schedule' || !inputs.latest_activity_only && !inputs.latest_night_only) }}
         run: python -m pipeline.health_history_index

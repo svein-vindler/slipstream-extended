@@ -27,6 +27,7 @@ const TOOL_NAMES = [
   "add_activity_context",
   "coach_input",
   "sync_latest_activity",
+  "sync_latest_night",
   "refresh_today",
   "refresh_status",
 ] as const;
