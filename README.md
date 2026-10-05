@@ -112,6 +112,14 @@ new/recent running activities. Unchanged activity files and ready analyses are
 reused; unchanged summaries and same-day snapshots skip uploads. Recent source
 data is still checked so late changes can be reconciled.
 
+Recent sleep and HRV also reuse unchanged canonical files and monthly indexes,
+updating only affected months. Successful source-check times are recorded
+separately; empty or incomplete Garmin responses preserve earlier usable data.
+Targeted night refresh shares this import logic. General manual refresh leaves
+sleep/HRV historical plans untouched, while scheduled index reconciliation and
+explicit backfills remain available. See [fresh-data behavior](docs/FRESH_DATA.md)
+for the retained overlap and request-volume measurements.
+
 `data_ready` reports workflow completion. Check each activity's `files_ready`
 and `coach_status` before claiming its files and analysis are ready. A configured
 coach profile and usable endurance artifacts are still required for an analysis.
