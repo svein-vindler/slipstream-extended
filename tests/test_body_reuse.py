@@ -170,6 +170,42 @@ def test_nested_full_dayview_preserves_all_measurements(environment):
     assert result["status"] == "complete" and document(client, canonical())["measurement_count"] == 3
 
 
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("calendar", [False, True])
+def test_dayview_epoch_date_is_not_an_iso_calendar_or_a_utc_day_override(environment, nested, calendar):
+    client, garmin, refresh = environment
+    raw = garmin.get_daily_weigh_ins(DAY)
+    for item in raw["dateWeightList"]:
+        item["date"] = 1790724600000  # UTC date precedes this Garmin-local day.
+        if not calendar:
+            del item["calendarDate"]
+    if nested:
+        raw = {"dateWeightList": [{"calendarDate": DAY, "allWeightMetrics": raw["dateWeightList"]}]}
+    garmin.responses[DAY] = raw
+    result = refresh()
+    assert result["status"] == "complete" and document(client, canonical())["measurement_count"] == 3
+    assert refresh()["objects_written"] == 0
+
+
+@pytest.mark.parametrize("epoch", [0, -1, True, float("nan"), 1e99, "invalid"])
+def test_invalid_epoch_date_preserves_existing_canonical_and_check(environment, epoch):
+    client, garmin, refresh = environment
+    refresh()
+    before = {key: client.objects[key].copy() for key in (canonical(), check())}
+    raw = garmin.get_daily_weigh_ins(DAY)
+    raw["dateWeightList"][0]["date"] = epoch
+    garmin.responses[DAY] = raw
+    assert refresh()["status"] == "partial"
+    assert all(client.objects[key] == value for key, value in before.items())
+
+
+def test_epoch_date_does_not_hide_conflicting_calendar_date():
+    raw = {"dateWeightList": [{"calendarDate": "2026-09-29", "date": 1790724600000,
+                               "weight": 80000, "timestampGMT": f"{DAY}T05:00:00Z"}]}
+    with pytest.raises(ValueError, match="wrong_date"):
+        normalize_day("body_composition", DAY, raw)
+
+
 def test_local_date_does_not_come_from_utc_at_travel_midnight():
     raw = {"dateWeightList": [{"calendarDate": "2026-01-01", "weight": 80000,
                                "timestampGMT": "2025-12-31T23:30:00Z", "timestampLocal": "2026-01-01T01:30:00"}]}
