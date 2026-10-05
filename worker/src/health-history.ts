@@ -123,7 +123,7 @@ function percentile(values: number[], fraction: number): number | null {
   return Math.round(value * 1000) / 1000;
 }
 
-function timestampSeconds(value: unknown): number | null {
+export function timestampSeconds(value: unknown): number | null {
   const number = normalizedNumber(value);
   if (number !== null) return number > 10_000_000_000 ? number / 1000 : number;
   if (typeof value !== "string" || !value.trim()) return null;

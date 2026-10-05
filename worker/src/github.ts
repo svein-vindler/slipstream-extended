@@ -82,6 +82,13 @@ function headers(config: RefreshConfig): HeadersInit {
   };
 }
 
+export class GitHubRequestError extends Error {
+  constructor(readonly status: number, readonly method: string, message: string) {
+    super(message);
+    this.name = "GitHubRequestError";
+  }
+}
+
 async function githubJson(
   config: RefreshConfig,
   path: string,
@@ -95,7 +102,8 @@ async function githubJson(
   if (!response.ok) {
     const requestId = response.headers.get("x-github-request-id");
     const suffix = requestId ? ` (request ${requestId})` : "";
-    throw new Error(`GitHub Actions request failed with HTTP ${response.status}${suffix}.`);
+    throw new GitHubRequestError(response.status, init.method ?? "GET",
+      `GitHub Actions request failed with HTTP ${response.status}${suffix}.`);
   }
   if (response.status === 204) return null;
   return response.json() as Promise<unknown>;

@@ -41,7 +41,8 @@ def run(*, run_id: str, wake_date: str, request_id: str | None = None,
             except ValueError:
                 report[f"{stream}_status"] = "garmin_not_ready"
                 continue
-            has_data = (payload["summary"]["sleep_seconds"] is not None if stream == "sleep"
+            duration = payload.get("summary", {}).get("sleep_seconds")
+            has_data = (isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration > 0 if stream == "sleep"
                         else payload.get("reading_count", 0) > 0)
             if not has_data:
                 report[f"{stream}_status"] = "garmin_not_ready"

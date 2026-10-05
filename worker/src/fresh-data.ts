@@ -1,10 +1,10 @@
 /** R2-first, explicitly authorized recent activity/night retrieval. */
 import { z } from "zod";
 import { Activity, hrvObjectKeys, rawGarminActivityId, sleepObjectKeys } from "./lib";
-import { summarizeHrvPayload, summarizeSleepPayload } from "./health-history";
+import { summarizeHrvPayload, summarizeSleepPayload, timestampSeconds } from "./health-history";
 import { nightContext, validatedHealthTimezone } from "./night-context";
 import { dispatchLatestActivity, dispatchLatestNight, getRefreshRun,
-  pollRefreshRun, RefreshConfig, RefreshRun } from "./github";
+  GitHubRequestError, pollRefreshRun, RefreshConfig, RefreshRun } from "./github";
 import type { FreshJob } from "./refresh-coordinator";
 
 const CHECK_TTL_MS = 5 * 60_000;
@@ -134,7 +134,8 @@ export class FreshDataService {
 
   private async latestJson(prefix: string): Promise<Json> {
     const objects = await this.list(prefix);
-    objects.sort((a, b) => b.uploaded.getTime() - a.uploaded.getTime() || b.key.localeCompare(a.key));
+    // Context keys are append-only timestamp keys, as used by the Python builder.
+    objects.sort((a, b) => b.key.localeCompare(a.key));
     return objects.length ? this.json([objects[0].key]) : {};
   }
 
@@ -182,9 +183,18 @@ export class FreshDataService {
     const sleepRow = summarizeSleepPayload(day, sleep);
     const hrvRow = summarizeHrvPayload(day, hrv);
     const sleepSummary = record(sleepRow.summary);
+    const sleepStart = timestampSeconds(sleep.sleep_start_gmt);
+    const sleepEnd = timestampSeconds(sleep.sleep_end_gmt);
+    const validStage = Array.isArray(sleepRow.stages) && sleepRow.stages.some((value) => {
+      const stage = record(value);
+      const start = timestampSeconds(stage.start_gmt), end = timestampSeconds(stage.end_gmt);
+      return stage.stage != null && start != null && end != null && end > start
+        && sleepStart != null && sleepEnd != null && start >= sleepStart && end <= sleepEnd;
+    });
     if (sleep.date !== day || sleepRow.status !== "available") result.missing_components.push("sleep");
     if (!(Number(sleepSummary.sleep_seconds) > 0) || sleep.confirmed === false
-      || !sleep.sleep_start_gmt || !sleep.sleep_end_gmt || !Number(sleepRow.stage_count)) {
+      || sleepStart == null || sleepEnd == null || sleepEnd <= sleepStart
+      || !Number(sleepRow.stage_count) || !validStage) {
       result.missing_components.push("complete_sleep");
     }
     if (context.sleep_end_date_local !== day) result.missing_components.push("local_wake_date");
@@ -192,7 +202,7 @@ export class FreshDataService {
       const reading = record(value);
       return reading.hrv_ms != null && typeof reading.hrv_ms !== "boolean"
         && Number.isFinite(Number(reading.hrv_ms)) && Number(reading.hrv_ms) > 0
-        && reading.timestamp != null;
+        && (timestampSeconds(reading.timestamp) ?? 0) > 0;
     });
     if (hrv.date !== day || hrvRow.status !== "available" || !hrvRow.detailed_readings_available || !positiveReadings) {
       result.missing_components.push("hrv_readings");
@@ -213,16 +223,17 @@ export class FreshDataService {
     this.diagnostics.summary_reads++;
     try { summaries = await this.reader.getActivities(); } catch { /* Canonical data may predate the index. */ }
     let ids = request.activityId ? [request.activityId]
-      : typeof check.activity_id === "string" && check.activity_id.startsWith("garmin-")
+      : result.source_fresh && typeof check.activity_id === "string" && check.activity_id.startsWith("garmin-")
         ? [rawGarminActivityId(check.activity_id)]
         : summaries.filter((a) => !request.date || a.date && Math.abs(a.date.getTime()
           - Date.parse(`${request.date}T12:00:00Z`)) <= 2 * 86_400_000)
+          .sort((a, b) => (b.date?.getTime() ?? 0) - (a.date?.getTime() ?? 0))
           .slice(0, 20).map((a) => rawGarminActivityId(a.id));
-    const years = new Set([request.date?.slice(0, 4) ?? String(new Date(this.now()).getUTCFullYear()),
-      ...summaries.filter((a) => ids.includes(rawGarminActivityId(a.id)))
-        .map((a) => String(a.date?.getUTCFullYear())).filter((year) => /^\d{4}$/.test(year))]);
+    const years = new Set([...(request.date ? [request.date.slice(0, 4)] :
+      [this.now(), this.now() - 7 * 86_400_000, this.now() + 86_400_000]
+        .map((date) => String(new Date(date).getUTCFullYear())))]);
     if (!ids.length) {
-      const recent = (await this.list(`activities/${[...years][0]}/`, 1000))
+      const recent = (await Promise.all([...years].map((year) => this.list(`activities/${year}/`, 1000)))).flat()
         .filter((a) => /\/activity\.v1\.json(?:\.gz)?$/.test(a.key))
         .sort((a, b) => b.uploaded.getTime() - a.uploaded.getTime()).slice(0, 20);
       ids = recent.map((a) => a.key.split("/")[2]);
@@ -240,6 +251,11 @@ export class FreshDataService {
           result.status = "activity_date_unknown"; continue;
         }
         if (request.date && local.slice(0, 10) !== request.date) continue;
+        if (!request.activityId) {
+          // An older last-known session is not an error in a latest-data request.
+          // Leave it out so the bounded Garmin check can discover a newer upload.
+          try { validateRecentDate(local.slice(0, 10), this.now()); } catch { continue; }
+        }
         if (/run|cycl|bik|walk|hik|swim|cardio|row|ski|elliptical|stair|snow|paddle|kayak|canoe|triathlon|multisport|strength/.test(String(activity.type))) {
           candidates.push({ id, local, prefix, decoded });
         } else result.status = "unsupported_sport";
@@ -363,7 +379,13 @@ export class FreshDataService {
           expectedDate: repairOnly ? String(snapshot.package.activity_date) : request.date,
           newActivityExpected: request.newExpected ?? false, requestId: job.request_id, repairOnly }, this.fetcher);
       if (run) { await coordinator.bindFreshRun(job.request_id, run.id); job.run_id = run.id; }
-    } catch {
+    } catch (error) {
+      if (error instanceof GitHubRequestError && error.method === "POST"
+        && [400, 401, 403, 404, 422, 429].includes(error.status)) {
+        await coordinator.finishFresh(job.request_id, false);
+        return this.response(snapshot, `GitHub rejected the dispatch (HTTP ${error.status}); no import was accepted. Correct access or workflow inputs before retrying after the cooldown.`,
+          { request_id: job.request_id, reason: "dispatch_rejected", retry_after_seconds: 300 });
+      }
       return this.response(snapshot, "Dispatch could not be confirmed. The correlation ID and reservation are retained to prevent duplicate imports; check refresh_status with request_id.",
         { accepted: true, request_id: job.request_id, terminal: false, should_continue_polling: false,
           reason: "dispatch_unconfirmed", retry_after_seconds: 60 });
@@ -385,14 +407,15 @@ export class FreshDataService {
     const run: RefreshRun | null = job.run_id ? canPoll
       ? await pollRefreshRun(this.config, { runId: job.run_id, maxPolls: 2, intervalMs: 4_000 }, this.fetcher, this.sleeper)
       : await getRefreshRun(this.config, job.run_id, this.fetcher) : null;
-    const terminal = run?.status === "completed";
-    if (terminal) await coordinator.finishFresh(job.request_id, run.conclusion === "success");
+    const terminal = job.state !== "active" || run?.status === "completed";
+    if (run?.status === "completed") await coordinator.finishFresh(job.request_id, run.conclusion === "success");
     const snapshot = await this.snapshot(request);
     const report = run && terminal ? await this.json([`refresh/reports/${run.id}.json`], true) : {};
-    const stillPolling = !terminal && canPoll && (job.polls + 1 < 3) && job.expires_at > this.now();
+    const persisted = await coordinator.freshJob(job.request_id);
+    const stillPolling = !terminal && canPoll && (persisted?.polls ?? 3) < 3 && job.expires_at > this.now();
     const blocked = String(report.coach_status ?? "");
     return this.response(snapshot, terminal
-      ? run?.conclusion !== "success" ? `The targeted job ended with ${run?.conclusion}; requested data readiness is unconfirmed.`
+      ? run?.conclusion !== "success" ? `The targeted job ended with ${run?.conclusion ?? job.state}; requested data readiness is unconfirmed.`
         : snapshot.complete && snapshot.source_fresh && snapshot.status === "ready" ? "The requested canonical package is ready."
           : blocked === "no_effective_profile" || blocked === "endurance_data_unavailable"
             ? `Activity files are stored; Coach Input is blocked (${blocked}). Add an effective profile or use supported analysis; polling will not resolve this.`

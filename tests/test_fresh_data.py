@@ -67,11 +67,12 @@ def test_night_contacts_only_two_endpoints_and_preserves_local_clocks():
     assert "refresh/checks/v1/night/2026-09-30.json" in store.objects
 
 
-def test_empty_night_is_a_successful_negative_check_without_overwriting_history():
+@pytest.mark.parametrize("sleep", [{}, {"dailySleepDTO": {"calendarDate": DAY, "sleepTimeSeconds": 0}}])
+def test_empty_night_is_a_successful_negative_check_without_overwriting_history(sleep):
     store = FakeStore()
     key = f"health/sleep/v1/2026/09/{DAY}.json"
     store.objects[key] = b"existing synthetic revision"
-    result = run(run_id="10", wake_date=DAY, store=store, garmin=NightGarmin(sleep={}, hrv={}))
+    result = run(run_id="10", wake_date=DAY, store=store, garmin=NightGarmin(sleep=sleep, hrv={}))
     assert result["sleep_status"] == result["hrv_status"] == "garmin_not_ready"
     assert result["source_checked"] is True
     assert store.objects[key] == b"existing synthetic revision"
@@ -182,7 +183,7 @@ def test_single_coach_preserves_versions_and_updates_only_the_derived_pointer():
         "profile_id": "synthetic-profile", "effective_from": "2026-01-01",
         "zones": [{"label": "test", "min_bpm": 100, "max_bpm": 150}],
     }).encode()
-    first = run_one(activity={"id": "1", "date": DAY, "name": "Before"}, store=store)
+    first = run_one(activity={"id": "1", "date": DAY, "name": "Before", "moving_seconds": 1800}, store=store)
     pointer_key = f"{prefix}/coach-input/v1/latest-ready.json"
     pointer = json.loads(store.get(pointer_key))
     original_key = pointer["analysis_key"]
@@ -192,6 +193,8 @@ def test_single_coach_preserves_versions_and_updates_only_the_derived_pointer():
     assert first["processed_sources"] != second["processed_sources"]
     assert store.get(original_key) == original
     assert json.loads(store.get(pointer_key))["analysis_key"] != original_key
+    repaired = json.loads(gzip.decompress(store.get(json.loads(store.get(pointer_key))["analysis_key"])))
+    assert repaired["summary"]["moving_seconds"] == 1800
     keys_before = set(store.objects)
     run_one(activity={"id": "1", "date": DAY, "name": "After"}, store=store)
     assert set(store.objects) == keys_before
