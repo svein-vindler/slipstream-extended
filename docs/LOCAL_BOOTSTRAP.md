@@ -11,6 +11,11 @@ progress plans. Coach generation is a separate R2-only consumer so it does not
 repeatedly scan activity artifacts inside the Garmin loop. The process can be
 interrupted at any time and later restarted.
 
+For a bounded recent refresh rather than historical bootstrap, use the shared
+`python -m pipeline.refresh --confirm-cloud-jobs-paused` entrypoint. It is the
+same core used by chat dispatch and scheduled refresh, with ignored diagnostic
+reports. See [REFRESH_PIPELINE.md](REFRESH_PIPELINE.md).
+
 Activity discovery already uses Garmin's date-range endpoint. Body-composition
 backfill groups missing dates into bounded date windows and uses Garmin's range
 endpoint once per window. HRV and sleep are exposed by Garmin as daily calls;

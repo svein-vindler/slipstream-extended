@@ -26,20 +26,21 @@ def run(
     health_days: int = 14,
     health_start: date | None = None,
     health_end: date | None = None,
+    client=None,
 ) -> dict:
     from .sources import garmin, garmin_health
 
     summary: dict = {}
     if not skip_activities:
         activities = garmin.fetch(
-            days_back=days_back, download_tracks=download_tracks, data_dir=data_dir
+            days_back=days_back, download_tracks=download_tracks, data_dir=data_dir, client=client
         )
         print(f"[garmin] fetched {len(activities)} activities", file=sys.stderr)
         summary.update(write_dataset(activities, data_dir, preserve_existing=True))
 
     end = health_end or date.today()
     start = health_start or (end - timedelta(days=max(1, health_days) - 1))
-    health = garmin_health.fetch(start, end)
+    health = garmin_health.fetch(start, end, client=client)
     print(f"[garmin-health] fetched {len(health)} populated days", file=sys.stderr)
     summary.update(write_health_dataset(health, data_dir, preserve_existing=True))
     print(json.dumps(summary, indent=2))
