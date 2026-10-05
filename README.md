@@ -120,6 +120,12 @@ sleep/HRV historical plans untouched, while scheduled index reconciliation and
 explicit backfills remain available. See [fresh-data behavior](docs/FRESH_DATA.md)
 for the retained overlap and request-volume measurements.
 
+General manual and scheduled refresh also recheck the three latest populated
+weight dates and reuse unchanged individual weigh-in files. Every actual sample,
+timestamp and composition field is retained; successful source checks advance
+separately. Sparse weigh-ins retain an overlap of measured dates. Historical body
+backfill plans remain untouched, and incomplete dayviews preserve earlier data.
+
 `data_ready` reports workflow completion. Check each activity's `files_ready`
 and `coach_status` before claiming its files and analysis are ready. A configured
 coach profile and usable endurance artifacts are still required for an analysis.
