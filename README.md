@@ -126,6 +126,15 @@ timestamp and composition field is retained; successful source checks advance
 separately. Sparse weigh-ins retain an overlap of measured dates. Historical body
 backfill plans remain untouched, and incomplete dayviews preserve earlier data.
 
+General summary refresh normally checks the past week of activities, with an
+inclusive overlap day, and three health dates. A successful wider check permits
+these shorter repeats for 24 hours; the next refresh then rechecks the existing
+30-day activity and 14-day health windows. Missing or failed wider checks remain
+due. Older summary rows are retained, and edits within the wider windows are
+picked up by this daily reconciliation. Detailed health checks and explicit
+historical imports keep their own scopes. See [fresh-data behavior](docs/FRESH_DATA.md)
+for the coverage limits and measured request/storage tradeoffs.
+
 `data_ready` reports workflow completion. Check each activity's `files_ready`
 and `coach_status` before claiming its files and analysis are ready. A configured
 coach profile and usable endurance artifacts are still required for an analysis.
