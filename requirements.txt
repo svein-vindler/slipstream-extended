@@ -4,13 +4,13 @@
 #
 #    pip-compile --generate-hashes --no-index --output-file=requirements.txt requirements.in
 #
-boto3==1.43.103 \
-    --hash=sha256:524821052527f6446d249bf710847b032d9b12135e346c9751777a0a2811cf04 \
-    --hash=sha256:574796187eb4e4fcaaf5c1b88c1724a1ba5a95bc27aeae5573676178666acc71
+boto3==1.43.107 \
+    --hash=sha256:632a4f8298725b94144c8cd383cbdacb34624daa73221e954c3d33ac6e2528d6 \
+    --hash=sha256:c4e0f1a0295cbb7103f2950128cf88463c076d220080a7d0f127cf834969fc3a
     # via -r requirements.in
-botocore==1.43.106 \
-    --hash=sha256:006870b3b4e40547232ad12c3bb4faec91bbbe0659aafaa3b7fa48a112c4ee97 \
-    --hash=sha256:c1fb8818f9957cb5037f73db34ac1a12ba43562e31d6e7f9cb7e5fc64e1dba78
+botocore==1.43.108 \
+    --hash=sha256:ab9d16c6b4350aaa54ed28202dfa2998b2d735fdbf3247eb60af469d8d48a5b8 \
+    --hash=sha256:ee4f75cf3bdbb0da7912e089950e8112f692016539d939312c771499958e6cfd
     # via
     #   boto3
     #   s3transfer
@@ -324,9 +324,9 @@ garmin-fit-sdk==21.217.0 \
     --hash=sha256:382bc4cba7cc3e26bd6d65fbf5ad6864cf15feeafcf21dd226e2697df1063e96 \
     --hash=sha256:df88c37cb0b28cdebbb1b0aeb9c514b078c832a0ab4e4f4ca14d19ccecd27ed2
     # via -r requirements.in
-garminconnect==0.3.16 \
-    --hash=sha256:2a5e838bf19608ff62329ef9845658bfed0c4974d7b1e486e3a49595438b69c5 \
-    --hash=sha256:e919b17589095227e78cbcb20fe05630ac6592bc39f598c9eee4e5bd91aeec30
+garminconnect==0.3.17 \
+    --hash=sha256:624d8c2468d865d286c9fb7ae8133633bb1d52a2b019c8beb5ff9ae10dd43264 \
+    --hash=sha256:f6b6dd282c950c394478cb5bcca506e1432e82037e27625d1456ef49c8f17ffe
     # via -r requirements.in
 idna==3.20 \
     --hash=sha256:a7db850025b95ded1eae8a46181a1a6c56c92c96f0e2b005d9ff8dc0210cab44 \

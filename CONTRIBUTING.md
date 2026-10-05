@@ -33,6 +33,11 @@ regenerate both hash-locked `.txt` files with `pip-compile --generate-hashes`
 under Python 3.12 or newer, then run `pip-audit -r requirements.txt
 --disable-pip`. Do not hand-edit only the generated lock files.
 
+The development lock is shared with Windows. Linux lock regeneration can omit
+Windows-only dependencies such as Pytest's `colorama`. Preserve their platform
+markers and verified wheel hashes; `tests/test_dependency_locks.py` checks this
+even when CI runs on Linux.
+
 ## Project layout
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design. In short:
