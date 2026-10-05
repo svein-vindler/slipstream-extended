@@ -234,6 +234,12 @@ personal account.
 
 ## Maintenance
 
+Shared synthetic sleep/HRV tests exercise the complete Python import, R2 objects
+and indexes, and authenticated MCP responses in the local Workers runtime.
+They cover changed data in warm chats, interrupted index updates, recovery and
+summary cache refresh. See [health contract tests](docs/HEALTH_CONTRACT_TESTS.md)
+for coverage and local commands.
+
 Dependabot proposes weekly Python, npm, Wrangler and GitHub Actions updates.
 Review and merge only after CI passes. A weekly upstream workflow opens or
 updates an issue when the original project changes. It never merges or pushes

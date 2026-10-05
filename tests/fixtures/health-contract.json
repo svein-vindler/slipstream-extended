@@ -1,0 +1,74 @@
+{
+  "description": "Invented Garmin responses and independently specified expectations; no personal data.",
+  "timezone": "Europe/Oslo",
+  "cases": [
+    {
+      "id": "ordinary",
+      "date": "2026-09-30",
+      "sleep": {
+        "dailySleepDTO": {
+          "calendarDate": "2026-09-30", "sleepTimeSeconds": 25200,
+          "sleepStartTimestampGMT": "2026-09-29T21:30:00Z",
+          "sleepEndTimestampGMT": "2026-09-30T04:30:00Z",
+          "sleepWindowConfirmed": true, "sleepScores": {"overall": {"value": 82}}
+        },
+        "sleepLevels": [{"startGMT": "2026-09-29T21:30:00Z", "endGMT": "2026-09-30T04:30:00Z", "activityLevel": 1}]
+      },
+      "hrv": {
+        "sleepStartTimestampGMT": "2026-09-29T21:30:00Z", "sleepEndTimestampGMT": "2026-09-30T04:30:00Z",
+        "hrvSummary": {"calendarDate": "2026-09-30", "lastNightAvg": 50},
+        "hrvReadings": [
+          {"readingTimeGMT": "2026-09-29T22:00:00Z", "hrvValue": 40, "providerOnly": "synthetic-provider-field"},
+          {"readingTimeGMT": "2026-09-30T02:00:00Z", "hrvValue": 60}
+        ]
+      },
+      "expected": {"sleep_seconds": 25200, "sleep_score": 82, "hrv_mean_ms": 50, "night_of": "2026-09-29", "sleep_start_local": "2026-09-29T23:30:00+02:00", "sleep_end_local": "2026-09-30T06:30:00+02:00", "local_time_source": "configured_timezone"},
+      "changed": {"sleep_seconds": 24600, "first_hrv_ms": 80, "hrv_mean_ms": 70}
+    },
+    {
+      "id": "travel",
+      "date": "2026-06-12",
+      "sleep": {
+        "dailySleepDTO": {
+          "calendarDate": "2026-06-12", "sleepTimeSeconds": 25200,
+          "sleepStartTimestampGMT": "2026-06-11T15:30:00Z", "sleepEndTimestampGMT": "2026-06-11T22:30:00Z",
+          "sleepStartTimestampLocal": "2026-06-12T00:30:00", "sleepEndTimestampLocal": "2026-06-12T07:30:00"
+        },
+        "sleepLevels": [{"startGMT": "2026-06-11T15:30:00Z", "endGMT": "2026-06-11T22:30:00Z", "activityLevel": 2}]
+      },
+      "hrv": {
+        "hrvSummary": {"calendarDate": "2026-06-12", "lastNightAvg": 55},
+        "hrvReadings": [{"readingTimeGMT": "2026-06-11T16:00:00Z", "hrvValue": 50}, {"readingTimeGMT": "2026-06-11T21:00:00Z", "hrvValue": 60}]
+      },
+      "expected": {"sleep_seconds": 25200, "sleep_score": null, "hrv_mean_ms": 55, "night_of": "2026-06-12", "sleep_start_local": "2026-06-12T00:30:00+09:00", "sleep_end_local": "2026-06-12T07:30:00+09:00", "local_time_source": "garmin_local"}
+    },
+    {
+      "id": "dst-fallback",
+      "date": "2026-10-25",
+      "sleep": {
+        "dailySleepDTO": {"calendarDate": "2026-10-25", "sleepTimeSeconds": 28800, "sleepStartTimestampGMT": "2026-10-24T21:30:00Z", "sleepEndTimestampGMT": "2026-10-25T05:30:00Z"},
+        "sleepLevels": [{"startGMT": "2026-10-24T21:30:00Z", "endGMT": "2026-10-25T05:30:00Z", "activityLevel": 1}]
+      },
+      "hrv": {
+        "sleepStartTimestampGMT": "2026-10-24T21:30:00Z", "sleepEndTimestampGMT": "2026-10-25T05:30:00Z",
+        "hrvSummary": {"calendarDate": "2026-10-25", "lastNightAvg": 45},
+        "hrvReadings": [{"readingTimeGMT": "2026-10-24T22:00:00Z", "hrvValue": 40}, {"readingTimeGMT": "2026-10-25T04:00:00Z", "hrvValue": 50}]
+      },
+      "expected": {"sleep_seconds": 28800, "sleep_score": null, "hrv_mean_ms": 45, "night_of": "2026-10-24", "sleep_start_local": "2026-10-24T23:30:00+02:00", "sleep_end_local": "2026-10-25T06:30:00+01:00", "local_time_source": "configured_timezone"}
+    },
+    {
+      "id": "new-year",
+      "date": "2026-01-01",
+      "sleep": {
+        "dailySleepDTO": {"calendarDate": "2026-01-01", "sleepTimeSeconds": 25200, "sleepStartTimestampGMT": "2025-12-31T22:30:00Z", "sleepEndTimestampGMT": "2026-01-01T05:30:00Z"},
+        "sleepLevels": [{"startGMT": "2025-12-31T22:30:00Z", "endGMT": "2026-01-01T05:30:00Z", "activityLevel": 1}]
+      },
+      "hrv": {
+        "sleepStartTimestampGMT": "2025-12-31T22:30:00Z", "sleepEndTimestampGMT": "2026-01-01T05:30:00Z",
+        "hrvSummary": {"calendarDate": "2026-01-01", "lastNightAvg": 60},
+        "hrvReadings": [{"readingTimeGMT": "2025-12-31T23:00:00Z", "hrvValue": 50}, {"readingTimeGMT": "2026-01-01T04:00:00Z", "hrvValue": 70}]
+      },
+      "expected": {"sleep_seconds": 25200, "sleep_score": null, "hrv_mean_ms": 60, "night_of": "2025-12-31", "sleep_start_local": "2025-12-31T23:30:00+01:00", "sleep_end_local": "2026-01-01T06:30:00+01:00", "local_time_source": "configured_timezone"}
+    }
+  ]
+}

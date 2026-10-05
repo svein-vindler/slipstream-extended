@@ -27,6 +27,11 @@ pytest                       # Python tests
 
 CI runs the same checks on every pull request.
 
+Worker runtime tests also use Python and the installed pipeline dependencies.
+`npm test` regenerates synthetic import/index snapshots before testing actual
+authenticated MCP responses. See [health contract tests](docs/HEALTH_CONTRACT_TESTS.md)
+for interpreter selection, coverage and recovery scenarios.
+
 Runtime and development Python inputs live in `requirements.in` and
 `requirements-dev.in`. After deliberately changing a direct dependency,
 regenerate both hash-locked `.txt` files with `pip-compile --generate-hashes`
