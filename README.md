@@ -25,6 +25,7 @@ own infrastructure.
 - Resumable historical backfills that become read-only checks when complete
 - Detection and replacement of changed Garmin activity files
 - Optional chat-triggered refresh with completion polling
+- R2-first fresh workout and sleep/HRV requests with bounded targeted imports
 
 Raw FIT/TCX files remain private in R2. MCP tools never return GPS coordinates,
 routes, arbitrary R2 objects or Garmin credentials.
@@ -86,6 +87,12 @@ Example questions:
 - “Refresh today's Garmin data, wait until it is ready, then summarize it.”
 
 More examples are in [Prompt ideas](docs/PROMPTS.md).
+For an explicitly requested update, `sync_latest_activity` and
+`sync_latest_night` check canonical R2 data and a recent successful source check
+before starting a targeted import. They report source age, missing components
+and readiness, and share compatible jobs. Historical read tools stay read-only.
+See [Fresh data on request](docs/FRESH_DATA.md) for local workout/wake-date rules,
+polling limits and R2-only Coach Input repair.
 See [HRV and sleep history](docs/HEALTH_HISTORY.md) for date-range behavior,
 local `night_of` versus wake-date semantics, monthly R2 indexes and the one-time
 index build. Garmin's recorded local times handle travel nights; set
