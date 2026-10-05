@@ -216,9 +216,15 @@ ChatGPT speak). It's built on the `agents` MCP runtime and the official MCP SDK.
 `src/r2-storage.ts` owns bounded text/JSON reads, summary CSV parsing and
 per-isolate parsed summary caches. It receives only the bucket's `get` and
 `head` methods; it has no dispatch, authentication or write responsibility.
-`src/index.ts` retains MCP registration, domain-specific index discovery and
-analysis, refresh coordination and optional append-only writes. The fresh-data
-service uses the same reader through its existing service interface.
+`src/sleep-hrv-tools.ts` owns the four sleep/HRV registrations, bounded canonical
+index verification and night-context reads shared with daily health.
+`src/activity-coach-tools.ts` owns activity summaries, strength/endurance reads,
+coach profile selection and optional append-only coach/context writes. Write
+budgets and effective-date selection remain enforced inside that module.
+`src/tool-contracts.ts` shares date/sport schemas and read-only annotations.
+`src/index.ts` composes these request-scoped services with health/weight tools,
+authentication and refresh coordination. The fresh-data service uses the same
+storage/profile reader through its existing interface.
 
 Each summary read checks R2 metadata before reusing parsed data. A changed
 ETag reloads the object; missing objects, failed metadata reads and invalid

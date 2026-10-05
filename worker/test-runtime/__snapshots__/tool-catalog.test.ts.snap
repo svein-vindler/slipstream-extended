@@ -1,0 +1,17 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`preserves the complete tool contracts with writes=false 1`] = `
+{
+  "count": 23,
+  "hash": "9ed53a057a3fb3b9a890a7f29638c666c7ae4b380539e0a33a9c1056cae15c60",
+  "writes": false,
+}
+`;
+
+exports[`preserves the complete tool contracts with writes=true 1`] = `
+{
+  "count": 25,
+  "hash": "b16d35402fb173ba4665206b47fffdb980b10132f7baf6920f42f3a8314e5acd",
+  "writes": true,
+}
+`;
