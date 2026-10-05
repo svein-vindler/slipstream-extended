@@ -41,7 +41,7 @@ def current(store):
     return json.loads(gzip.decompress(store.objects[pointer["analysis_key"]]))
 
 
-def test_unchanged_inputs_skip_artifact_downloads_analysis_and_writes(store, builds):
+def test_unchanged_inputs_skip_artifact_downloads_analysis_and_writes(store, builds, capsys):
     first = run_one(activity=ACTIVITY, store=store)
     store.reset_counts()
     second = run_one(activity=ACTIVITY, store=store)
@@ -52,6 +52,10 @@ def test_unchanged_inputs_skip_artifact_downloads_analysis_and_writes(store, bui
     assert (store.counts["get"], store.counts["list"], store.counts["put"]) == (2, 2, 0)
     assert store.counts["download_bytes"] < 1024
     assert _coach_status(store, _activity("1", 9), second) == "ready"
+    assert [json.loads(line) for line in capsys.readouterr().out.splitlines()] == [
+        {"event": "targeted_coach_input", "analysis_reused": False},
+        {"event": "targeted_coach_input", "analysis_reused": True},
+    ]
 
 
 @pytest.mark.parametrize("changed", [

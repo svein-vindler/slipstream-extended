@@ -173,6 +173,7 @@ def run_one(*, activity: dict[str, Any], store: R2Store, force: bool = False) ->
             and previous_key.endswith(".json") and previous_key in keys):
         identifier = previous_key[len(canonical_prefix):-5]
         if len(identifier) == 24 and all(char in "0123456789abcdef" for char in identifier):
+            print(json.dumps({"event": "targeted_coach_input", "analysis_reused": True}))
             return {"processed_sources": {activity_id: identifier}, "blocked_activities": [],
                     "skipped_this_run": [], "reused_sources": {activity_id: identifier}}
     endurance = _json(store, required[1])
@@ -219,6 +220,7 @@ def run_one(*, activity: dict[str, Any], store: R2Store, force: bool = False) ->
         if previous_pointer != pointer:
             store.put(pointer_key, json.dumps(pointer, separators=(",", ":")).encode(),
                       "application/json")
+    print(json.dumps({"event": "targeted_coach_input", "analysis_reused": False}))
     return {"processed_sources": {activity_id: coach["analysis_id"]},
             "blocked_activities": [], "skipped_this_run": [], "reused_sources": {}}
 

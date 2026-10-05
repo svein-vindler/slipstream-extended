@@ -7,8 +7,10 @@ The TCX payload is deliberately 1 MiB; timings measure local Python work only.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 from time import perf_counter
 
@@ -60,7 +62,8 @@ class CountingStore:
 def measure(store, activity):
     store.reset_counts()
     started = perf_counter()
-    result = run_one(activity=activity, store=store)
+    with redirect_stdout(io.StringIO()):
+        result = run_one(activity=activity, store=store)
     return {**store.counts, "local_elapsed_ms": round((perf_counter() - started) * 1000, 3),
             "analysis_id": result["processed_sources"]["1"]}
 
