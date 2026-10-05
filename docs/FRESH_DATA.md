@@ -1,5 +1,9 @@
 # Fresh data on request
 
+Chat dispatch runs the same bounded Python orchestration as scheduled and local
+refresh. See [REFRESH_PIPELINE.md](REFRESH_PIPELINE.md) for its mode routing,
+per-stage safety budgets and sanitized timing/provider/storage diagnostics.
+
 `sync_latest_activity` and `sync_latest_night` are explicitly authorized sync
 tools. They may contact Garmin and update private R2. Historical read tools
 keep their read-only contracts. Use the fresh tools when the user asks to fetch
