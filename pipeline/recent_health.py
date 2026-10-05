@@ -7,18 +7,24 @@ import json
 from datetime import date, timedelta
 
 from .activity_backfill import is_job_stopping_error
-from .health_sync import ROOTS, HealthNotReady, finalize_days, publish_completed_nights, store_day
+from .health_sync import (
+    NIGHT_STREAMS,
+    HealthNotReady,
+    finalize_days,
+    publish_completed_nights,
+    store_day,
+)
 from .r2_store import R2Store
 from .sources.garmin import _login
 
 MAX_DAYS = 14
 
 
-def run(*, days: int = 3, streams=("sleep", "hrv"), store=None, garmin=None,
+def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
         today: date | None = None) -> dict:
     selected = tuple(dict.fromkeys(streams))
     if (not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= MAX_DAYS
-            or not selected or any(stream not in ROOTS for stream in selected)):
+            or not selected or any(stream not in NIGHT_STREAMS for stream in selected)):
         raise ValueError("Choose sleep/HRV and a 1-14 day overlap")
     store = store or R2Store()
     garmin = garmin or _login()
@@ -65,10 +71,10 @@ def run(*, days: int = 3, streams=("sleep", "hrv"), store=None, garmin=None,
 def main() -> None:
     parser = argparse.ArgumentParser(description="Reconcile recent sleep and HRV incrementally")
     parser.add_argument("--days", type=int, default=3)
-    parser.add_argument("--stream", action="append", choices=tuple(ROOTS))
+    parser.add_argument("--stream", action="append", choices=NIGHT_STREAMS)
     args = parser.parse_args()
     try:
-        run(days=args.days, streams=args.stream or tuple(ROOTS))
+        run(days=args.days, streams=args.stream or NIGHT_STREAMS)
     except ValueError as exc:
         parser.error(str(exc))
 

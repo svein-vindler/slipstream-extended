@@ -171,11 +171,7 @@ jobs:
         run: python -m pipeline.recent_health --days 3
       - name: Refresh recent body composition
         if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only && !inputs.latest_night_only }}
-        run: |
-          python -m pipeline.health_detail_backfill \
-            --skip-sleep \
-            --max-body-days 3 \
-            --refresh-recent-days 3
+        run: python -m pipeline.recent_body --max-days 3 --summary data/health_daily.csv
       - name: Import newly discovered workouts and missing recent files
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_granular && !inputs.latest_activity_only && !inputs.latest_night_only }}
         run: |

@@ -1,4 +1,4 @@
-"""Shared per-day sleep/HRV import and successful source-check receipts."""
+"""Shared per-day health import and successful source-check receipts."""
 
 from __future__ import annotations
 
@@ -6,10 +6,12 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from .granular import gzip_json, json_bytes, normalize_hrv, sha256
-from .health_detail import normalize_sleep_detail
+from .health_detail import normalize_body_composition, normalize_sleep_detail
 from .health_history_index import _number, _timestamp_seconds, sync_dates
 
-ROOTS = {"sleep": "health/sleep/v1", "hrv": "health/hrv"}
+ROOTS = {"sleep": "health/sleep/v1", "hrv": "health/hrv",
+         "body_composition": "health/body-composition/v1"}
+NIGHT_STREAMS = ("sleep", "hrv")
 
 
 class HealthNotReady(ValueError):
@@ -18,11 +20,84 @@ class HealthNotReady(ValueError):
         self.status = status
 
 
+def _body_day(day: str, raw: dict[str, Any]) -> dict[str, Any]:
+    """Validate the complete individual dayview before replacing a good day."""
+    rows = raw.get("dateWeightList")
+    if not isinstance(rows, list):
+        raise HealthNotReady("invalid_response")
+    if not rows:
+        raise HealthNotReady()
+    items = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise HealthNotReady("invalid_response")
+        for key in ("calendarDate", "date", "summaryDate"):
+            if row.get(key) is not None and str(row[key])[:10] != day:
+                raise HealthNotReady("wrong_date")
+        if "allWeightMetrics" in row:
+            metrics = row["allWeightMetrics"]
+            if not isinstance(metrics, list) or not metrics:
+                raise HealthNotReady("invalid_response")
+            if any(not isinstance(item, dict) for item in metrics):
+                raise HealthNotReady("invalid_response")
+            for item in metrics:
+                for key in ("calendarDate", "date", "summaryDate"):
+                    if item.get(key) is not None and str(item[key])[:10] != day:
+                        raise HealthNotReady("wrong_date")
+                items.append({"calendarDate": day, **item})
+        elif "latestWeight" in row or "totalAverage" in row:
+            raise HealthNotReady("invalid_response")
+        else:
+            items.append(row)
+    if any(not any((weight := _number(item.get(key))) is not None and weight > 0
+                   for key in ("weight", "value")) for item in items):
+        # An aggregate max/min/latest value is not an individual dayview sample.
+        raise HealthNotReady()
+    try:
+        payload = normalize_body_composition(day, {"dateWeightList": items})
+    except ValueError as exc:
+        raise HealthNotReady() from exc
+    if len(payload["measurements"]) != len(items) or any(
+        item["is_daily_average"]
+        or (weight := _number(item["weight_kg"])) is None or weight <= 0
+        or not any((timestamp := _timestamp_seconds(item[key])) is not None and timestamp > 0
+                   for key in ("timestamp_gmt", "timestamp_local"))
+        for item in payload["measurements"]
+    ):
+        raise HealthNotReady()
+    for item in payload["measurements"]:
+        for key in ("timestamp_gmt", "timestamp_local"):
+            value = item[key]
+            if value is None or value == "":
+                continue
+            timestamp = _timestamp_seconds(value)
+            if timestamp is None or timestamp <= 0:
+                raise HealthNotReady("invalid_response")
+            if isinstance(value, str) and _number(value) is None and "T" not in value and " " not in value:
+                raise HealthNotReady("invalid_response")
+            try:
+                instant = datetime.fromtimestamp(timestamp, timezone.utc)
+                local_day = (datetime.fromisoformat(value.replace("Z", "+00:00")).date().isoformat()
+                             if isinstance(value, str) and _number(value) is None else instant.date().isoformat())
+            except (ValueError, OverflowError, OSError) as exc:
+                raise HealthNotReady("invalid_response") from exc
+            if key == "timestamp_local" and local_day != day:
+                raise HealthNotReady("wrong_date")
+    # Provider ordering is not a source edit. Preserve each measurement's fields
+    # and clocks, including duplicates, while producing a stable day representation.
+    payload["measurements"].sort(key=json_bytes)
+    return payload
+
+
 def normalize_day(stream: str, day: str, raw: Any) -> dict[str, Any]:
     if stream not in ROOTS or date.fromisoformat(day).isoformat() != day:
         raise ValueError("Invalid health stream or calendar date")
     if not isinstance(raw, dict):
         raise HealthNotReady("invalid_response")
+    if stream == "body_composition":
+        if raw.get("calendarDate") is not None and str(raw["calendarDate"])[:10] != day:
+            raise HealthNotReady("wrong_date")
+        return _body_day(day, raw)
     dto = raw.get("dailySleepDTO" if stream == "sleep" else "hrvSummary", {})
     if isinstance(dto, dict) and dto.get("calendarDate") and dto["calendarDate"] != day:
         raise HealthNotReady("wrong_date")
@@ -72,7 +147,9 @@ def store_day(store, stream: str, day: str, raw: Any) -> dict[str, Any]:
 def finalize_days(store, stream: str, records: list[dict[str, Any]]) -> dict[str, Any]:
     """Repair indexes even on reuse; checkpoint only after storage/index success."""
     index = {"months_written": [], "months_unchanged": []}
-    if records and hasattr(store, "list_object_revisions"):
+    if stream not in ROOTS:
+        raise ValueError("Invalid health stream")
+    if records and stream in NIGHT_STREAMS and hasattr(store, "list_object_revisions"):
         index = sync_dates(store, stream, (item["date"] for item in records))
     for record in records:
         day = record["date"]
