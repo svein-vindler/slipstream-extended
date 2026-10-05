@@ -41,10 +41,10 @@ const fetcher: typeof fetch = async (_url, init) => {
   gets++;
   return Response.json(runState);
 };
-function service(customFetch = fetcher) {
-  return new FreshDataService(testEnv, { getActivities: async () => [], getR2Json: json,
+function service(customFetch = fetcher, getActivities = async () => [] as import("../src/lib").Activity[], now = NOW) {
+  return new FreshDataService(testEnv, { getActivities, getR2Json: json,
     getCoachProfiles: async () => ({ keys: ["test-profile"], profiles: [PROFILE] }) },
-  CONFIG, () => NOW, customFetch, async () => {});
+  CONFIG, () => now, customFetch, async () => {});
 }
 async function check(request = REQUEST, age = 30_000, extra = {}) {
   await put(`refresh/checks/v1/${freshScope(request)}.json`, {
@@ -91,6 +91,29 @@ beforeEach(() => {
 afterEach(async () => { if (keys.length) await env.SLIPSTREAM_DATA.delete([...new Set(keys)]); });
 
 describe("R2-first targeted freshness", () => {
+  it("checks Garmin rather than failing on an older last-known workout", async () => {
+    await activity("1", "2026-09-01");
+    const result = await service().request({ kind: "activity", newExpected: false });
+    expect(result).toMatchObject({ accepted: true, data_ready: false });
+    expect(posts).toHaveLength(1);
+  });
+
+  it("sorts the summary candidates before applying the discovery limit", async () => {
+    await activity("21");
+    const summaries = Array.from({ length: 21 }, (_, i) => ({ id: `garmin-${i + 1}`,
+      date: new Date(i === 20 ? `${DAY}T08:00:00Z` : "2026-09-01T08:00:00Z"), name: "Synthetic", type: "running", source: "garmin" }));
+    const result = await service(fetcher, async () => summaries)
+      .snapshot({ kind: "activity", newExpected: false });
+    expect(result.package.activity_id).toBe("garmin-21");
+  });
+
+  it("does not let an expired checkpoint pin an older activity", async () => {
+    await activity("1", "2026-09-01"); await activity("2");
+    const request: FreshRequest = { kind: "activity", newExpected: false };
+    await check(request, 10 * 60_000);
+    expect((await service().snapshot(request)).package.activity_id).toBe("garmin-2");
+  });
+
   it("serves canonical activity ahead of the summary index with no dispatch", async () => {
     await activity(); await check();
     const result = await service().request(REQUEST);
@@ -118,6 +141,22 @@ describe("R2-first targeted freshness", () => {
     const persisted = await coordinator.freshJob(String(results[0].request_id));
     expect(persisted?.run_id).toBe(44);
     expect(gets).toBeLessThanOrEqual(7);
+    expect(results.filter((r) => r.should_continue_polling).length).toBeLessThanOrEqual(2);
+  });
+
+  it("finds a recent last-year activity without a summary at New Year", async () => {
+    await activity("1", "2026-12-31");
+    const snapshot = await service(fetcher, async () => [], Date.parse("2027-01-01T12:00:00Z"))
+      .snapshot({ kind: "activity", newExpected: false });
+    expect(snapshot.package.activity_id).toBe("garmin-1");
+    expect(snapshot.package.activity_date).toBe("2026-12-31");
+  });
+
+  it("uses timestamp-key context order consistently with the coach builder", async () => {
+    await activity(); await check();
+    await put("activities/2026/1/context/v1/20261005-new.json", { context_id: "new-context" });
+    await put("activities/2026/1/context/v1/20261004-old.json", { context_id: "old-context" });
+    expect(record((await service().snapshot(REQUEST)).package.user_context).context_id).toBe("new-context");
   });
 
   it("stops after three short polling windows and still checks a later completion", async () => {
@@ -190,6 +229,25 @@ describe("R2-first targeted freshness", () => {
     expect(posts).toHaveLength(1);
   });
 
+  it.each(["reversed_window", "missing_stages"])("rejects incomplete sleep: %s", async (defect) => {
+    await night(); await check(NIGHT);
+    const key = `health/sleep/v1/2026/10/${DAY}.json`;
+    const stored = record((await json([key]))?.data);
+    await put(key, { ...stored, ...(defect === "missing_stages" ? { stages: [] }
+      : { sleep_start_gmt: "2026-10-05T05:00:00Z", sleep_start_garmin_local: "2026-10-05T07:00:00" }) });
+    expect(await service().request(NIGHT)).toMatchObject({ data_ready: false,
+      freshness: { missing_components: expect.arrayContaining(["complete_sleep"]) } });
+    expect(posts).toHaveLength(0);
+  });
+
+  it("rejects HRV readings with invalid timestamps", async () => {
+    await night(); await check(NIGHT);
+    await put(`health/hrv/2026/10/${DAY}.json`, { date: DAY,
+      summary: { lastNightAvg: 51 }, readings: [{ timestamp: "not-a-time", hrv_ms: 51 }] });
+    expect(await service().request(NIGHT)).toMatchObject({ data_ready: false,
+      freshness: { missing_components: ["hrv_readings"] } });
+  });
+
   it("does not advance readiness from a current negative check over older canonical data", async () => {
     await night(); await check(NIGHT, 30_000, { status: "pending", sleep_status: "garmin_not_ready", hrv_status: "garmin_not_ready" });
     const result = await service().request(NIGHT);
@@ -211,6 +269,30 @@ describe("R2-first targeted freshness", () => {
     expect(await coordinator.activeFreshJob(freshScope(NIGHT), NOW)).toMatchObject({ request_id: result.request_id, run_id: null });
     expect(await service().request(NIGHT)).toMatchObject({ request_id: result.request_id, run: null });
     expect(posts).toHaveLength(0); expect(gets).toBe(0);
+  });
+
+  it("ends a rejected dispatch without permanently blocking later attempts", async () => {
+    const rejected: typeof fetch = async () => new Response(null, { status: 422 });
+    const result = await service(rejected).request(NIGHT);
+    expect(result).toMatchObject({ accepted: false, terminal: true, reason: "dispatch_rejected" });
+    expect(await coordinator.activeFreshJob(freshScope(NIGHT), NOW)).toBeNull();
+    expect(await service().status((await coordinator.freshJob(String(result.request_id)))!))
+      .toMatchObject({ terminal: true, data_ready: false });
+    expect(await service().request(NIGHT)).toMatchObject({ reason: "cooldown" });
+    expect(await service(fetcher, async () => [], NOW + 5 * 60_000).request(NIGHT))
+      .toMatchObject({ accepted: true });
+    expect(posts).toHaveLength(1);
+  });
+
+  it("retains an accepted dispatch when the follow-up run lookup is rejected", async () => {
+    const unavailableDetails: typeof fetch = async (_url, init) => init?.method === "POST"
+      ? Response.json({ workflow_run_id: 44 }) : new Response(null, { status: 403 });
+    const result = await service(unavailableDetails).request(NIGHT);
+    expect(result).toMatchObject({ accepted: true, terminal: false, reason: "dispatch_unconfirmed" });
+    expect(await coordinator.activeFreshJob(freshScope(NIGHT), NOW))
+      .toMatchObject({ state: "active", request_id: result.request_id });
+    expect(await service().request(NIGHT)).toMatchObject({ request_id: result.request_id });
+    expect(posts).toHaveLength(0);
   });
 
   it("resolves a 204 dispatch with its own persisted receipt only", async () => {

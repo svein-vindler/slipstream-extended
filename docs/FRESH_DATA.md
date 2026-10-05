@@ -35,9 +35,12 @@ analysis are explicit blocked states. Strength sessions do not need running
 Coach Input. Raw FIT/TCX and GPS are not returned.
 
 A night package includes canonical sleep and associated HRV. Sleep must have
-positive duration, timestamps, stages and a matching local wake-date; a window
+positive duration, an ordered timestamp window, actual stages within that window
+and a matching local wake-date; a window
 marked unconfirmed is incomplete. HRV requires actual detailed readings for
-the same date. Garmin can expose a partial night before finalizing it.
+the same date with valid reading timestamps. Garmin can expose a partial night
+before finalizing it. Empty or zero-duration source responses preserve existing
+canonical sleep while recording a negative source check.
 
 Canonical data can be served even when summaries or monthly indexes lag.
 Missing Coach Input or an outdated source/context/profile pointer can be
@@ -69,14 +72,22 @@ duplicate dispatch while the existing job is unconfirmed or still active.
 
 When GitHub returns no dispatch receipt, only the request UUID's private R2
 receipt may resolve the run ID. The unrelated latest workflow is never used.
-An uncertain POST retains its reservation. Failed or cancelled runs do not
+An uncertain POST retains its reservation. A definite dispatch rejection (for
+example, invalid inputs or access denied) ends that job and retains the cooldown,
+so corrected requests can retry without leaving the scope permanently active.
+Failure to read run details after an accepted POST still retains correlation.
+Failed or cancelled runs do not
 confirm readiness, and partial/failed source retrieval does not advance a
 successful source checkpoint. A successful empty source response gives a
 two-minute negative-result cooldown; the five-minute dispatch floor can
 additionally delay a retry. No broad refresh is a workaround for these limits.
 
-Canonical activity discovery is bounded to 20 candidates and one year-prefix
-listing of at most 1,000 objects when no indexed/checkpoint ID exists. A
+Canonical activity discovery sorts indexed candidates by date before limiting
+them to 20. Only a current checkpoint can pin the selected ID; older canonical
+sessions outside the recent window do not block a new source check. When no
+indexed/current-checkpoint ID exists, at most two year-prefix listings cover the
+recent window across New Year, each bounded to 1,000 objects, with 20 candidates
+in total. A
 truncated listing fails explicitly; supply an exact ID. Per-activity listings
 are also bounded. This avoids unbounded history scans in chat requests.
 

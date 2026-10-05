@@ -147,10 +147,23 @@ def run_one(*, activity: dict[str, Any], store: R2Store) -> dict[str, Any]:
             {"activity_id": activity_id, "reason": "endurance_data_unavailable"},
         ]}
     context_key = _latest_context_keys(keys).get(prefix)
+    decoded = _json(store, required[0])
+    tcx_hash = sha256(store.get(required[2]))
+    pointer_key = f"{prefix}/coach-input/v1/latest-ready.json"
+    # An R2-only repair has no Garmin summary. Preserve an already known moving
+    # time only when both source files are unchanged; never infer it from elapsed time.
+    if activity.get("moving_seconds") is None and pointer_key in keys:
+        previous_key = _json(store, pointer_key).get("analysis_key")
+        if isinstance(previous_key, str) and previous_key.startswith(f"{prefix}/coach-input/v1/canonical/") and previous_key in keys:
+            previous = _json(store, previous_key)
+            source = previous.get("source", {})
+            if (source.get("fit_sha256") == decoded.get("source_fit_sha256")
+                    and source.get("tcx_sha256") == tcx_hash):
+                activity = {**activity, "moving_seconds": previous.get("summary", {}).get("moving_seconds")}
     coach = build_coach_input(
-        activity=activity, decoded_fit=_json(store, required[0]),
+        activity=activity, decoded_fit=decoded,
         endurance=endurance, profile=profile,
-        tcx_sha256=sha256(store.get(required[2])),
+        tcx_sha256=tcx_hash,
         context=_json(store, context_key) if context_key else None,
     )
     # Source hashes alone omit changed local dates, names and derived metadata.
@@ -170,7 +183,6 @@ def run_one(*, activity: dict[str, Any], store: R2Store) -> dict[str, Any]:
                    "profile_id": profile["profile_id"],
                    "context_id": coach.get("user_context", {}).get("context_id")
                    if coach.get("user_context") else None}
-        pointer_key = f"{prefix}/coach-input/v1/latest-ready.json"
         if pointer_key not in keys or _json(store, pointer_key) != pointer:
             store.put(pointer_key, json.dumps(pointer, separators=(",", ":")).encode(),
                       "application/json")
