@@ -46,6 +46,9 @@ git config user.email "<GitHub user ID>+<GitHub login>@users.noreply.github.com"
 1. Create a focused feature branch in the private canary repository.
 2. Keep secrets, generated Garmin data and local environment files untracked.
 3. Add tests and portable documentation with the implementation.
+   Keep README's project purpose, current capabilities and refresh behavior
+   aligned with the implementation in both repositories. Include the relevant
+   usage, scope and recovery details in the focused documentation.
 4. Run Python lint/tests, Worker typecheck/tests and the public-release check.
 5. Merge through a private pull request after CI passes.
 6. If runtime behavior changed, deploy the private Worker or workflow and
