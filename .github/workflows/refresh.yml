@@ -77,8 +77,6 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     env:
-      DAYS_BACK: "30"          # refresh window; older rows are preserved
-      HEALTH_DAYS_BACK: "14"   # recent health can settle for several days
       GARMINTOKENS: ${{ secrets.GARMINTOKENS }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -160,11 +158,12 @@ jobs:
             python -m pipeline.fetch --skip-activities \
               --health-start "$HEALTH_START" --health-end "$HEALTH_END"
           else
-            python -m pipeline.fetch --days "$DAYS_BACK" \
-              --health-days "$HEALTH_DAYS_BACK"
+            python -m pipeline.refresh_summaries --data-dir data
           fi
       - name: Upload summaries and daily snapshot to private R2
-        if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only && !inputs.latest_night_only }}
+        # Ordinary refresh exports before recording source-check receipts.
+        # Explicit historical date/year imports retain their existing path.
+        if: ${{ (inputs.health_start || inputs.health_end || inputs.backfill_start_year || inputs.backfill_end_year) && !inputs.latest_activity_only && !inputs.latest_night_only }}
         run: python -m pipeline.summary_export --data-dir data
       - name: Refresh recent detailed sleep and HRV
         if: ${{ github.event_name == 'schedule' || !inputs.latest_activity_only && !inputs.latest_night_only }}
