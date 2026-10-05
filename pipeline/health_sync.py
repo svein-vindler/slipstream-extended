@@ -167,6 +167,9 @@ def finalize_days(store, stream: str, records: list[dict[str, Any]]) -> dict[str
         raise ValueError("Invalid health stream")
     if records and stream in NIGHT_STREAMS and hasattr(store, "list_object_revisions"):
         index = sync_dates(store, stream, (item["date"] for item in records))
+    elif records and stream == "body_composition" and hasattr(store, "list_object_revisions"):
+        from .weight_index import sync_dates as sync_weight_dates
+        index = sync_weight_dates(store, (item["date"] for item in records))
     for record in records:
         day = record["date"]
         store.put(f"refresh/checks/v1/health/{stream}/{day}.json", json_bytes({

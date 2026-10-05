@@ -50,7 +50,8 @@ def test_repeat_keeps_all_measurements_and_reuses_canonical_without_plan_reads(e
     result = refresh()
     assert garmin.calls == DAYS  # Three measured dates, not three calendar days.
     assert result["status"] == "complete" and result["objects_written"] == 0 and result["objects_unchanged"] == 3
-    assert client.reads == [] and client.prefixes == [""]  # Required bucket-budget inventory only.
+    assert client.reads == ["health/indexes/body-composition/v1/2026-09.json"]
+    assert client.prefixes == ["health/body-composition/v1/2026/09/", ""]
     assert client.writes == [check(day) for day in DAYS]
     assert all(client.objects[key] == value for key, value in before.items())
     current = document(client, check())
@@ -296,7 +297,9 @@ def test_history_plan_and_unselected_old_day_are_never_read_or_changed(environme
     client.reset()
     refresh()
     assert all(client.objects[key] == value for key, value in before.items())
-    assert client.reads == [] and client.prefixes == [""]
+    assert all(key.startswith(("health/indexes/body-composition/v1/2026-09.json",
+                               "health/body-composition/v1/2026/09/")) for key in client.reads)
+    assert client.prefixes == ["", "health/body-composition/v1/2026/09/"]
 
 
 @pytest.mark.parametrize("limit", [0, 15, True, 1.5])
@@ -329,7 +332,9 @@ def test_summary_r2_fallback_and_gzip_preserve_selected_measurement_dates():
     client.reset()
     result = run(store=R2Store(client=client, bucket="synthetic-body"), garmin=garmin, today=TODAY)
     assert result["status"] == "complete" and garmin.calls == DAYS
-    assert client.reads == ["summary/health_daily.csv"]
+    assert client.reads[0] == "summary/health_daily.csv"
+    assert all(key.startswith(("health/indexes/body-composition/v1/2026-09.json",
+                               "health/body-composition/v1/2026/09/")) for key in client.reads[1:])
 
 
 def test_future_dates_are_not_selected_and_month_boundaries_keep_exact_source_days():

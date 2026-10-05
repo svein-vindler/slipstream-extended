@@ -57,6 +57,8 @@ if ! (cd worker && npx wrangler whoami >/dev/null 2>&1); then
 fi
 ok "Cloudflare Wrangler authenticated"
 
+"$PYTHON" scripts/check_installation.py
+
 cat <<'EOF'
 
 Local preparation is complete.

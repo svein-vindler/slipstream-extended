@@ -25,6 +25,7 @@ and prepared analyses remain available between refreshes.
 - Sleep stages, sleep score components, respiration, SpO2 and stress
 - Bounded HRV and sleep history with automatic weekly summaries for long ranges
 - Weight and body-composition measurements, plus bounded morning-weight history
+- Optional revision-verified monthly weight indexes retaining all weighings and clocks
 - Strength exercises, sets, reps, weight, work time and rest time
 - Endurance laps, kilometre splits, heart-rate distribution and drift
 - Versioned coach profiles, append-only RPE/context and prepared coach-input JSON
@@ -77,6 +78,11 @@ OAuth, redirect URIs, testing and cost checks.
 Both check prerequisites and install local dependencies, but deliberately leave
 account-specific R2 credentials and Access policy decisions to the documented
 dashboard steps.
+
+Both also run a read-only installation check that points to the next unfinished
+step. Rerun `python scripts/check_installation.py` to resume; optional `--online`
+checks verify your own cloud setup without changing credentials or data. Recent
+data is sufficient to finish setup; full historical backfill remains optional.
 
 ## Connect and use
 

@@ -3,6 +3,23 @@
 This guide creates one personal Slipstream instance in accounts you control.
 No fitness data or infrastructure is shared with the project maintainer.
 
+You can stop and resume at any section. The bootstrap helpers run a read-only
+local check and show the next setup step. Rerun it at any time using your project
+Python environment:
+
+```bash
+python scripts/check_installation.py
+python scripts/check_installation.py --online --repo <you>/<repo> --worker-url https://<your-worker-host>
+```
+
+Online checks read cloud metadata, secret **names**, stored summaries and the
+anonymous MCP response. They create or modify nothing. The ignored report is
+`.granular/installation-check.json`; it contains statuses and guidance without
+account identifiers, URLs, credentials or fitness values. A passed cloud check
+means ready for an authenticated client test, not proof that OAuth redirects or
+coach setup are complete. Finish with `data_status`, `health_status`,
+`coach_profile` and, once a profile exists, `coach_input` in your connected chat.
+
 ## 1. Prerequisites
 
 Install Git, Python 3.12+, Node.js, npm, the GitHub CLI (`gh`) and a current web
@@ -106,6 +123,17 @@ the encrypted GitHub Actions secret `GARMINTOKENS`; the password is not stored.
 Enable Actions for the repository if GitHub asks. Start and watch the first
 summary refresh:
 
+For a recent-data-first setup, keep the three automatic historical jobs paused
+in your own repository before enabling the normal refresh. If already active:
+
+```bash
+gh workflow disable scheduled-activity-backfill.yml
+gh workflow disable scheduled-hrv-backfill.yml
+gh workflow disable scheduled-health-detail-backfill.yml
+```
+
+Then start the bounded summary refresh:
+
 ```bash
 gh workflow run refresh.yml
 gh run watch
@@ -120,6 +148,12 @@ gh workflow run granular-pilot.yml
 Scheduled activity, HRV, sleep and body-composition backfills take over. They
 are resumable and automatically become cheap read-only checks after eligible
 history is complete.
+
+Full history is optional. You can finish the connector with recent summaries
+and the bounded pilot first, then enable the historical backfill workflows in
+your own repository when you want older data. Historical work uses the same
+resumable plans and does not need to finish before the connector is usable.
+Use `gh workflow enable` with those same three filenames when ready.
 
 For an initial installation with years of history, a trusted computer can
 optionally advance the exact same plans overnight. Complete the normal setup
