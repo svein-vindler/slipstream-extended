@@ -158,6 +158,11 @@ limit, file-fingerprint checks and source observations. Missing profiles or
 artifacts remain explicit; failed analysis does not turn a successful
 file import into a file failure. Missing Garmin-local dates may be recovered
 from matching canonical metadata; the UTC summary date is never a local date.
+The shared detail adapter reads Garmin's nested `summaryDTO` source timestamps
+before fingerprinting or exporting files. Both manual refresh paths therefore
+retain the local date supplied by the single-activity endpoint. Missing local
+metadata in a matching stored canonical activity can be repaired from those
+source timestamps without downloading FIT/TCX again.
 
 This path no longer invokes the historical coach backfill or modifies its plan.
 The initial activity inventory used to choose candidates remains unchanged.
