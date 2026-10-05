@@ -13,12 +13,31 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      agents-mcp:
+        patterns:
+          - agents
+          - "@modelcontextprotocol/*"
+      cloudflare-tooling:
+        patterns:
+          - wrangler
+          - "@cloudflare/vitest-plugin"
     # @cloudflare/vitest-plugin currently supports Vitest 4.x only.
     # Revisit this guard when the plugin declares support for a newer major.
     ignore:
       - dependency-name: vitest
         update-types:
           - version-update:semver-major
+      # Agents 0.24.0 (and 0.26.0) require these exact MCP peers:
+      # sdk 1.30.0, server 2.0.0, client 2.0.0. These known candidates
+      # cannot install. Revisit when Agents changes its peer requirements;
+      # other future versions and security candidates remain reviewable.
+      - dependency-name: "@modelcontextprotocol/sdk"
+        versions: ["1.30.1"]
+      - dependency-name: "@modelcontextprotocol/server"
+        versions: ["2.1.0"]
+      - dependency-name: "@modelcontextprotocol/client"
+        versions: ["2.1.0"]
 
   # GitHub Actions used by the workflows
   - package-ecosystem: github-actions

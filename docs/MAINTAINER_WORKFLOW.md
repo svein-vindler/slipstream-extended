@@ -145,6 +145,19 @@ Access policies or repository secrets.
 - Keep dependency versions aligned between repositories after validation; do
   not maintain silent long-lived forks.
 
+### Cloudflare Agents and MCP compatibility
+
+Agents declares exact peer versions for the MCP SDK, server and client.
+Check `npm view agents@<candidate-version> peerDependencies` before upgrading
+any of them. Update the supported set together and validate with `npm ci`,
+Worker typecheck and runtime tests. Do not bypass a peer conflict with
+`--force` or `--legacy-peer-deps`.
+
+Dependabot groups Agents and MCP candidates together, and groups Wrangler
+with the Cloudflare Vitest plugin. Its ignore rules name only known
+incompatible MCP versions. When an Agents release supports one of those
+versions, remove the matching ignore rule in the same tested change.
+
 ## R2 and schema safety
 
 Portable data changes must be backward-compatible with existing installations:
