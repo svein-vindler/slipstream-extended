@@ -165,6 +165,9 @@ metadata in a matching stored canonical activity can be repaired from those
 source timestamps without downloading FIT/TCX again.
 
 This path no longer invokes the historical coach backfill or modifies its plan.
+Its automatic Coach Input follow-up also skips manual refresh completions,
+including targeted requests. Scheduled refresh, other source-job completions,
+and explicit historical Coach Input jobs retain their reconciliation behavior.
 The initial activity inventory used to choose candidates remains unchanged.
 The broad health steps and their recent reconciliation windows remain active;
 the integration checks recent source data instead of assuming a modified-since

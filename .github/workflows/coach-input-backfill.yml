@@ -27,7 +27,13 @@ concurrency:
 
 jobs:
   backfill:
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    # Manual refresh already prepares Coach Input for its selected activities.
+    # Keep historical reconciliation for schedules and the other source jobs.
+    if: >-
+      ${{ github.event_name != 'workflow_run' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           (github.event.workflow_run.name != 'Refresh fitness data' ||
+            github.event.workflow_run.event != 'workflow_dispatch')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
