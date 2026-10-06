@@ -1,0 +1,2 @@
+# Optional local backup only; never installed by hosted sync or Worker jobs.
+cryptography==50.0.2
