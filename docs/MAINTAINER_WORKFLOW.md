@@ -157,6 +157,26 @@ Access policies or repository secrets.
 - Keep dependency versions aligned between repositories after validation; do
   not maintain silent long-lived forks.
 
+### Native image security override
+
+`worker/package.json` temporarily overrides only Miniflare's `sharp` dependency
+to `0.35.5`. Current Wrangler and Cloudflare Vitest releases still pin Miniflare
+with `sharp 0.35.4`; the scoped override addresses
+[GHSA-wq5f-xc86-pv6w](https://github.com/advisories/GHSA-wq5f-xc86-pv6w)
+without changing the parent tools, application dependencies or Worker code.
+Keep the regenerated lockfile, including optional platform packages, committed.
+
+Run the full `npm audit` as well as `npm audit --omit=dev`, `npm ci`, typecheck
+and both Worker test suites after changes to these tools. The existing CI audit
+also includes development dependencies. The native image test
+loads Miniflare's actual `sharp`, requires patched librsvg and decodes a tiny
+synthetic SVG. It runs on Windows locally and on Linux in existing CI; no live
+fitness data or deployment is required.
+
+Remove the override once a compatible Wrangler/Cloudflare Vitest pair supplies
+patched `sharp` through Miniflare, then regenerate the lockfile and repeat the
+same checks. Do not use forced audit fixes or bypass peer dependencies.
+
 ### Cloudflare Agents and MCP compatibility
 
 Agents declares exact peer versions for the MCP SDK, server and client.
