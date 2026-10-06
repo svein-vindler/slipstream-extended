@@ -24,6 +24,11 @@ garmin_tokens*.txt
 .granular/
 .codex-pytest/
 
+# Private backups and explicitly chosen local recovery areas never enter Git.
+*.slbk
+.slbk-part-*
+.private-backup/
+
 # Runtime summary files are restored from and written back to private R2.
 data/activities.csv
 data/health_daily.csv
