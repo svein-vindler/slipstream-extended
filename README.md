@@ -30,7 +30,8 @@ and prepared analyses remain available between refreshes.
 - Endurance laps, kilometre splits, heart-rate distribution and drift
 - Versioned coach profiles, append-only RPE/context and prepared coach-input JSON
 - Optional [encrypted local backup and isolated recovery testing](docs/PRIVATE_BACKUP.md)
-  of user-owned profile/context history and immutable coach inputs
+  of user-owned profile/context history and immutable coach inputs; see the
+  [backup quick start](docs/BACKUP_QUICKSTART.md) for a separate local installation
 - Resumable historical backfills that become read-only checks when complete
 - Detection and replacement of changed Garmin activity files
 - Optional chat-triggered refresh with completion polling

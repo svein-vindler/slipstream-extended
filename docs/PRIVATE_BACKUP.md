@@ -1,5 +1,10 @@
 # Private backup and isolated local recovery
 
+For a small standalone installation and the four commands, start with
+[Backup quick start](BACKUP_QUICKSTART.md). The root `backup.py` entry point
+uses the same offline CLI and works from any current directory when invoked
+with its full path. No Codex files or hosted installation are needed.
+
 This first delivery is an optional local tool with four operations: `create`,
 `verify`, `plan`, and `restore-local`. It does not contact Garmin, write R2,
 register MCP tools, deploy a Worker, or schedule work. Production restore is
@@ -279,6 +284,14 @@ pilot also passed authenticated verification, preview without writes, isolated
 local restore with identical bytes/references, and independent verification of
 the ciphertext copy. Production restore was not tested. Private selection,
 credentials, backup contents and installation values remain outside Git.
+
+The portable `backup.py` entry point was additionally checked from a different
+working directory using a clean Windows backup-only environment. Its only
+installed application packages were the three hash-locked backup dependencies;
+Garmin and R2 SDKs were absent. All four commands passed with six synthetic
+objects, identical restored bytes/references, a preview that wrote nothing,
+and rejection of overwrite, wrong-password, corrupted and truncated archives.
+Network connections were blocked during this synthetic command test.
 
 The offline backup CLI has no live switch. Synthetic adapters exercise
 `R2ReadOnlySource` and the separate pilot helper, including failure paths.
