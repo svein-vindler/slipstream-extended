@@ -45,9 +45,22 @@ body-composition, strength and GPS-free endurance analysis. It does not expose:
 - Garmin session tokens or passwords
 - Cloudflare or GitHub credentials
 
-Garmin access is read-only. An explicit `refresh_today` call may dispatch the
-fixed GitHub Actions refresh workflow, which updates the installer's private R2
-bucket.
+Garmin data access has a fail-closed application-level read-only policy. The
+shared login installs it before API access and returns a facade exposing only
+the reads used by the pipeline. Both the SDK data-request boundary and its HTTP
+session reject non-GET requests, unreviewed endpoints, request bodies, method
+overrides and redirects. Unknown SDK transport layouts fail closed. There is no
+configuration switch to permit Garmin writes; `MCP_WRITES_ENABLED` only enables
+the separate bounded R2 coach-profile/context tools.
+
+Authentication and token renewal still use the SDK's separate authentication
+session: those may require POST, but cannot be requested through MCP. A Garmin
+session itself may have write privileges; this guard is not a Garmin-issued
+read-only scope, nor a sandbox against compromised Python code or stolen tokens.
+Dependency review and secret protection remain necessary.
+
+An explicitly authorized refresh may dispatch the fixed GitHub Actions workflow
+and update the installer's private R2 bucket, never Garmin fitness data.
 
 ## Abuse and cost controls
 

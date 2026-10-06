@@ -54,6 +54,25 @@ server behavior. Also confirm:
   before parsing
 - error responses contain no tokens, email addresses or object contents
 
+## Garmin read-only boundary
+
+Run `pytest -q tests/test_garmin_readonly.py` without real credentials. The suite
+uses the pinned SDK with a fake HTTP session and verifies that:
+
+- every pipeline read still works through the shared guarded login;
+- upload, edit, delete and unknown SDK operations are not exposed;
+- non-GET requests, unknown endpoints, bodies, method overrides, traversal and
+  redirects are rejected before an authenticated data request is sent;
+- diagnostics decorators cannot remove the transport policy;
+- new SDK transport layouts fail closed rather than dropping the guard.
+
+Do not attempt destructive tests against a real Garmin account. A policy change
+must be reviewed before merge; no MCP input or environment flag may disable it.
+
+The Workers-runtime hardening tests additionally pass SQL-looking lease keys
+and job context through the coordinator. Values must remain bound parameters,
+never change query structure, delete tables or affect another stored job.
+
 ## Refresh consistency
 
 After a successful on-demand refresh, verify the newest date with

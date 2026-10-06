@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from ..schema import Activity, canonical_sport
+from .garmin_readonly import ReadOnlyGarmin
 
 
 def _login():
@@ -22,8 +23,9 @@ def _login():
         tokens = Path(token_file).read_text(encoding="utf-8").strip()
     if tokens:
         g = Garmin()
+        read_only = ReadOnlyGarmin(g)  # Install the policy before any API request.
         g.login(tokens)  # >512-char arg is treated as token data, not a path
-        return g
+        return read_only
     raise RuntimeError(
         "Garmin: no session token. Run scripts/garmin_login.py once to mint "
         "GARMINTOKENS, or set GARMINTOKENS_FILE to a local token file "
