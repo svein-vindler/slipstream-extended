@@ -12,6 +12,7 @@ from typing import Any
 
 from .coach import ANALYZER_VERSION, build_coach_input, select_profile
 from .granular import gzip_json, sha256
+from .measurements import measured_component
 from .r2_store import R2Store
 
 PLAN_KEY = "backfill/coach-input/v1/plan.json"
@@ -136,6 +137,7 @@ def _single_input_signature(
     }, sort_keys=True, separators=(",", ":")).encode())
 
 
+@measured_component("coach_input")
 def run_one(*, activity: dict[str, Any], store: R2Store, force: bool = False) -> dict[str, Any]:
     """Analyze one prefix, reusing unchanged inputs unless recovery is forced."""
     activity_id = str(activity["id"])

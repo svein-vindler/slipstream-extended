@@ -9,7 +9,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from . import (
@@ -25,6 +25,7 @@ from . import (
     summary_restore,
 )
 from .freshness import recent_day
+from .granular import json_bytes
 from .local_bootstrap import prepare_environment
 from .r2_store import R2Store
 from .sources.garmin import _login
@@ -100,21 +101,30 @@ class MeasuredGarmin:
         self.calls = self.errors = 0
         self.available = False
         self.original = None
+        self.elapsed_ms = 0.0
+        self.login_ms = None
 
     def get(self):
         if self.client is None:
-            self.client = self.login()
+            started = time.perf_counter()
+            try:
+                self.client = self.login()
+            finally:
+                self.login_ms = (time.perf_counter() - started) * 1000
             original = getattr(self.client, "connectapi", None)
             self.available = callable(original)
             self.original = original
             if self.available:
                 def counted(*args, **kwargs):
                     self.calls += 1
+                    started = time.perf_counter()
                     try:
                         return original(*args, **kwargs)
                     except Exception:
                         self.errors += 1
                         raise
+                    finally:
+                        self.elapsed_ms += (time.perf_counter() - started) * 1000
                 self.client.connectapi = counted
         return self.client
 
@@ -128,32 +138,79 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
     began = time.perf_counter()
     report = {"schema_version": 1, "kind": "refresh-diagnostics",
               "correlation_id": str(uuid.uuid4()), "mode": request.mode,
-              "scheduled": request.scheduled, "status": "complete", "stages": []}
+              "scheduled": request.scheduled, "status": "complete", "stages": [],
+              "started_at": datetime.now(timezone.utc).isoformat(), "source_checks": []}
+    last_store = None
+
+    def source_checks(result):
+        if not isinstance(result, dict):
+            return
+        checked_at = datetime.now(timezone.utc).isoformat()
+        def add(scope, checked, outcome="checked"):
+            report["source_checks"].append({"scope": scope, "checked": checked,
+                "checked_at": checked_at if checked else None, "outcome": outcome})
+        kind = result.get("kind")
+        if kind in {"latest-activity", "latest-night", "activity-repair"}:
+            checked = result.get("source_checked") is True
+            negative = result.get("status") in {"pending", "no_recent_activity", "no_new_activity",
+                                                   "expected_activity_missing", "files_unavailable"}
+            add(request.mode, checked, "checked" if checked and not negative else
+                "not_ready" if checked else "not_checked" if request.repair_only else "failed")
+        elif kind == "summary-window-refresh":
+            for stream, window in result["windows"].items():
+                checked = window["source_checked"]
+                add(f"{stream}_summary", checked, "checked" if checked else "failed")
+        elif kind == "recent-health-sync":
+            for stream, value in result["streams"].items():
+                checked = value["source_errors"] == 0
+                add(stream, checked, "failed" if not checked else
+                    "not_ready" if value["days_not_ready"] else "checked")
+        elif kind == "recent-body-sync":
+            checked = result["days_checked"] > 0 and result["source_errors"] == 0
+            add("body", checked, "not_checked" if not result["days_checked"] else
+                "failed" if not checked else "not_ready" if result["days_not_ready"] else "checked")
 
     def stage(name, operation, *, storage=True):
+        nonlocal last_store
+        expects_source = name in {"refresh_summaries", "historical_health", "recent_health", "recent_body",
+                                  "manual_activity", "latest_activity", "latest_night"} and not request.repair_only
         # Retain one budget per former workflow step, including guard inventory.
         store = None
         before = {}
         calls, errors = provider.calls, provider.errors
+        source_ms = provider.elapsed_ms
         started = time.perf_counter()
         entry = {"stage": name, "status": "complete"}
         try:
             store = store_factory() if storage else None
+            if store is not None:
+                last_store = store
             before = dict(getattr(store, "operations", {}))
             result = operation(store)
-            if isinstance(result, dict) and result.get("status") in {"partial", "pending", "idle"}:
-                entry["status"] = result["status"]
+            source_checks(result)
+            if isinstance(result, dict) and result.get("status") in {
+                    "partial", "pending", "idle", "files_unavailable", "coach_pending"}:
+                entry["status"] = result["status"] if result["status"] in {"partial", "pending", "idle"} else "partial"
                 if entry["status"] in {"partial", "pending"}:
                     report["status"] = "partial"
             return result
         except BaseException:
             entry["status"] = "failed"
             report["status"] = "failed"
+            if expects_source:
+                report["source_checks"].append({"scope": request.mode if request.mode != "general" else name,
+                    "checked": False, "checked_at": None, "outcome": "failed"})
             raise
         finally:
             entry.update(elapsed_ms=round((time.perf_counter() - started) * 1000),
-                         garmin_connectapi_calls=provider.calls - calls,
-                         garmin_connectapi_errors=provider.errors - errors,
+                         garmin_connectapi_calls=provider.calls - calls if provider.available or not expects_source else None,
+                         garmin_connectapi_errors=provider.errors - errors if provider.available or not expects_source else None,
+                         garmin_fetch_ms=round(provider.elapsed_ms - source_ms) if provider.available or not expects_source else None,
+                         r2_read_ms=round(sum(getattr(store, "timings_ms", {}).get(k, 0) for k in ("get", "head", "list")))
+                             if hasattr(store, "timings_ms") else None if storage else 0,
+                         r2_write_ms=round(store.timings_ms["put"]) if hasattr(store, "timings_ms") else None if storage else 0,
+                         activity_file_import_ms=getattr(store, "component_timings_ms", {}).get("activity_file_import"),
+                         coach_input_ms=getattr(store, "component_timings_ms", {}).get("coach_input"),
                          r2_sdk_operations={key: value - before.get(key, 0)
                                             for key, value in getattr(store, "operations", {}).items()})
             report["stages"].append(entry)
@@ -208,7 +265,19 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
             if provider.available:
                 provider.client.connectapi = provider.original
             report.update(elapsed_ms=round((time.perf_counter() - began) * 1000),
-                          garmin_connectapi_available=provider.available)
+                          garmin_connectapi_available=provider.available,
+                          login_ms=round(provider.login_ms) if provider.login_ms is not None else None,
+                          finished_at=datetime.now(timezone.utc).isoformat())
+            # One small guarded PUT on the last existing stage's budget. No new
+            # store/inventory, and no source payload or private request inputs.
+            if request.run_id != "0" and last_store is not None:
+                original_failure = sys.exception()
+                try:
+                    last_store.put(f"refresh/diagnostics/v1/{request.run_id}.json", json_bytes(report), "application/json")
+                except Exception:
+                    report["diagnostics_persistence_failed"] = True
+                    if original_failure is None:
+                        raise
             if diagnostics_file:
                 diagnostics_file.parent.mkdir(parents=True, exist_ok=True)
                 temporary = diagnostics_file.with_suffix(".tmp")

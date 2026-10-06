@@ -8,6 +8,8 @@ import sys
 
 from botocore.exceptions import ClientError
 
+from .measurements import timed
+
 GIB = 1024**3
 MIB = 1024**2
 DEFAULT_MAX_BUCKET_BYTES = 5 * GIB
@@ -86,12 +88,24 @@ class R2Store:
         # Successful LIST pages; GET/HEAD/PUT SDK calls, excluding internal retries.
         # Inventory pages used by write guards are included.
         self.operations = {"get": 0, "head": 0, "list_pages": 0, "listed_objects": 0, "put": 0}
+        self.timings_ms = {"get": 0.0, "head": 0.0, "list": 0.0, "put": 0.0}
+
+    def _pages(self, **kwargs):
+        with timed(self.timings_ms, "list"):
+            paginator = self.client.get_paginator("list_objects_v2")
+            pages = iter(paginator.paginate(Bucket=self.bucket, **kwargs))
+        while True:
+            try:
+                with timed(self.timings_ms, "list"):
+                    page = next(pages)
+            except StopIteration:
+                return
+            yield page
 
     def inventory(self) -> dict[str, int]:
         objects = 0
         total_bytes = 0
-        paginator = self.client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=self.bucket):
+        for page in self._pages():
             self.operations["list_pages"] += 1
             self.operations["listed_objects"] += len(page.get("Contents", []))
             for item in page.get("Contents", []):
@@ -101,8 +115,7 @@ class R2Store:
 
     def list_keys(self, prefix: str = "") -> set[str]:
         keys: set[str] = set()
-        paginator = self.client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+        for page in self._pages(Prefix=prefix):
             self.operations["list_pages"] += 1
             self.operations["listed_objects"] += len(page.get("Contents", []))
             for item in page.get("Contents", []):
@@ -114,8 +127,7 @@ class R2Store:
     def list_object_revisions(self, prefix: str = "") -> dict[str, str]:
         """List object keys with stable revisions without downloading bodies."""
         revisions: dict[str, str] = {}
-        paginator = self.client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+        for page in self._pages(Prefix=prefix):
             self.operations["list_pages"] += 1
             self.operations["listed_objects"] += len(page.get("Contents", []))
             for item in page.get("Contents", []):
@@ -161,14 +173,16 @@ class R2Store:
 
     def get(self, key: str) -> bytes:
         self.operations["get"] += 1
-        response = self.client.get_object(Bucket=self.bucket, Key=key)
-        return response["Body"].read()
+        with timed(self.timings_ms, "get"):
+            response = self.client.get_object(Bucket=self.bucket, Key=key)
+            return response["Body"].read()
 
     def put_if_changed(self, key: str, data: bytes, content_type: str, *, encoding: str | None = None) -> bool:
         """Skip identical single-PUT objects, including their serving metadata."""
         try:
             self.operations["head"] += 1
-            previous = self.client.head_object(Bucket=self.bucket, Key=key)
+            with timed(self.timings_ms, "head"):
+                previous = self.client.head_object(Bucket=self.bucket, Key=key)
         except ClientError as exc:
             if not missing_object(exc):
                 raise
@@ -197,6 +211,7 @@ class R2Store:
         if encoding:
             args["ContentEncoding"] = encoding
         self.operations["put"] += 1
-        self.client.put_object(**args)
+        with timed(self.timings_ms, "put"):
+            self.client.put_object(**args)
         self._writes += 1
         self._write_bytes += len(data)

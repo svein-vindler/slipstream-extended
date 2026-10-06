@@ -18,6 +18,7 @@ export interface RefreshRun {
   created_at: string;
   updated_at: string | null;
   html_url: string;
+  run_started_at?: string | null;
 }
 
 export interface RefreshProgress {
@@ -129,6 +130,7 @@ export function normalizeRefreshRun(value: unknown): RefreshRun {
     created_at: run.created_at,
     updated_at: typeof run.updated_at === "string" ? run.updated_at : null,
     html_url: run.html_url,
+    ...(typeof run.run_started_at === "string" ? { run_started_at: run.run_started_at } : {}),
   };
 }
 

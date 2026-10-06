@@ -12,6 +12,7 @@ from typing import Any
 from .activity_backfill import is_job_stopping_error, is_supported_activity
 from .granular import activity_prefix, activity_type, json_bytes, sha256
 from .granular_export import activity_artifact_keys, export_activity
+from .measurements import measured_component
 from .r2_store import R2BudgetError, R2Store
 from .sources.garmin import _login
 
@@ -76,6 +77,7 @@ def _load_manifest(store: R2Store, key: str, existing_keys: set[str]):
     return value
 
 
+@measured_component("activity_file_import")
 def refresh_activity(
     activity: dict[str, Any],
     *,

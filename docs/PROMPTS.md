@@ -126,6 +126,22 @@ your data at once:
 - *"Design a simple three-day running week that fits what I am already doing."*
 - *"If I keep my current weekly volume, what will my monthly total look like?"*
 
+## Reporting fresh-data status
+
+When a user authorizes fetching fresh workout or night data, use the matching
+targeted tool. Report the job state, last successful Garmin check time, requested
+package state, missing components and next action. Claim readiness only when
+`sync_status.data_state` is `ready`; legacy general/run-only `data_ready` is not
+evidence that the requested package is complete. For a night, describe sleep and
+associated HRV using its Garmin-local wake-date and `night_of`.
+
+Follow `refresh_status` using the returned request ID only while
+`should_continue_polling` is true. When false, stop, explain queued/running,
+partial, source-pending or blocked state and retry guidance. Do not dispatch
+another job to compensate for polling exhaustion. A later explicit status
+request can reuse the same ID. Report measured wait components when useful;
+call missing measurements unknown rather than zero or an estimated delay.
+
 ## Pace, speed, and performance
 
 - *"What's my fastest average pace this month, and on which run?"*

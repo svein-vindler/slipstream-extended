@@ -13,7 +13,8 @@ def routed(monkeypatch, tmp_path):
     client = SimpleNamespace(connectapi=lambda *a, **kw: {})
 
     def factory():
-        store = SimpleNamespace(operations={"get": 0, "head": 0, "list_pages": 0, "put": 0})
+        store = SimpleNamespace(operations={"get": 0, "head": 0, "list_pages": 0, "put": 0},
+                                put=lambda *args: None)
         stores.append(store)
         return store
 

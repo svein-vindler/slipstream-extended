@@ -2,6 +2,7 @@ import { z } from "zod";
 import { refreshReportSchema } from "./refresh-report";
 import { latestActivityReportSchema } from "./latest-activity-report";
 import { freshResultSchema, freshnessSchema, requestIdSchema } from "./fresh-data";
+import { syncStatusSchema, latencySchema, latestNightReportSchema, pipelineDiagnosticsSchema } from "./sync-status";
 
 const nullableNumber = z.number().finite().nullable();
 const nullableString = z.string().nullable();
@@ -90,6 +91,7 @@ const refreshRun = z.object({
   created_at: z.string(),
   updated_at: nullableString,
   html_url: z.string(),
+  run_started_at: z.string().nullable().optional(),
 });
 
 const sleepSummary = z.object({
@@ -464,13 +466,17 @@ export const outputSchemas = {
     message: z.string(),
   }),
   refresh_today: z.object({
+    pipeline_diagnostics: pipelineDiagnosticsSchema.nullable().optional(),
+    sync_status: syncStatusSchema.optional(), latency: latencySchema.optional(),
+    freshness: freshnessSchema.optional(), latest_night: latestNightReportSchema.optional(),
+    latest_activity: latestActivityReportSchema.optional(),
     accepted: z.boolean(),
     reason: z.enum(["request_in_progress", "already_running", "recent_success"]).optional(),
     message: z.string(),
     retry_after_seconds: z.number().int().positive().optional(),
     run: refreshRun.nullable().optional(),
     terminal: z.boolean(),
-    data_ready: z.boolean(),
+    data_ready: z.boolean().describe("Legacy workflow-success flag; use sync_status.data_state to determine actual requested data readiness."),
     should_continue_polling: z.boolean(),
     poll_after_seconds: z.number().int().positive().optional(),
     activity_ready: z.boolean().nullable().optional(),
@@ -479,6 +485,9 @@ export const outputSchemas = {
   sync_latest_activity: freshResultSchema.extend({ latest_activity: latestActivityReportSchema.optional() }),
   sync_latest_night: freshResultSchema,
   refresh_status: z.object({
+    pipeline_diagnostics: pipelineDiagnosticsSchema.nullable().optional(),
+    sync_status: syncStatusSchema.optional(), latency: latencySchema.optional(),
+    latest_night: latestNightReportSchema.optional(),
     request_id: requestIdSchema.optional(),
     accepted: z.boolean().optional(),
     freshness: freshnessSchema.optional(),
@@ -488,7 +497,7 @@ export const outputSchemas = {
     message: z.string(),
     run: refreshRun.nullable().optional(),
     terminal: z.boolean(),
-    data_ready: z.boolean(),
+    data_ready: z.boolean().describe("Legacy workflow-success flag for run-only status; targeted request status uses canonical completeness and freshness. Use sync_status.data_state consistently."),
     should_continue_polling: z.boolean(),
     poll_after_seconds: z.number().int().positive().optional(),
     activity_ready: z.boolean().nullable().optional(),
