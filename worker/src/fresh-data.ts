@@ -6,6 +6,9 @@ import { nightContext, validatedHealthTimezone } from "./night-context";
 import { dispatchLatestActivity, dispatchLatestNight, getRefreshRun,
   GitHubRequestError, pollRefreshRun, RefreshConfig, RefreshRun } from "./github";
 import type { FreshJob } from "./refresh-coordinator";
+import { latency, latencySchema, pipelineDiagnosticsSchema, syncStatus, syncStatusSchema,
+  latestNightReportSchema, activityRepairReportSchema, type PipelineDiagnostics } from "./sync-status";
+import { latestActivityReportSchema } from "./latest-activity-report";
 
 const CHECK_TTL_MS = 5 * 60_000;
 const NEGATIVE_TTL_MS = 2 * 60_000;
@@ -16,6 +19,7 @@ export const freshnessSchema = z.object({
   scope: z.string(), status: z.string(), complete: z.boolean(),
   source_checked_at: z.string().nullable(), source_age_seconds: z.number().nullable(),
   source_fresh: z.boolean(), missing_components: z.array(z.string()),
+  source_outcome: z.enum(["checked", "not_ready", "unknown"]).optional(),
   package: z.record(z.string(), z.unknown()),
 });
 export const freshResultSchema = z.object({
@@ -23,7 +27,9 @@ export const freshResultSchema = z.object({
   reason: z.string().optional(), request_id: requestIdSchema.optional(),
   run: z.object({ id: z.number(), status: z.string(), conclusion: z.string().nullable(),
     event: z.string().nullable(), created_at: z.string(), updated_at: z.string().nullable(),
-    html_url: z.string() }).nullable().optional(),
+    html_url: z.string(), run_started_at: z.string().nullable().optional() }).nullable().optional(),
+  sync_status: syncStatusSchema.optional(), latency: latencySchema.optional(),
+  pipeline_diagnostics: pipelineDiagnosticsSchema.nullable().optional(),
   terminal: z.boolean(), data_ready: z.boolean(), should_continue_polling: z.boolean(),
   poll_after_seconds: z.number().int().positive().optional(),
   retry_after_seconds: z.number().int().positive().optional(),
@@ -47,6 +53,7 @@ export interface FreshRequest {
   date?: string;
   activityId?: string;
   newExpected?: boolean;
+  requestedAt?: number;
 }
 export function freshScope(request: FreshRequest): string {
   return request.kind === "night" ? `night/${request.date}`
@@ -94,14 +101,16 @@ type Fetcher = typeof fetch;
 export class FreshDataService {
   private startedAt = performance.now();
   private diagnostics = { canonical_json_gets: 0, canonical_lists: 0,
-    summary_reads: 0, profile_reads: 0, github_requests: 0 };
+    summary_reads: 0, profile_reads: 0, github_requests: 0, r2_read_ms: 0, github_ms: 0 };
   constructor(private env: Env, private reader: FreshReader, private config: RefreshConfig,
     private now = () => Date.now(), private fetcher: Fetcher = fetch,
     private sleeper = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))) {
     const originalFetch = this.fetcher;
     this.fetcher = async (input, init) => {
       this.diagnostics.github_requests++;
-      return originalFetch(input, init);
+      const started = performance.now();
+      try { return await originalFetch(input, init); }
+      finally { this.diagnostics.github_ms += performance.now() - started; }
     };
   }
 
@@ -120,14 +129,20 @@ export class FreshDataService {
   }
 
   private async json(keys: string[], small = false): Promise<Json> {
-    const stored = await this.reader.getR2Json(keys, small ? SMALL : undefined);
+    const began = performance.now();
+    let stored;
+    try { stored = await this.reader.getR2Json(keys, small ? SMALL : undefined); }
+    finally { this.diagnostics.r2_read_ms += performance.now() - began; }
     this.diagnostics.canonical_json_gets += stored ? keys.indexOf(stored.key) + 1 : keys.length;
     return record(stored?.data);
   }
 
   private async list(prefix: string, limit = 100): Promise<R2Object[]> {
     this.diagnostics.canonical_lists++;
-    const listed = await this.env.SLIPSTREAM_DATA.list({ prefix, limit });
+    const began = performance.now();
+    let listed;
+    try { listed = await this.env.SLIPSTREAM_DATA.list({ prefix, limit }); }
+    finally { this.diagnostics.r2_read_ms += performance.now() - began; }
     if (listed.truncated) throw new Error("Canonical R2 listing exceeded its bounded limit; select an exact activity ID.");
     return listed.objects;
   }
@@ -142,13 +157,16 @@ export class FreshDataService {
   async snapshot(request: FreshRequest): Promise<Snapshot> {
     const scope = freshScope(request);
     const check = await this.json([`refresh/checks/v1/${scope}.json`], true);
-    const checkedAt = typeof check.checked_at === "string" && check.scope === scope
+    const checkedAt = typeof check.checked_at === "string" && z.iso.datetime({ offset: true }).safeParse(check.checked_at).success && check.scope === scope
       && check.source_checked === true ? check.checked_at : null;
     const age = checkedAt ? this.now() - Date.parse(checkedAt) : NaN;
     const sourceFresh = Number.isFinite(age) && age >= 0 && age <= CHECK_TTL_MS;
     const result: Snapshot = { scope, status: "missing", complete: false,
       source_checked_at: checkedAt, source_age_seconds: Number.isFinite(age) ? Math.floor(age / 1000) : null,
       source_fresh: sourceFresh, missing_components: [], package: {} };
+    result.source_outcome = checkedAt ? check.status === "pending" ||
+      ["no_recent_activity", "no_new_activity", "expected_activity_missing", "files_unavailable"].includes(String(check.status))
+      ? "not_ready" : "checked" : "unknown";
     if (request.kind === "night") await this.readNight(request, result);
     else await this.readActivity(request, check, result);
     if (result.complete) result.status = sourceFresh ? "ready" : "source_stale";
@@ -341,7 +359,30 @@ export class FreshDataService {
       status: snapshot.status, request_id: extra.request_id ?? null, ...diagnostics }));
     return { accepted: false, message, terminal: true, data_ready: ready,
       should_continue_polling: false, activity_ready: snapshot.scope.startsWith("activity/") ? ready : null,
-      freshness: snapshot, diagnostics, ...extra };
+      freshness: snapshot, diagnostics,
+      sync_status: syncStatus({ kind: snapshot.scope.startsWith("night/") ? "night" : "activity",
+        snapshot, run: extra.run as RefreshRun | null | undefined, accepted: extra.accepted === true,
+        polling: extra.should_continue_polling === true, reason: typeof extra.reason === "string" ? extra.reason : undefined }),
+      latency: latency(null), ...extra };
+  }
+
+  async completedDetails(run: RefreshRun, request: FreshRequest,
+    pipeline?: PipelineDiagnostics | null, sourceChecked?: boolean) {
+    const snapshot = await this.snapshot(request);
+    // A failed current source check cannot attest to the latest version even
+    // when an older successful receipt and good canonical history remain.
+    if (sourceChecked === false) {
+      snapshot.source_fresh = false;
+      if (snapshot.complete) snapshot.status = "source_stale";
+    }
+    const status = syncStatus({ kind: request.kind, run, snapshot, pipeline, sourceChecked });
+    const message = status.data_state === "ready" ? `The requested ${request.kind === "night" ? "sleep and HRV" : "activity"} package is complete and fresh.`
+      : status.user_action_required ? `The requested package needs user action (${snapshot.package.coach_status ?? snapshot.status}).`
+        : status.source_checked === false ? `The job ended, but its Garmin check did not verify the requested package. Stored history is preserved. Missing: ${snapshot.missing_components.join(", ") || "a successful current source check"}.`
+          : `The job ended; the requested ${request.kind === "night" ? "sleep and HRV" : "activity"} package is ${status.data_state}. Missing: ${snapshot.missing_components.join(", ") || "a recent successful Garmin check"}.`;
+    return { message, activity_ready: request.kind === "activity" ? status.data_state === "ready" : null,
+      freshness: snapshot, sync_status: status, pipeline_diagnostics: pipeline ?? null,
+      latency: latency(run, pipeline, request.requestedAt, status.data_state === "ready", this.now()) };
   }
 
   async request(request: FreshRequest): Promise<Json> {
@@ -366,7 +407,8 @@ export class FreshDataService {
       return this.response(snapshot, "Garmin was checked recently; the requested package is still unavailable or incomplete. Retry after the short source-check cooldown.",
         { reason: "negative_cooldown", retry_after_seconds: Math.max(1, 120 - snapshot.source_age_seconds!) });
     }
-    const reservation = await coordinator.beginFresh(snapshot.scope, request.kind, JSON.stringify(request), this.now(), repairOnly);
+    const reservation = await coordinator.beginFresh(snapshot.scope, request.kind,
+      JSON.stringify({ ...request, requestedAt: this.now() }), this.now(), repairOnly);
     if (!reservation.job) return this.response(snapshot, "The targeted sync cooldown or daily safety budget prevents another job.",
       { reason: reservation.reason, retry_after_seconds: Math.max(1, Math.ceil((reservation.retryAfterMs ?? 1000) / 1000)) });
     if (!reservation.acquired) return this.status(reservation.job);
@@ -398,19 +440,38 @@ export class FreshDataService {
     const request = JSON.parse(job.request) as FreshRequest;
     if (!job.run_id) {
       const receipt = await this.json([`refresh/requests/${job.request_id}.json`], true);
-      if (Number.isSafeInteger(receipt.run_id) && Number(receipt.run_id) > 0) {
+      if (receipt.scope === job.scope && Number.isSafeInteger(receipt.run_id) && Number(receipt.run_id) > 0) {
         job.run_id = Number(receipt.run_id);
         await coordinator.bindFreshRun(job.request_id, job.run_id);
       }
     }
-    const canPoll = await coordinator.takeFreshPoll(job.request_id);
-    const run: RefreshRun | null = job.run_id ? canPoll
-      ? await pollRefreshRun(this.config, { runId: job.run_id, maxPolls: 2, intervalMs: 4_000 }, this.fetcher, this.sleeper)
-      : await getRefreshRun(this.config, job.run_id, this.fetcher) : null;
+    const canPoll = job.expires_at > this.now() && await coordinator.takeFreshPoll(job.request_id);
+    let run: RefreshRun | null = null;
+    try {
+      run = job.run_id ? canPoll
+        ? await pollRefreshRun(this.config, { runId: job.run_id, maxPolls: 2, intervalMs: 4_000 }, this.fetcher, this.sleeper)
+        : await getRefreshRun(this.config, job.run_id, this.fetcher) : null;
+    } catch {
+      const snapshot = await this.snapshot(request);
+      return this.response(snapshot, "The GitHub job status could not be read. Check workflow access or service availability; the existing reservation is retained.",
+        { accepted, request_id: job.request_id, terminal: job.state !== "active", should_continue_polling: false,
+          reason: "status_error", retry_after_seconds: 60 });
+    }
     const terminal = job.state !== "active" || run?.status === "completed";
     if (run?.status === "completed") await coordinator.finishFresh(job.request_id, run.conclusion === "success");
     const snapshot = await this.snapshot(request);
-    const report = run && terminal ? await this.json([`refresh/reports/${run.id}.json`], true) : {};
+    const rawReport = run && terminal ? await this.json([`refresh/reports/${run.id}.json`], true) : {};
+    const validated = z.union([latestNightReportSchema, latestActivityReportSchema, activityRepairReportSchema]).safeParse(rawReport);
+    const report = validated.success && validated.data.scope === job.scope
+      && (request.kind === "night" ? validated.data.kind === "latest-night" : validated.data.kind !== "latest-night")
+      ? record(validated.data) : {};
+    const parsed = run && terminal ? pipelineDiagnosticsSchema.safeParse(
+      await this.json([`refresh/diagnostics/v1/${run.id}.json`], true)) : null;
+    const pipeline = parsed?.success && parsed.data.mode === request.kind ? parsed.data : null;
+    if (report.source_checked === false && report.kind !== "activity-repair") {
+      snapshot.source_fresh = false;
+      if (snapshot.complete) snapshot.status = "source_stale";
+    }
     const persisted = await coordinator.freshJob(job.request_id);
     const stillPolling = !terminal && canPoll && (persisted?.polls ?? 3) < 3 && job.expires_at > this.now();
     const blocked = String(report.coach_status ?? "");
@@ -419,11 +480,17 @@ export class FreshDataService {
         : snapshot.complete && snapshot.source_fresh && snapshot.status === "ready" ? "The requested canonical package is ready."
           : blocked === "no_effective_profile" || blocked === "endurance_data_unavailable"
             ? `Activity files are stored; Coach Input is blocked (${blocked}). Add an effective profile or use supported analysis; polling will not resolve this.`
-            : `The source check completed; the requested package is ${snapshot.status}. Missing: ${snapshot.missing_components.join(", ") || "the expected Garmin upload"}. Garmin may not have received or finalized the data yet.`
+            : `The job ended; the requested package is ${snapshot.status}. Missing: ${snapshot.missing_components.join(", ") || "a recent successful source check"}. ${snapshot.source_outcome === "not_ready" ? "The last successful Garmin check found the requested data unavailable." : "Data readiness could not be verified; job success alone does not establish a Garmin check."}`
       : "The targeted job is queued, running, or not yet confirmed. Polling is bounded; check this correlation ID later if the polling window has ended.",
     { accepted, available: run !== null, request_id: job.request_id, run,
-      terminal: terminal || job.expires_at <= this.now(), should_continue_polling: stillPolling,
-      ...(terminal && run?.conclusion !== "success" ? { data_ready: false, activity_ready: false } : {}),
+      terminal, should_continue_polling: stillPolling,
+      sync_status: syncStatus({ kind: request.kind, run, snapshot, pipeline, accepted: true, polling: stillPolling,
+        sourceChecked: typeof report.source_checked === "boolean" ? report.source_checked : undefined }),
+      latency: latency(run, pipeline, request.requestedAt,
+        snapshot.complete && snapshot.source_fresh && snapshot.status === "ready", this.now()),
+      pipeline_diagnostics: pipeline,
+      ...(terminal && run?.conclusion !== "success" ? { data_ready: false,
+        activity_ready: request.kind === "activity" ? false : null } : {}),
       ...(stillPolling ? { poll_after_seconds: 4 } : !terminal ? { retry_after_seconds: 60 } : {}) });
   }
 }

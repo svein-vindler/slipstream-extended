@@ -29,7 +29,57 @@ source check is valid for five minutes, independently of completeness. Object
 upload times, CSV/index times and successful GitHub runs are not source checks.
 The returned `freshness` contains scope, source-check time, source age,
 completeness, missing components and the canonical package. `data_ready` means
-that the requested package is complete and source-fresh.
+that the requested package is complete and source-fresh on the targeted tools.
+
+## Shared sync status and compatibility
+
+All refresh tools add `sync_status` and `latency`. Read `sync_status` consistently:
+
+| Field | Meaning |
+| --- | --- |
+| `kind` | `general`, `activity`, `night`, or `unknown` when the report cannot establish scope |
+| `job_state`, `job_conclusion` | No job, accepted, queued, running, completed or failed; separate from data availability |
+| `source_checked`, `source_checked_at` | Successful scoped Garmin check and receipt time; a successful empty check is still a check |
+| `complete`, `fresh` | Canonical package completeness and age of its last successful source check; `null` when unverified |
+| `data_state` | `ready`, `partial`, `source_pending`, `stale`, `unknown`, `blocked`, or `error` |
+| `missing_components` | Exact missing files, analysis, Coach Input, sleep or HRV components |
+| `user_action_required`, `next_action` | Select an activity, correct setup/profile, read data, or retry/check later |
+| `polling_state` | Continuing, stopped, or complete; stopping polling does not complete a queued/running job |
+
+`ready` requires the requested canonical package to be both complete and fresh.
+`source_pending` needs evidence of a successful negative source check, rather
+than an inference from workflow success. Data already stored with missing files
+or Coach Input are `partial`; missing effective profiles are `blocked`. Invalid
+or missing per-run reports are unverified. A failed current source check never
+attests that preserved older canonical data are the latest version.
+
+The check time is a receipt time after the relevant source/import work. For
+general refresh, `pipeline_diagnostics.source_checks` records scopes separately;
+the aggregate check is true only when all reported scopes succeeded. It does
+not assert that any particular activity/night is complete. The package's
+`freshness.source_checked_at` still identifies its last successful receipt when
+the current attempt fails. R2-only Coach Input repair does not claim a new
+Garmin check.
+
+Existing fields remain compatible. On `refresh_today` and run-only
+`refresh_status`, legacy `data_ready=true` means the workflow succeeded; it can
+coexist with `sync_status.data_state=partial` or `unknown`. On targeted request
+status, `data_ready` retains its canonical-package meaning. **Clients must use
+`sync_status.data_state=ready` for a uniform readiness decision.** `terminal`
+describes the job, not the completion of the requested data. Existing
+`activity_ready` keeps its activity meaning and is `null` for a night.
+
+A manually dispatched night-only run can be checked with just `run_id`. Its
+validated `latest-night` report supplies the wake-date, and the Worker performs
+the same canonical sleep/associated-HRV verification as `FreshDataService`.
+No registered request ID or new dispatch is needed. The message refers to sleep
+and HRV. A missing/invalid night report remains unknown; it does not imply
+missing activity files. Activity-only and R2-repair reports also use canonical
+verification. Recent targeted runs do not suppress a requested general refresh.
+
+Report reads are bounded to 64 KiB each. Completion adds one direct diagnostics
+GET, plus the existing bounded canonical package reads when the report identifies
+a target. No bucket inventory is added to status requests.
 
 An activity package includes canonical local start time, summary, detailed
 analysis, running Coach Input and the newest explicitly supplied context for

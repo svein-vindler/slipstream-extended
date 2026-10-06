@@ -11,6 +11,29 @@ checks pass, verify authenticated tools and coach profile selection in your clie
 For slow or incomplete refreshes, inspect the sanitized per-stage report described
 in [REFRESH_PIPELINE.md](REFRESH_PIPELINE.md).
 
+**The job succeeded but requested data are incomplete.** Read
+`sync_status.job_state`, `source_checked_at`, `data_state` and
+`missing_components` separately. Legacy run-only `data_ready` is a workflow
+flag. `source_pending` means a successful source check found data unavailable;
+`partial` names stored data with missing details or Coach Input. `blocked`
+requires the reported setup/profile action. A successful GitHub run alone
+does not prove a complete fresh package.
+
+**A manual night run has no request ID.** Call `refresh_status` with its `run_id`.
+A validated night report triggers canonical sleep/HRV verification and keeps
+`activity_ready=null`. Missing/invalid reports are explicitly unverified. An old
+activity-oriented fallback message is not evidence that night data are missing.
+
+**Polling has stopped but the job is still running.** Stop automatic polling
+when `should_continue_polling=false`. Report queue/run state and retry guidance.
+A later user-requested status lookup uses the same request/run ID and one
+GitHub lookup after the targeted window is exhausted, without a new import.
+
+**Where is the wait?** Compare `latency.github_queue_ms`, `github_startup_ms`
+and `pipeline_ms`, then measured stages. Null means unknown. Do not confuse
+pipeline duration with `request_to_ready_observed_ms` or interpret overlapping
+source/storage/component timings as additive totals.
+
 ## Local setup
 
 **`python` or `pytest` is missing.** Activate `.venv` or use its Python directly.

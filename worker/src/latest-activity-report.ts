@@ -3,6 +3,8 @@ import { z } from "zod";
 export const latestActivityReportSchema = z.object({
   schema_version: z.literal(1),
   kind: z.literal("latest-activity"),
+  source_checked: z.boolean().optional(),
+  scope: z.string().regex(/^activity\/(latest|\d{4}-\d{2}-\d{2})\/(latest|\d{1,20})\/(new|known)$/).optional(),
   checked_at: z.string(),
   status: z.enum([
     "ready", "no_recent_activity", "no_new_activity", "expected_activity_missing",

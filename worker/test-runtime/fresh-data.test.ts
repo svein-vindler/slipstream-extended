@@ -171,6 +171,50 @@ describe("R2-first targeted freshness", () => {
     expect(posts).toHaveLength(1);
   });
 
+  it("keeps an expired polling window nonterminal while the actual job is running", async () => {
+    const result = await service().request(NIGHT);
+    const job = (await coordinator.freshJob(String(result.request_id)))!;
+    const status = await service(fetcher, async () => [], NOW + 3 * 60 * 60_000).status(job);
+    expect(status).toMatchObject({ terminal: false, should_continue_polling: false,
+      sync_status: { job_state: "queued", polling_state: "stopped", next_action: "check_later" } });
+    expect(posts).toHaveLength(1);
+  });
+
+  it("reports delayed files and coach input after a completed successful job", async () => {
+    await activity();
+    await env.SLIPSTREAM_DATA.delete("activities/2026/1/activity.tcx");
+    const first = await service().request(REQUEST);
+    await check();
+    runState = { ...RUN, status: "completed", conclusion: "success" };
+    const result = await service().status((await coordinator.freshJob(String(first.request_id)))!);
+    expect(result).toMatchObject({ terminal: true, data_ready: false,
+      sync_status: { kind: "activity", job_state: "completed", data_state: "partial",
+        missing_components: ["activity.tcx", "coach_input"] },
+      latency: { pipeline_ms: null, request_to_ready_observed_ms: null } });
+    expect(posts).toHaveLength(1);
+  });
+
+  it("uses the original shared job request time and can observe readiness after polling stops", async () => {
+    const first = await service().request(NIGHT);
+    const job = (await coordinator.freshJob(String(first.request_id)))!;
+    expect(JSON.parse(job.request).requestedAt).toBe(NOW);
+    for (let i = 0; i < 3; i++) await service().status((await coordinator.freshJob(job.request_id))!);
+    await night(); await check(NIGHT); runState = { ...RUN, status: "completed", conclusion: "success" };
+    const later = await service(fetcher, async () => [], NOW + 60_000).status((await coordinator.freshJob(job.request_id))!);
+    expect(later).toMatchObject({ data_ready: true, latency: { request_elapsed_ms: 60000,
+      request_to_ready_observed_ms: 60000 }, sync_status: { data_state: "ready", job_state: "completed" } });
+    expect(posts).toHaveLength(1);
+  });
+
+  it("returns explicit status-access failure without dispatching another job", async () => {
+    const first = await service().request(NIGHT);
+    const denied: typeof fetch = async () => new Response(null, { status: 403 });
+    expect(await service(denied).status((await coordinator.freshJob(String(first.request_id)))!))
+      .toMatchObject({ reason: "status_error", terminal: false, should_continue_polling: false,
+        sync_status: { job_state: "unknown", user_action_required: true, next_action: "fix_configuration" } });
+    expect(posts).toHaveLength(1);
+  });
+
   it("does not mistake another local day's canonical workout for today's upload", async () => {
     await activity("1", "2026-10-04"); await check(REQUEST, 30_000, { status: "expected_activity_missing" });
     const result = await service().request(REQUEST);
@@ -305,6 +349,18 @@ describe("R2-first targeted freshness", () => {
       return Response.json(RUN);
     };
     expect(await service(receiptFetch).request(NIGHT)).toMatchObject({ run: { id: 44 } });
+  });
+
+  it("cannot attach a receipt for another requested scope", async () => {
+    const mismatched: typeof fetch = async (_url, init) => {
+      if (init?.method === "POST") {
+        const id = record(JSON.parse(String(init.body)).inputs).sync_request_id;
+        await put(`refresh/requests/${id}.json`, { run_id: 44, scope: freshScope(REQUEST) });
+        return new Response(null, { status: 204 });
+      }
+      throw new Error("Unexpected lookup of another scope's run");
+    };
+    expect(await service(mismatched).request(NIGHT)).toMatchObject({ run: null, terminal: false });
   });
 
   it("uses IANA local dates and refuses invalid dates or implicit UTC", () => {
