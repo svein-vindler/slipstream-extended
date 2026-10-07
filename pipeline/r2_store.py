@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+from dataclasses import dataclass
 
 from botocore.exceptions import ClientError
 
@@ -25,6 +26,15 @@ def missing_object(error: ClientError) -> bool:
 
 class R2BudgetError(RuntimeError):
     """Raised before a write would exceed a configured free-tier safety limit."""
+
+
+@dataclass
+class _BucketBudget:
+    """Conservative accounting owned by one serial refresh, never persisted."""
+
+    inventory: dict[str, int] | None = None
+    writes: int = 0
+    write_bytes: int = 0
 
 
 def _positive_limit(name: str, default: int) -> int:
@@ -82,13 +92,34 @@ class R2Store:
             "R2_MAX_WRITE_BYTES_PER_RUN",
             DEFAULT_MAX_WRITE_BYTES_PER_RUN,
         )
-        self._initial_inventory: dict[str, int] | None = None
+        self._bucket_budget = _BucketBudget()
         self._writes = 0
         self._write_bytes = 0
         # Successful LIST pages; GET/HEAD/PUT SDK calls, excluding internal retries.
         # Inventory pages used by write guards are included.
         self.operations = {"get": 0, "head": 0, "list_pages": 0, "listed_objects": 0, "put": 0}
         self.timings_ms = {"get": 0.0, "head": 0.0, "list": 0.0, "put": 0.0}
+
+    @property
+    def _initial_inventory(self):
+        return self._bucket_budget.inventory
+
+    def new_stage(self) -> R2Store:
+        """Fresh stage limits/counters, sharing this serial run's bucket budget.
+
+        Only use while other pipeline writers are idle/serialized. A new run
+        must construct a new root store, so it inventories current storage.
+        Overwrites and uncertain failed PUTs remain charged in full.
+        """
+        store = R2Store(
+            client=self.client, bucket=self.bucket,
+            max_bucket_bytes=self.max_bucket_bytes,
+            max_bucket_objects=self.max_bucket_objects,
+            max_writes_per_run=self.max_writes_per_run,
+            max_write_bytes_per_run=self.max_write_bytes_per_run,
+        )
+        store._bucket_budget = self._bucket_budget
+        return store
 
     def _pages(self, **kwargs):
         with timed(self.timings_ms, "list"):
@@ -144,7 +175,7 @@ class R2Store:
 
     def _check_write_budget(self, data: bytes):
         if self._initial_inventory is None:
-            self._initial_inventory = self.inventory()
+            self._bucket_budget.inventory = self.inventory()
             print(
                 "[r2-budget] "
                 f"objects={self._initial_inventory['objects']}/{self.max_bucket_objects} "
@@ -161,11 +192,11 @@ class R2Store:
                 "R2 per-run byte limit would be exceeded "
                 f"({self.max_write_bytes_per_run} bytes)"
             )
-        if self._initial_inventory["objects"] + self._writes + 1 > self.max_bucket_objects:
+        if self._initial_inventory["objects"] + self._bucket_budget.writes + 1 > self.max_bucket_objects:
             raise R2BudgetError(
                 f"R2 object safety limit would be exceeded ({self.max_bucket_objects})"
             )
-        projected_bytes = self._initial_inventory["bytes"] + self._write_bytes + len(data)
+        projected_bytes = self._initial_inventory["bytes"] + self._bucket_budget.write_bytes + len(data)
         if projected_bytes > self.max_bucket_bytes:
             raise R2BudgetError(
                 f"R2 storage safety limit would be exceeded ({self.max_bucket_bytes} bytes)"
@@ -202,6 +233,12 @@ class R2Store:
 
     def put(self, key: str, data: bytes, content_type: str, *, encoding: str | None = None):
         self._check_write_budget(data)
+        # Reserve before transmission: a timeout may follow a committed PUT.
+        # Neither a later stage nor a caught retry can reclaim that capacity.
+        self._writes += 1
+        self._write_bytes += len(data)
+        self._bucket_budget.writes += 1
+        self._bucket_budget.write_bytes += len(data)
         args = {
             "Bucket": self.bucket,
             "Key": key,
@@ -213,5 +250,3 @@ class R2Store:
         self.operations["put"] += 1
         with timed(self.timings_ms, "put"):
             self.client.put_object(**args)
-        self._writes += 1
-        self._write_bytes += len(data)

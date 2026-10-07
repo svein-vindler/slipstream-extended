@@ -174,7 +174,9 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
         nonlocal last_store
         expects_source = name in {"refresh_summaries", "historical_health", "recent_health", "recent_body",
                                   "manual_activity", "latest_activity", "latest_night"} and not request.repair_only
-        # Retain one budget per former workflow step, including guard inventory.
+        # Separate step budgets; one client/inventory and conservative bucket
+        # accounting across this serial run. Custom non-R2 adapters retain
+        # their factory semantics.
         store = None
         before = {}
         calls, errors = provider.calls, provider.errors
@@ -182,7 +184,8 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
         started = time.perf_counter()
         entry = {"stage": name, "status": "complete"}
         try:
-            store = store_factory() if storage else None
+            store = (last_store.new_stage() if isinstance(last_store, R2Store)
+                     else store_factory()) if storage else None
             if store is not None:
                 last_store = store
             before = dict(getattr(store, "operations", {}))

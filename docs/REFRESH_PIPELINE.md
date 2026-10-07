@@ -16,6 +16,21 @@ available; year imports run newest first. Historical work is never inferred from
 a normal chat request.
 
 Each stage keeps a separate R2 write budget, matching the former workflow steps.
+Stages reuse one R2 client and a lazy bucket inventory owned by this run. The
+first required PUT inventories the bucket; subsequent stages carry forward
+all reserved object/byte growth, including overwrites. GET/HEAD/LIST reads and
+unchanged objects do not trigger the inventory. Each new run starts without
+an inventory and checks current storage again; nothing is cached between runs.
+An uncertain failed PUT consumes both its stage allowance and the shared
+bucket allowance, since a lost response may follow a committed write.
+
+All pipeline R2 writers, including the source-free Coach Input reconciler,
+share the workflow's `garmin-sync` concurrency group without cancellation.
+Local execution requires those jobs to be paused and idle. These application
+guards are conservative checks, not a bucket-wide transactional lock: keep
+other bulk uploaders idle while refreshing, as with standalone R2 imports.
+Standalone importer stores retain their own fresh inventory and limits.
+
 The process logs into Garmin once and reuses that client. Source errors stop
 later imports; scheduled derived-index repair still runs after ordinary failure,
 but is skipped after interruption. Failed or partial checks retain the existing
@@ -63,12 +78,32 @@ login, failure/interrupt behavior, historical ordering, diagnostic redaction and
 restored instrumentation. Existing importer and source/R2/MCP contracts remain
 part of CI.
 
+## Reproduce the storage optimization offline
+
+```bash
+python scripts/benchmark_refresh_budget.py --objects 15001
+```
+
+This uses only synthetic in-memory storage. For three writing stages followed
+by read-only index reuse and diagnostic publication, separate inventories need
+64 LIST pages; one shared run needs 16. Both produce identical objects with
+four PUTs and the same upload bytes. The benchmark establishes operation
+savings, not production latency. Regression tests also cover per-stage byte/
+write limits, cumulative bucket limits, overwrite accounting, partial listing
+failure, ambiguous committed writes and fresh inventories on the next run.
+
+The six-hour schedule and successful/negative targeted freshness periods stay
+unchanged. Removing redundant storage scans does not justify extending source
+freshness or reducing the recent-day overlap that catches finalized Garmin data.
+
 ## Latency breakdown
 
 The shared runner now also publishes one sanitized object at
 `refresh/diagnostics/v1/<run_id>.json`. It uses the last existing stage's guarded
-store and remaining write budget: one extra small PUT, no extra inventory,
-unchanged write/object/byte limits and schedules. Failed publication propagates
+store and remaining write budget: one extra small PUT sharing the run's bucket
+accounting, with unchanged write/object/byte limits and schedules. If no earlier
+stage attempted a write, publication performs the run's first inventory;
+otherwise it requires no additional inventory. Failed publication propagates
 when there was no prior failure; it never replaces an existing source failure.
 This object contains UTC start/finish and successful source-check receipt times,
 not Garmin-local activity/sleep dates. Existing targeted reports and receipts
