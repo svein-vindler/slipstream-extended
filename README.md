@@ -56,6 +56,9 @@ AI client ◄── MCP + Managed OAuth ── Cloudflare Access ── Worker
   committed to Git.
 - Chat dispatch, schedules and local refresh share one bounded Python pipeline,
   with per-stage timing and provider/storage call counts for troubleshooting.
+- Refresh stages reuse one R2 client and lazy bucket inventory per run, retaining
+  separate stage write limits and conservative storage accounting across stages.
+  Pipeline writers share one queue; each new run checks current storage again.
 - R2 is the source of truth for summaries, detailed exports and backfill state.
 - The Worker validates Cloudflare Access assertions before reading R2.
 - Its shared storage reader bounds payloads and checks summary revisions before

@@ -18,6 +18,15 @@ def test_all_refresh_modes_use_one_core_with_existing_input_mapping():
     assert "pipeline.refresh_summaries" not in workflow
 
 
+def test_pipeline_r2_writers_share_the_refresh_concurrency_group():
+    for name in ("refresh", "activity-refresh", "activity-backfill", "granular-pilot",
+                 "health-history-index", "scheduled-activity-backfill",
+                 "scheduled-health-detail-backfill", "scheduled-hrv-backfill", "coach-input-backfill"):
+        workflow = (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
+        assert "group: garmin-sync" in workflow
+        assert "cancel-in-progress: false" in workflow
+
+
 def test_upstream_check_is_notification_only_for_independent_history():
     workflow = (ROOT / ".github/workflows/upstream-sync.yml").read_text(encoding="utf-8")
 

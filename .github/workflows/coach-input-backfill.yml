@@ -22,7 +22,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: coach-input-r2
+  # Serialize all pipeline R2 writers, including the shared refresh budget.
+  group: garmin-sync
   cancel-in-progress: false
 
 jobs:
