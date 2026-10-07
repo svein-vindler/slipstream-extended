@@ -111,6 +111,9 @@ Example questions:
 - “Refresh today's Garmin data, wait until it is ready, then summarize it.”
 
 More examples are in [Prompt ideas](docs/PROMPTS.md).
+Start with the [copyable AI workflows](docs/AI_WORKFLOWS.md) for the six common
+tasks and consult the [generated MCP tool catalog](docs/TOOL_CATALOG.md) for
+actual registrations, input limits and conditional permissions.
 For an explicitly requested update, `sync_latest_activity` and
 `sync_latest_night` check canonical R2 data and a recent successful source check
 before starting a targeted import. They report source age, missing components

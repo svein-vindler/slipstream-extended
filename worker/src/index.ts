@@ -615,9 +615,11 @@ export default {
 
     const rateLimit = await env.MCP_RATE_LIMITER.limit({ key: authentication.rateLimitKey });
     if (!rateLimit.success) {
-      return secureResponse(new Response("Too many requests", {
+      const retryAfterSeconds = 60;
+      // Some MCP clients expose the error body to the model but omit headers.
+      return secureResponse(new Response(`Too many requests. Retry after ${retryAfterSeconds} seconds.`, {
         status: 429,
-        headers: { "retry-after": "60" },
+        headers: { "retry-after": String(retryAfterSeconds) },
       }));
     }
 

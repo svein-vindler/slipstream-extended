@@ -1,14 +1,24 @@
 # Example prompts and use cases
 
-Slipstream turns your last few weeks of Garmin activities into something you can
-actually have a conversation with. Below are prompts to copy, grouped by what you
-are trying to do. They work in Claude and ChatGPT.
+Slipstream turns stored Garmin activities and health history into something you
+can actually have a conversation with. Below are prompts to copy, grouped by what you
+are trying to do. Use an MCP client that exposes Slipstream's registered tools;
+tool choice and stopping behavior still need acceptance testing in that client.
+
+Start with [AI workflows](AI_WORKFLOWS.md) for coach setup, a fresh workout/night,
+weekly review, long-term sleep/HRV and standardized morning weight. The
+[authoritative tool catalog](TOOL_CATALOG.md) is generated from actual registrations
+and checked in CI. These prompts work without native MCP prompts and are user
+guidance, not security controls.
 
 **How to phrase it.** Start with something like *"Using Slipstream, ..."* so the
-assistant reaches for your data. It can see activity summaries (sport, distance,
-duration, heart rate, elevation, calories, pace) for roughly the last 30 days. It
-cannot see GPS routes. The best results come from treating it like an analyst:
-ask it to compare, trend, judge, and suggest, not just list.
+assistant reaches for your data. It can read stored activity summaries (sport,
+distance, duration, heart rate, elevation, calories, pace), normalized session
+details, sleep/HRV history and individual weight measurements where available.
+Coverage depends on stored data and indexes; it is not limited to 30 days.
+MCP output does not include GPS routes or raw FIT/TCX downloads. Historical
+analysis does not authorize Garmin sync or R2 writes. The best results come from
+treating it like an analyst: ask it to compare, trend, judge, and suggest, not just list.
 
 > **A note on health.** Heart-rate and calorie numbers are device estimates, and
 > nothing here is medical or dietary advice. Use it to explore and plan, and take
@@ -39,7 +49,8 @@ Copyable setup prompt:
 > Using Slipstream, help me create my running coach profile. Ask me to confirm
 > the effective date, heart-rate zones, LT1/LT2 references and interval BPM
 > thresholds. Do not infer missing values. Show the complete profile for my
-> approval, then save it with `add_coach_profile`.
+> approval. Wait for my explicit confirmation to save the immutable version to
+> private R2 with `add_coach_profile`; if writing is unavailable, keep a draft.
 
 No personal zone values are shipped as defaults. The analysis time basis is
 elapsed time unless a later schema explicitly adds another option.
@@ -47,8 +58,9 @@ elapsed time unless a later schema explicitly adds another option.
 After an activity, user-owned information can be appended without editing the
 Garmin source data:
 
-> Add RPE 3, conditions "sunny and dry", and note "testing the Achilles" to
-> activity garmin-123. Do not infer anything I did not state.
+> Prepare RPE 3, conditions "sunny and dry", and my supplied note for activity
+> garmin-123. Do not infer anything I did not state. Show the context and wait
+> for my confirmation before appending it to private R2.
 
 `coach_input` returns the newest prepared analysis. Garmin's planned workout
 steps and the laps actually performed are separate. If no Garmin workout or
@@ -58,17 +70,24 @@ one main section; it does not guess intervals from pace or heart rate.
 After a new workout, request the targeted import rather than waiting for the
 nightly detailed-file job:
 
-> Using Slipstream, sync today's latest Garmin workout now. Wait for the same job to
-> finish, then confirm that its detailed files and Coach Input are ready for
-> the exact activity ID before analyzing it. If Garmin has not supplied the
-> files yet, tell me what is missing instead of analyzing only the summary.
+> Using Slipstream, fetch today's latest Garmin workout using my Garmin-local
+> date. I authorize the targeted R2-first flow and any necessary recent Garmin
+> sync to private R2. Keep the same activity ID through details and Coach Input.
+> Follow refresh_status with the returned request_id only while
+> should_continue_polling is true, respecting server wait/retry advice. Check
+> sync_status.data_state, source_checked_at and missing_components. If the
+> package is not ready, report what is available and missing, then stop.
 
 This explicitly authorizes `sync_latest_activity` to update private R2. A
 question about an already stored workout does not authorize a Garmin sync.
-The targeted import searches only the most recent week. When you say "today",
+Ready, fresh R2 data needs no new job; existing source can support R2-only derived
+repair. The targeted import searches only the bounded recent window. When you
+say "today",
 the assistant should pass that local date as `expected_date`, preventing an
 older session from being presented as the new one. An exact recent Garmin
 activity ID can also be supplied.
+For the latest night, use `sync_latest_night` with the explicit Garmin-local
+`wake_date`; see [the complete night workflow](AI_WORKFLOWS.md#3-last-night).
 
 These single prompts do a lot, because you are handing the assistant a role and
 your data at once:
@@ -141,6 +160,10 @@ partial, source-pending or blocked state and retry guidance. Do not dispatch
 another job to compensate for polling exhaustion. A later explicit status
 request can reuse the same ID. Report measured wait components when useful;
 call missing measurements unknown rather than zero or an estimated delay.
+Read-only results can lack diagnostics, and older reports can omit timings.
+This is not evidence of failed sync and does not justify a new job. R2 inventory
+and LIST timings overlap and must not be added. Honor 429/Retry-After and do not
+promise automatic later follow-up without an agreed mechanism.
 
 ## Pace, speed, and performance
 
