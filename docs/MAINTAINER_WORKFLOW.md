@@ -185,6 +185,14 @@ any of them. Update the supported set together and validate with `npm ci`,
 Worker typecheck and runtime tests. Do not bypass a peer conflict with
 `--force` or `--legacy-peer-deps`.
 
+For GHSA-6qxp-vccf-f47h, the pinned `agents@0.24.0` has a reviewed, scoped
+security exception: its SDK and client peers use the root's patched pins via
+npm overrides. Agents and the server remain unchanged. This combination is
+locally and CI-tested, not declared supported by upstream Agents. Keep the
+issuer-isolation tests and repeat clean installation, full audit, typecheck
+and runtime tests. See [security testing](SECURITY_TESTING.md) for scope and
+the condition for removing the overrides.
+
 Dependabot groups Agents and MCP candidates together, and groups Wrangler
 with the Cloudflare Vitest plugin. Its ignore rules name only known
 incompatible MCP versions. When an Agents release supports one of those

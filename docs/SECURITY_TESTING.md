@@ -95,6 +95,12 @@ Slipstream serves MCP and does not implement an outbound OAuth client or store
 SDK OAuth-client credentials. Adding such a client requires the advisory's
 issuer-binding/provider migration checks as well as patched packages.
 
+`worker/test/mcp-oauth-security.test.ts` exercises the installed SDK v1 and
+client v2 with synthetic issuer-bound credentials and a fake fetch function.
+Both must reject a changed issuer before preparing or sending a token request,
+while a request to the original issuer still succeeds. This does not validate
+external MCP clients or migrate credentials stored by other applications.
+
 - Review Access logs, Workers errors/traces, R2 operation counts and GitHub
   Actions runs.
 - Confirm Workers preview URLs are covered by the Access application or disabled.
