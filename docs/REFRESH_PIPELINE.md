@@ -98,20 +98,40 @@ freshness or reducing the recent-day overlap that catches finalized Garmin data.
 
 ## Latency breakdown
 
-The shared runner now also publishes one sanitized object at
+The shared runner also publishes one sanitized object at
 `refresh/diagnostics/v1/<run_id>.json`. It uses the last existing stage's guarded
 store and remaining write budget: one extra small PUT sharing the run's bucket
-accounting, with unchanged write/object/byte limits and schedules. If no earlier
-stage attempted a write, publication performs the run's first inventory;
-otherwise it requires no additional inventory. Failed publication propagates
+accounting, with unchanged write/object/byte limits and schedules. An existing
+write must already have established the run's shared guarded inventory; the
+diagnostic publication never initializes an inventory solely for measurements.
+
+If no stage established a write inventory, R2 publication is skipped and
+`diagnostics_persistence_skipped` is true in the local/log report. The local
+report and its sanitized JSON log are retained; completed status checks may
+therefore have unknown pipeline timings. Publication is also skipped after
+interruption. There is at most one extra small PUT, no extra inventory, and
+unchanged write/object/byte limits and schedules. Failed publication propagates
 when there was no prior failure; it never replaces an existing source failure.
 This object contains UTC start/finish and successful source-check receipt times,
 not Garmin-local activity/sleep dates. Existing targeted reports and receipts
 keep their keys and schemas. The final diagnostics PUT itself is outside the
 stored stage counters/timings and pipeline duration.
 
+One compact `refresh-diagnostics-publication` JSON event per cloud run records
+publication status/reason, elapsed milliseconds and the publication's SDK
+operation deltas. This includes skipped or failed publication without exception
+text or object keys. It should show zero LIST pages and at most one PUT. These
+final timings are available in the run log, not in the object whose own upload
+they measure; updating that object again would require a second PUT. Compare
+pipeline duration and publication overhead separately.
+
 `pipeline_diagnostics` exposes validated stages, source outcomes and operation
-counts on completed-run responses. `latency` distinguishes:
+counts on completed-run responses. Optional stage fields `r2_get_ms`,
+`r2_head_ms`, and `r2_list_ms` split the existing `r2_read_ms`. `r2_inventory_ms`
+measures full-bucket inventory, including LIST waits and metadata processing;
+it overlaps LIST and must not be added to read time. Prefix LISTs are excluded
+from inventory time. Older reports may omit these new fields, meaning unknown.
+The existing top-level latency fields remain compatible. `latency` distinguishes:
 
 | Measurement | Boundary and limits |
 | --- | --- |

@@ -13,6 +13,18 @@ const PIPELINE = pipelineDiagnosticsSchema.parse({ schema_version: 1, kind: "ref
     garmin_connectapi_calls: 2, garmin_connectapi_errors: 0, r2_sdk_operations: { get: 1, put: 2 } }] });
 
 describe("separate workflow, source and data status", () => {
+  it("accepts old timing reports and preserves validated optional R2 breakdowns", () => {
+    const stage = PIPELINE.stages[0];
+    expect(stage.r2_inventory_ms).toBeUndefined();
+    const parsed = pipelineDiagnosticsSchema.parse({ ...PIPELINE, stages: [{ ...stage,
+      r2_get_ms: 10, r2_head_ms: 20, r2_list_ms: 120, r2_inventory_ms: 100 }] });
+    expect(parsed.stages[0]).toMatchObject({ r2_get_ms: 10, r2_head_ms: 20,
+      r2_list_ms: 120, r2_inventory_ms: 100 });
+    for (const value of [-1, Infinity, "100"]) {
+      expect(pipelineDiagnosticsSchema.safeParse({ ...PIPELINE,
+        stages: [{ ...stage, r2_inventory_ms: value }] }).success).toBe(false);
+    }
+  });
   it("reports a successful negative Garmin check independently of job success", () => {
     expect(syncStatus({ kind: "night", run: RUN, pipeline: PIPELINE })).toMatchObject({
       job_state: "completed", source_checked: true, source_checked_at: "2026-10-05T12:01:55Z",

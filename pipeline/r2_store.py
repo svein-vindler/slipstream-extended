@@ -98,7 +98,12 @@ class R2Store:
         # Successful LIST pages; GET/HEAD/PUT SDK calls, excluding internal retries.
         # Inventory pages used by write guards are included.
         self.operations = {"get": 0, "head": 0, "list_pages": 0, "listed_objects": 0, "put": 0}
-        self.timings_ms = {"get": 0.0, "head": 0.0, "list": 0.0, "put": 0.0}
+        self.timings_ms = {"get": 0.0, "head": 0.0, "list": 0.0, "put": 0.0, "inventory": 0.0}
+
+    @property
+    def write_budget_initialized(self) -> bool:
+        """Whether an existing write established the run's guarded inventory."""
+        return self._initial_inventory is not None
 
     @property
     def _initial_inventory(self):
@@ -136,12 +141,14 @@ class R2Store:
     def inventory(self) -> dict[str, int]:
         objects = 0
         total_bytes = 0
-        for page in self._pages():
-            self.operations["list_pages"] += 1
-            self.operations["listed_objects"] += len(page.get("Contents", []))
-            for item in page.get("Contents", []):
-                objects += 1
-                total_bytes += int(item.get("Size", 0))
+        # Full inventory overlaps LIST timing and includes metadata processing.
+        with timed(self.timings_ms, "inventory"):
+            for page in self._pages():
+                self.operations["list_pages"] += 1
+                self.operations["listed_objects"] += len(page.get("Contents", []))
+                for item in page.get("Contents", []):
+                    objects += 1
+                    total_bytes += int(item.get("Size", 0))
         return {"objects": objects, "bytes": total_bytes}
 
     def list_keys(self, prefix: str = "") -> set[str]:

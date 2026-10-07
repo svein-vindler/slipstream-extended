@@ -81,6 +81,14 @@ Report reads are bounded to 64 KiB each. Completion adds one direct diagnostics
 GET, plus the existing bounded canonical package reads when the report identifies
 a target. No bucket inventory is added to status requests.
 
+New pipeline stage diagnostics split R2 GET, HEAD, LIST and full inventory time;
+old reports can omit these optional fields. Inventory overlaps LIST and should
+not be added to total read time. Diagnostic publication uses the most recent
+already initialized write budget, avoiding a new inventory after a read-only
+final stage. If no stage initialized one, the diagnostic object may be absent
+and pipeline timings remain unknown. Publication overhead is measured once in
+the private run log. See [measurement boundaries](REFRESH_PIPELINE.md#latency-breakdown).
+
 An activity package includes canonical local start time, summary, detailed
 analysis, running Coach Input and the newest explicitly supplied context for
 the same ID. It verifies required files and the Coach Input's source revisions,
