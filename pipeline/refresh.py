@@ -129,6 +129,35 @@ class MeasuredGarmin:
         return self.client
 
 
+def _publish_diagnostics(report, *, store, run_id, original_failure):
+    """One guarded PUT, with its own sanitized log-only measurement."""
+    if run_id == "0":
+        return
+    started = time.perf_counter()
+    before = dict(getattr(store, "operations", {}))
+    publication = {"schema_version": 1, "kind": "refresh-diagnostics-publication", "status": "skipped"}
+    try:
+        if isinstance(original_failure, (KeyboardInterrupt, SystemExit)):
+            publication["reason"] = "interrupted"
+        elif store is None:
+            publication["reason"] = "no_write_inventory"
+            report["diagnostics_persistence_skipped"] = True
+        else:
+            store.put(f"refresh/diagnostics/v1/{run_id}.json", json_bytes(report), "application/json")
+            publication["status"] = "stored"
+    except Exception:
+        publication["status"] = "failed"
+        report["diagnostics_persistence_failed"] = True
+        if original_failure is None:
+            raise
+    finally:
+        publication.update(elapsed_ms=round((time.perf_counter() - started) * 1000),
+            r2_sdk_operations={key: value - before.get(key, 0)
+                               for key, value in getattr(store, "operations", {}).items()})
+        # Its own PUT cannot time itself in the stored object without another PUT.
+        print(json.dumps(publication))
+
+
 def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
         login=_login, diagnostics_file: Path | None = None) -> dict:
     request.validate()  # Reject incompatible inputs before login or storage access.
@@ -140,7 +169,7 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
               "correlation_id": str(uuid.uuid4()), "mode": request.mode,
               "scheduled": request.scheduled, "status": "complete", "stages": [],
               "started_at": datetime.now(timezone.utc).isoformat(), "source_checks": []}
-    last_store = None
+    last_store = publication_store = None
 
     def source_checks(result):
         if not isinstance(result, dict):
@@ -171,7 +200,7 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
                 "failed" if not checked else "not_ready" if result["days_not_ready"] else "checked")
 
     def stage(name, operation, *, storage=True):
-        nonlocal last_store
+        nonlocal last_store, publication_store
         expects_source = name in {"refresh_summaries", "historical_health", "recent_health", "recent_body",
                                   "manual_activity", "latest_activity", "latest_night"} and not request.repair_only
         # Separate step budgets; one client/inventory and conservative bucket
@@ -205,6 +234,10 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
                     "checked": False, "checked_at": None, "outcome": "failed"})
             raise
         finally:
+            # Stages share guarded inventory, retaining their own allowances.
+            # Use the last established budget without starting a new inventory.
+            if getattr(store, "write_budget_initialized", False):
+                publication_store = store
             entry.update(elapsed_ms=round((time.perf_counter() - started) * 1000),
                          garmin_connectapi_calls=provider.calls - calls if provider.available or not expects_source else None,
                          garmin_connectapi_errors=provider.errors - errors if provider.available or not expects_source else None,
@@ -212,6 +245,9 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
                          r2_read_ms=round(sum(getattr(store, "timings_ms", {}).get(k, 0) for k in ("get", "head", "list")))
                              if hasattr(store, "timings_ms") else None if storage else 0,
                          r2_write_ms=round(store.timings_ms["put"]) if hasattr(store, "timings_ms") else None if storage else 0,
+                         **{f"r2_{key}_ms": round(store.timings_ms[key]) if hasattr(store, "timings_ms")
+                            and key in store.timings_ms else None if storage else 0
+                            for key in ("get", "head", "list", "inventory")},
                          activity_file_import_ms=getattr(store, "component_timings_ms", {}).get("activity_file_import"),
                          coach_input_ms=getattr(store, "component_timings_ms", {}).get("coach_input"),
                          r2_sdk_operations={key: value - before.get(key, 0)
@@ -271,16 +307,9 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
                           garmin_connectapi_available=provider.available,
                           login_ms=round(provider.login_ms) if provider.login_ms is not None else None,
                           finished_at=datetime.now(timezone.utc).isoformat())
-            # One small guarded PUT on the last existing stage's budget. No new
-            # store/inventory, and no source payload or private request inputs.
-            if request.run_id != "0" and last_store is not None:
-                original_failure = sys.exception()
-                try:
-                    last_store.put(f"refresh/diagnostics/v1/{request.run_id}.json", json_bytes(report), "application/json")
-                except Exception:
-                    report["diagnostics_persistence_failed"] = True
-                    if original_failure is None:
-                        raise
+            # Never initialize an inventory solely to publish measurements.
+            _publish_diagnostics(report, store=publication_store, run_id=request.run_id,
+                                 original_failure=sys.exception())
             if diagnostics_file:
                 diagnostics_file.parent.mkdir(parents=True, exist_ok=True)
                 temporary = diagnostics_file.with_suffix(".tmp")

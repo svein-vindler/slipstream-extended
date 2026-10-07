@@ -64,8 +64,32 @@ def test_storage_times_get_body_list_and_put_without_extra_calls(monkeypatch):
     assert store.get("synthetic-key") == b"synthetic"
     store.put("synthetic-key", b"synthetic", "application/json")
     assert calls == ["get", "list", "put"]
-    assert store.timings_ms == pytest.approx({"get": 200, "head": 0, "list": 40, "put": 50})
+    assert store.timings_ms == pytest.approx({"get": 200, "head": 0, "list": 40, "put": 50, "inventory": 40})
     assert store.operations["list_pages"] == store.operations["put"] == 1
+
+
+def test_full_inventory_timing_excludes_prefix_reads_and_includes_failed_scan(monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr("pipeline.measurements.time.perf_counter", lambda: clock.now)
+    client = SimpleNamespace(fail=False)
+    def paginate(**kwargs):
+        clock.now += 0.04
+        if client.fail:
+            raise RuntimeError("synthetic-list-failure")
+        yield {"Contents": []}
+    client.get_paginator = lambda name: SimpleNamespace(paginate=paginate)
+    store = R2Store(client=client, bucket="synthetic")
+    store.list_keys("synthetic-prefix/")
+    assert store.timings_ms["inventory"] == 0
+    assert not store.write_budget_initialized
+    client.fail = True
+    with pytest.raises(RuntimeError, match="synthetic-list-failure"):
+        store.put("synthetic-key", b"{}", "application/json")
+    assert not store.write_budget_initialized
+    assert store.operations["list_pages"] == 1
+    assert store.operations["put"] == 0
+    assert store.timings_ms["inventory"] == pytest.approx(40)
+    assert store.timings_ms["list"] == pytest.approx(80)
 
 
 def test_component_timing_includes_failures_and_does_not_record_arguments(monkeypatch):

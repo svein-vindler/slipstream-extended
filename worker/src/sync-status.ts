@@ -23,6 +23,8 @@ export const pipelineDiagnosticsSchema = z.object({
     .refine(check => check.checked !== true || check.checked_at !== null)).max(10),
   stages: z.array(z.object({ stage: z.string().max(40), status: z.string().max(40), elapsed_ms: duration,
     garmin_fetch_ms: duration, r2_read_ms: duration, r2_write_ms: duration,
+    r2_get_ms: duration.optional(), r2_head_ms: duration.optional(),
+    r2_list_ms: duration.optional(), r2_inventory_ms: duration.optional(),
     activity_file_import_ms: duration, coach_input_ms: duration,
     garmin_connectapi_calls: duration, garmin_connectapi_errors: duration,
     r2_sdk_operations: z.record(z.string(), z.number().finite().nonnegative()),
