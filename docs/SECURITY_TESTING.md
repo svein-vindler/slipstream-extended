@@ -84,6 +84,17 @@ warm Worker isolate must observe the new R2 ETag.
 
 ## Operational review
 
+The Worker pins MCP SDK 1.31.0 and the test client 2.2.0 for
+[GHSA-6qxp-vccf-f47h](https://github.com/modelcontextprotocol/typescript-sdk/security/advisories/GHSA-6qxp-vccf-f47h).
+`agents@0.24.0` still declares exact older MCP peer versions. A scoped npm
+override points those two peers to the root's patched pins; it does not upgrade
+Agents or the MCP server. Validate with a clean `npm ci`, `npm audit`, typecheck,
+unit tests, Workers-runtime tests and the private authenticated canary. Remove
+the override when a tested Agents release supports the patched peers directly.
+Slipstream serves MCP and does not implement an outbound OAuth client or store
+SDK OAuth-client credentials. Adding such a client requires the advisory's
+issuer-binding/provider migration checks as well as patched packages.
+
 - Review Access logs, Workers errors/traces, R2 operation counts and GitHub
   Actions runs.
 - Confirm Workers preview URLs are covered by the Access application or disabled.
