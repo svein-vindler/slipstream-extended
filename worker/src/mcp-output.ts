@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { trainingContextSchema } from "./training-context";
 import { refreshReportSchema } from "./refresh-report";
 import { latestActivityReportSchema } from "./latest-activity-report";
 import { freshResultSchema, freshnessSchema, requestIdSchema } from "./fresh-data";
@@ -428,6 +429,7 @@ export const outputSchemas = {
     activity: activitySummary.optional(),
     message: z.string().optional(),
     session: openObject.optional(),
+    training_context: trainingContextSchema.optional(),
   }),
   endurance_session: z.object({
     available: z.boolean(),
@@ -435,6 +437,7 @@ export const outputSchemas = {
     activity: activitySummary.optional(),
     message: z.string().optional(),
     session: openObject.optional(),
+    training_context: trainingContextSchema.optional(),
   }),
   coach_profile: z.object({
     available: z.boolean(),
