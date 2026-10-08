@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { latency, latestNightReportSchema, pipelineDiagnosticsSchema, syncStatus } from "../src/sync-status";
+import { latency, latestNightReportSchema, pipelineDiagnosticsSchema, syncStatus, syncStatusSchema } from "../src/sync-status";
 
 const RUN = { id: 1, status: "completed", conclusion: "success", event: "workflow_dispatch",
   created_at: "2026-10-05T12:00:00Z", run_started_at: "2026-10-05T12:00:20Z",
@@ -39,6 +39,39 @@ describe("separate workflow, source and data status", () => {
   it("keeps polling exhaustion separate from a running job", () => {
     expect(syncStatus({ kind: "activity", run: { ...RUN, status: "in_progress", conclusion: null }, polling: false }))
       .toMatchObject({ job_state: "running", polling_state: "stopped", next_action: "check_later" });
+  });
+  it("does not attribute a stored receipt to the current job", () => {
+    const snapshot = { status: "source_stale", complete: true, source_fresh: false,
+      source_checked_at: "2026-10-05T11:00:00Z", missing_components: [], package: {} };
+    expect(syncStatus({ kind: "night", run: RUN, snapshot })).toMatchObject({
+      job_start_confirmed: true, source_checked: true, current_job_source_checked: null,
+      current_job_source_checked_at: null, stored_source_checked_at: snapshot.source_checked_at,
+      complete: true, fresh: false, data_state: "stale" });
+    expect(syncStatus({ kind: "night", run: RUN, snapshot, sourceChecked: true,
+      sourceCheckedAt: "2026-10-05T12:01:55Z" })).toMatchObject({ current_job_source_checked: true,
+      current_job_source_checked_at: "2026-10-05T12:01:55Z", source_checked_at: "2026-10-05T12:01:55Z",
+      stored_source_checked_at: snapshot.source_checked_at });
+    expect(syncStatus({ kind: "night", run: RUN, snapshot, sourceChecked: false })).toMatchObject({
+      source_checked: false, source_checked_at: null, current_job_source_checked: false,
+      current_job_source_checked_at: null, stored_source_checked_at: snapshot.source_checked_at });
+  });
+  it("accepts legacy status without the new optional confirmation fields", () => {
+    expect(syncStatusSchema.safeParse({ kind: "night", job_state: "completed", job_conclusion: "success",
+      source_checked: true, source_checked_at: "2026-10-05T12:00:00Z", data_state: "stale",
+      complete: true, fresh: false, missing_components: [], user_action_required: false,
+      polling_state: "complete", next_action: "retry_later" }).success).toBe(true);
+  });
+  it("leaves source-free diagnostics unknown and does not infer a new check from repair success", () => {
+    expect(syncStatus({ kind: "activity", run: RUN, pipeline: { ...PIPELINE, mode: "activity",
+      source_checks: [{ scope: "activity", checked: null, checked_at: null, outcome: "not_checked" }] } }))
+      .toMatchObject({ current_job_source_checked: null, current_job_source_checked_at: null });
+  });
+  it("distinguishes an unconfirmed start from unavailable job status", () => {
+    expect(syncStatus({ kind: "night", accepted: true, reason: "dispatch_unconfirmed" }))
+      .toMatchObject({ job_state: "accepted", job_start_confirmed: false });
+    expect(syncStatus({ kind: "night", reason: "status_error" }))
+      .toMatchObject({ job_state: "unknown", job_start_confirmed: null });
+    expect(syncStatus({ kind: "night" })).toMatchObject({ job_start_confirmed: null });
   });
   it("distinguishes queued, accepted and failed jobs", () => {
     expect(syncStatus({ kind: "night", accepted: true })).toMatchObject({ job_state: "accepted" });

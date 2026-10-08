@@ -36,13 +36,13 @@ async function night(includeHrv = true) {
   if (includeHrv) await put(`health/hrv/2026/10/${DAY}.json`, { schema_version: 1, date: DAY,
     summary: { lastNightAvg: 51 }, readings: [{ timestamp: "2026-10-05T01:00:00Z", hrv_ms: 51 }] });
 }
-async function status() {
+async function status(args: { run_id?: number; request_id?: string } = { run_id: 55 }) {
   const ctx = createExecutionContext();
   const response = await worker.fetch(new Request(`https://${hostname}/mcp`, { method: "POST",
     headers: { host: hostname, "content-type": "application/json", accept: "application/json, text/event-stream",
       "cf-access-jwt-assertion": token, "mcp-protocol-version": "2025-03-26" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call",
-      params: { name: "refresh_status", arguments: { run_id: 55 } } }),
+      params: { name: "refresh_status", arguments: args } }),
   }), testEnv, ctx);
   const body = await response.text(); await waitOnExecutionContext(ctx);
   expect(response.status, body).toBe(200);
@@ -95,6 +95,33 @@ it("does not trust a failed current source check over older preserved canonical 
   await report(false); await night();
   expect(await status()).toMatchObject({ sync_status: { kind: "night", source_checked: false,
     data_state: "stale", fresh: false, complete: true } });
+});
+
+it.each([false, true])("reports expired source confirmation through request-ID status=%s", async useRequestId => {
+  await report(); await night();
+  const checkedAt = new Date(Date.now() - 6 * 60_000).toISOString();
+  await put("refresh/reports/55.json", { schema_version: 1, kind: "latest-night", wake_date: DAY,
+    scope: `night/${DAY}`, checked_at: checkedAt, source_checked: true,
+    status: "stored", sleep_status: "stored", hrv_status: "stored" });
+  await put(`refresh/checks/v1/night/${DAY}.json`, { scope: `night/${DAY}`,
+    checked_at: checkedAt, source_checked: true, status: "stored" });
+  let args: { run_id?: number; request_id?: string } = { run_id: RUN.id };
+  if (useRequestId) {
+    const coordinator = testEnv.REFRESH_COORDINATOR.getByName("global");
+    const { job } = await coordinator.beginFresh(`night/${DAY}`, "night",
+      JSON.stringify({ kind: "night", date: DAY }), Date.now() - 10 * 60_000);
+    await put(`refresh/requests/${job!.request_id}.json`, { run_id: RUN.id, scope: `night/${DAY}` });
+    args = { request_id: job!.request_id };
+  }
+  const result = await status(args);
+  expect(result).toMatchObject({ terminal: true, data_ready: !useRequestId,
+    freshness: { source_fresh: false, complete: true, source_freshness_reason: "ttl_expired" },
+    sync_status: { source_checked: true, source_checked_at: checkedAt, current_job_source_checked: true,
+      current_job_source_checked_at: checkedAt, stored_source_checked_at: checkedAt,
+      complete: true, fresh: false, data_state: "stale" } });
+  expect(result.message).toContain(checkedAt);
+  expect(result.message).toContain("five-minute freshness window has expired");
+  expect(githubCalls).toBe(1);
 });
 it("reports missing or invalid per-run reports as unknown without activity-specific advice", async () => {
   await put("refresh/reports/55.json", { kind: "latest-night", wake_date: "../../bad" });

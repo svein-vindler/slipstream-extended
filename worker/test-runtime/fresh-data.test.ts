@@ -265,6 +265,20 @@ describe("R2-first targeted freshness", () => {
     expect(posts).toHaveLength(0);
   });
 
+  it.each([300_000, 300_001])("retains the five-minute boundary at %s ms", async age => {
+    await night(); await check(NIGHT, age);
+    const snapshot = await service().snapshot(NIGHT);
+    expect(snapshot).toMatchObject({ complete: true, source_fresh: age === 300_000,
+      source_freshness_reason: age === 300_000 ? "within_ttl" : "ttl_expired" });
+    expect(posts).toHaveLength(0); expect(gets).toBe(0);
+  });
+
+  it("does not treat a future-dated stored check as expired or fresh", async () => {
+    await night(); await check(NIGHT, -60_000);
+    expect(await service().snapshot(NIGHT)).toMatchObject({ complete: true,
+      source_fresh: false, source_freshness_reason: "invalid_check_time" });
+  });
+
   it("keeps partial sleep and missing detailed HRV explicit", async () => {
     await night();
     await put(`health/hrv/2026/10/${DAY}.json`, { date: DAY, summary: { lastNightAvg: 51 }, readings: [] });
@@ -315,6 +329,65 @@ describe("R2-first targeted freshness", () => {
     expect(posts).toHaveLength(0); expect(gets).toBe(0);
   });
 
+  it.each([NIGHT, REQUEST])("recovers an uncertain $kind dispatch and reports an expired confirmed check", async request => {
+    let dispatches = 0;
+    const uncertain: typeof fetch = async () => { dispatches++; throw new Error("synthetic response lost"); };
+    const first = await service(uncertain).request(request);
+    expect(first).toMatchObject({ reason: "dispatch_unconfirmed", terminal: false,
+      sync_status: { job_start_confirmed: false, current_job_source_checked: null } });
+    const id = String(first.request_id);
+    expect(await service().request(request)).toMatchObject({ request_id: id, run: null,
+      reason: "dispatch_unconfirmed", should_continue_polling: false });
+    for (let i = 0; i < 2; i++) await service().request(request);
+    // The receipt arrives later, after the same reservation has been reused.
+    await put(`refresh/requests/${id}.json`, { scope: freshScope(request), run_id: RUN.id });
+    if (request.kind === "night") await night(); else await activity();
+    await check(request, -60_000);
+    const checkedAt = new Date(NOW + 60_000).toISOString();
+    await put(`refresh/reports/${RUN.id}.json`, request.kind === "night"
+      ? { schema_version: 1, kind: "latest-night", wake_date: DAY, scope: freshScope(request),
+        checked_at: checkedAt, source_checked: true, status: "stored", sleep_status: "stored", hrv_status: "stored" }
+      : { schema_version: 1, kind: "latest-activity", scope: freshScope(request), checked_at: checkedAt,
+        source_checked: true, status: "ready", activity_id: "garmin-1", activity_date: DAY,
+        activity_started_at_utc: `${DAY}T08:00:00Z`, activity_started_at_garmin_local: `${DAY}T10:00:00`,
+        expected_date: DAY, already_in_slipstream: true, activity_name: "Synthetic run",
+        summary_updated: false, files_ready: true, file_status: "existing", coach_status: "ready" });
+    runState = { ...RUN, status: "completed", conclusion: "success" };
+    const recovered = await service(fetcher, async () => [], NOW + 10 * 60_000)
+      .status((await coordinator.freshJob(id))!);
+    expect(freshResultSchema.safeParse(recovered).success).toBe(true);
+    expect(recovered).toMatchObject({ request_id: id, run: { id: RUN.id }, terminal: true,
+      data_ready: false, should_continue_polling: false,
+      freshness: { complete: true, source_fresh: false, source_checked_at: checkedAt,
+        source_age_seconds: 540, source_freshness_reason: "ttl_expired", missing_components: [] },
+      sync_status: { job_state: "completed", job_start_confirmed: true, source_checked: true,
+        current_job_source_checked: true, current_job_source_checked_at: checkedAt,
+        stored_source_checked_at: checkedAt, complete: true, fresh: false, data_state: "stale" } });
+    expect(String(recovered.message)).toContain(checkedAt);
+    expect(String(recovered.message)).toContain("five-minute freshness window has expired");
+    expect(String(recovered.message)).not.toContain("job success alone");
+    expect(await coordinator.freshJob(id)).toMatchObject({ run_id: RUN.id, state: "completed", polls: 3 });
+    expect(dispatches).toBe(1); expect(posts).toHaveLength(0); expect(gets).toBe(1);
+  });
+
+  it.each([undefined, false])("keeps a stored check separate from current-job evidence %s", async sourceChecked => {
+    const first = await service().request(NIGHT);
+    await night(); await check(NIGHT);
+    const older = new Date(NOW - 30_000).toISOString();
+    if (sourceChecked !== undefined) await put(`refresh/reports/${RUN.id}.json`, {
+      schema_version: 1, kind: "latest-night", wake_date: DAY, scope: freshScope(NIGHT),
+      checked_at: new Date(NOW).toISOString(), source_checked: false, status: "pending",
+      sleep_status: "stored", hrv_status: "import_error" });
+    runState = { ...RUN, status: "completed", conclusion: "success" };
+    const result = await service().status((await coordinator.freshJob(String(first.request_id)))!);
+    expect(result).toMatchObject({ sync_status: { current_job_source_checked: sourceChecked ?? null,
+      current_job_source_checked_at: null, stored_source_checked_at: older },
+      freshness: { source_checked_at: older, source_fresh: sourceChecked !== false,
+        source_freshness_reason: sourceChecked === false ? "current_check_failed" : "within_ttl" } });
+    expect(String(result.message)).toContain(older);
+    expect(posts).toHaveLength(1);
+  });
+
   it("ends a rejected dispatch without permanently blocking later attempts", async () => {
     const rejected: typeof fetch = async () => new Response(null, { status: 422 });
     const result = await service(rejected).request(NIGHT);
@@ -335,7 +408,11 @@ describe("R2-first targeted freshness", () => {
     expect(result).toMatchObject({ accepted: true, terminal: false, reason: "dispatch_unconfirmed" });
     expect(await coordinator.activeFreshJob(freshScope(NIGHT), NOW))
       .toMatchObject({ state: "active", request_id: result.request_id });
-    expect(await service().request(NIGHT)).toMatchObject({ request_id: result.request_id });
+    expect(await service().request(NIGHT)).toMatchObject({ request_id: result.request_id,
+      reason: "dispatch_unconfirmed", sync_status: { job_start_confirmed: false } });
+    await put(`refresh/requests/${result.request_id}.json`, { run_id: RUN.id, scope: freshScope(NIGHT) });
+    expect(await service().status((await coordinator.freshJob(String(result.request_id)))!))
+      .toMatchObject({ run: { id: RUN.id }, sync_status: { job_start_confirmed: true } });
     expect(posts).toHaveLength(0);
   });
 
@@ -361,6 +438,25 @@ describe("R2-first targeted freshness", () => {
       throw new Error("Unexpected lookup of another scope's run");
     };
     expect(await service(mismatched).request(NIGHT)).toMatchObject({ run: null, terminal: false });
+  });
+
+  it("cannot attach a receipt for another UUID even when its scope matches", async () => {
+    const first = await service(async () => new Response(null, { status: 204 })).request(NIGHT);
+    await put(`refresh/requests/${crypto.randomUUID()}.json`, { run_id: RUN.id, scope: freshScope(NIGHT) });
+    expect(await service().status((await coordinator.freshJob(String(first.request_id)))!))
+      .toMatchObject({ run: null, reason: "dispatch_unconfirmed" });
+    expect(gets).toBe(0); expect(posts).toHaveLength(0);
+  });
+
+  it("rejects receipt lookup from a different workflow without another dispatch", async () => {
+    const first = await service(async () => new Response(null, { status: 204 })).request(NIGHT);
+    await put(`refresh/requests/${first.request_id}.json`, { run_id: RUN.id, scope: freshScope(NIGHT) });
+    runState = { ...RUN, path: ".github/workflows/unrelated.yml" };
+    const result = await service().status((await coordinator.freshJob(String(first.request_id)))!);
+    expect(result).not.toHaveProperty("run");
+    expect(result).toMatchObject({ reason: "status_error",
+        sync_status: { job_start_confirmed: null, current_job_source_checked: null } });
+    expect(gets).toBe(1); expect(posts).toHaveLength(0);
   });
 
   it("uses IANA local dates and refuses invalid dates or implicit UTC", () => {

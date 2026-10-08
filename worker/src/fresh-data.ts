@@ -7,7 +7,7 @@ import { dispatchLatestActivity, dispatchLatestNight, getRefreshRun,
   GitHubRequestError, pollRefreshRun, RefreshConfig, RefreshRun } from "./github";
 import type { FreshJob } from "./refresh-coordinator";
 import { latency, latencySchema, pipelineDiagnosticsSchema, syncStatus, syncStatusSchema,
-  latestNightReportSchema, activityRepairReportSchema, type PipelineDiagnostics } from "./sync-status";
+  latestNightReportSchema, activityRepairReportSchema, type PipelineDiagnostics, type SyncStatus } from "./sync-status";
 import { latestActivityReportSchema } from "./latest-activity-report";
 
 const CHECK_TTL_MS = 5 * 60_000;
@@ -19,6 +19,8 @@ export const freshnessSchema = z.object({
   scope: z.string(), status: z.string(), complete: z.boolean(),
   source_checked_at: z.string().nullable(), source_age_seconds: z.number().nullable(),
   source_fresh: z.boolean(), missing_components: z.array(z.string()),
+  source_freshness_reason: z.enum(["within_ttl", "ttl_expired", "no_confirmed_check",
+    "invalid_check_time", "current_check_failed"]).optional(),
   source_outcome: z.enum(["checked", "not_ready", "unknown"]).optional(),
   package: z.record(z.string(), z.unknown()),
 });
@@ -98,6 +100,30 @@ function usableProfile(profile: Json): boolean {
 
 type Snapshot = z.infer<typeof freshnessSchema>;
 type Fetcher = typeof fetch;
+
+function packageStatusMessage(kind: "activity" | "night", snapshot: Snapshot, status: SyncStatus): string {
+  const name = kind === "night" ? "sleep and HRV" : "activity";
+  const source = status.current_job_source_checked === true
+    ? `This job confirmed a successful Garmin check${status.current_job_source_checked_at ? ` at ${status.current_job_source_checked_at}` : ""}.`
+    : status.current_job_source_checked === false ? "This job did not perform or confirm a successful Garmin check."
+      : "A successful Garmin check for this job is unconfirmed.";
+  const stored = snapshot.source_checked_at
+    ? `Last confirmed stored source check: ${snapshot.source_checked_at}.`
+    : "There is no confirmed stored source check for this scope.";
+  const freshness = snapshot.source_freshness_reason === "ttl_expired"
+    ? "The five-minute freshness window has expired."
+    : snapshot.source_freshness_reason === "current_check_failed"
+      ? "This job's source retrieval is unconfirmed; stored history is preserved."
+      : snapshot.source_freshness_reason === "invalid_check_time"
+        ? "The stored check time cannot establish current freshness."
+        : snapshot.source_fresh ? "The stored source check is within the five-minute freshness window."
+          : "Source freshness is unconfirmed.";
+  const data = snapshot.complete ? `The stored ${name} package is complete.`
+    : `The requested ${name} package is ${status.data_state}. Missing: ${snapshot.missing_components.join(", ") || "canonical package verification"}.`;
+  return `${data} ${source} ${stored} ${freshness}`
+    + (snapshot.source_outcome === "not_ready" ? " The stored successful Garmin check found the requested data unavailable." : "");
+}
+
 export class FreshDataService {
   private startedAt = performance.now();
   private diagnostics = { canonical_json_gets: 0, canonical_lists: 0,
@@ -163,7 +189,9 @@ export class FreshDataService {
     const sourceFresh = Number.isFinite(age) && age >= 0 && age <= CHECK_TTL_MS;
     const result: Snapshot = { scope, status: "missing", complete: false,
       source_checked_at: checkedAt, source_age_seconds: Number.isFinite(age) ? Math.floor(age / 1000) : null,
-      source_fresh: sourceFresh, missing_components: [], package: {} };
+      source_fresh: sourceFresh, source_freshness_reason: sourceFresh ? "within_ttl" : !checkedAt
+        ? "no_confirmed_check" : age < 0 ? "invalid_check_time" : "ttl_expired",
+      missing_components: [], package: {} };
     result.source_outcome = checkedAt ? check.status === "pending" ||
       ["no_recent_activity", "no_new_activity", "expected_activity_missing", "files_unavailable"].includes(String(check.status))
       ? "not_ready" : "checked" : "unknown";
@@ -367,20 +395,21 @@ export class FreshDataService {
   }
 
   async completedDetails(run: RefreshRun, request: FreshRequest,
-    pipeline?: PipelineDiagnostics | null, sourceChecked?: boolean) {
+    pipeline?: PipelineDiagnostics | null, sourceChecked?: boolean, sourceCheckedAt?: string) {
     const snapshot = await this.snapshot(request);
     // A failed current source check cannot attest to the latest version even
     // when an older successful receipt and good canonical history remain.
     if (sourceChecked === false) {
       snapshot.source_fresh = false;
+      snapshot.source_freshness_reason = "current_check_failed";
       if (snapshot.complete) snapshot.status = "source_stale";
     }
-    const status = syncStatus({ kind: request.kind, run, snapshot, pipeline, sourceChecked });
+    const status = syncStatus({ kind: request.kind, run, snapshot, pipeline, sourceChecked, sourceCheckedAt });
     const message = status.data_state === "ready" ? `The requested ${request.kind === "night" ? "sleep and HRV" : "activity"} package is complete and fresh.`
       : status.user_action_required ? `The requested package needs user action (${snapshot.package.coach_status ?? snapshot.status}).`
-        : status.source_checked === false ? `The job ended, but its Garmin check did not verify the requested package. Stored history is preserved. Missing: ${snapshot.missing_components.join(", ") || "a successful current source check"}.`
-          : `The job ended; the requested ${request.kind === "night" ? "sleep and HRV" : "activity"} package is ${status.data_state}. Missing: ${snapshot.missing_components.join(", ") || "a recent successful Garmin check"}.`;
-    return { message, activity_ready: request.kind === "activity" ? status.data_state === "ready" : null,
+        : "The job ended.";
+    const detail = packageStatusMessage(request.kind, snapshot, status);
+    return { message: `${message} ${detail}`, activity_ready: request.kind === "activity" ? status.data_state === "ready" : null,
       freshness: snapshot, sync_status: status, pipeline_diagnostics: pipeline ?? null,
       latency: latency(run, pipeline, request.requestedAt, status.data_state === "ready", this.now()) };
   }
@@ -470,22 +499,28 @@ export class FreshDataService {
     const pipeline = parsed?.success && parsed.data.mode === request.kind ? parsed.data : null;
     if (report.source_checked === false && report.kind !== "activity-repair") {
       snapshot.source_fresh = false;
+      snapshot.source_freshness_reason = "current_check_failed";
       if (snapshot.complete) snapshot.status = "source_stale";
     }
     const persisted = await coordinator.freshJob(job.request_id);
-    const stillPolling = !terminal && canPoll && (persisted?.polls ?? 3) < 3 && job.expires_at > this.now();
+    const stillPolling = run !== null && !terminal && canPoll && (persisted?.polls ?? 3) < 3 && job.expires_at > this.now();
     const blocked = String(report.coach_status ?? "");
-    return this.response(snapshot, terminal
+    const status = syncStatus({ kind: request.kind, run, snapshot, pipeline, accepted: true, polling: stillPolling,
+      sourceChecked: typeof report.source_checked === "boolean" ? report.source_checked : undefined,
+      sourceCheckedAt: typeof report.checked_at === "string" ? report.checked_at : undefined });
+    const message = terminal
       ? run?.conclusion !== "success" ? `The targeted job ended with ${run?.conclusion ?? job.state}; requested data readiness is unconfirmed.`
         : snapshot.complete && snapshot.source_fresh && snapshot.status === "ready" ? "The requested canonical package is ready."
           : blocked === "no_effective_profile" || blocked === "endurance_data_unavailable"
             ? `Activity files are stored; Coach Input is blocked (${blocked}). Add an effective profile or use supported analysis; polling will not resolve this.`
-            : `The job ended; the requested package is ${snapshot.status}. Missing: ${snapshot.missing_components.join(", ") || "a recent successful source check"}. ${snapshot.source_outcome === "not_ready" ? "The last successful Garmin check found the requested data unavailable." : "Data readiness could not be verified; job success alone does not establish a Garmin check."}`
-      : "The targeted job is queued, running, or not yet confirmed. Polling is bounded; check this correlation ID later if the polling window has ended.",
+            : "The job ended."
+      : run ? "The targeted job is queued or running. Polling is bounded; check this correlation ID later if the polling window has ended."
+        : "Job start is unconfirmed. The existing reservation is retained; check refresh_status with this request_id later.";
+    return this.response(snapshot, `${message} ${packageStatusMessage(request.kind, snapshot, status)}`,
     { accepted, available: run !== null, request_id: job.request_id, run,
       terminal, should_continue_polling: stillPolling,
-      sync_status: syncStatus({ kind: request.kind, run, snapshot, pipeline, accepted: true, polling: stillPolling,
-        sourceChecked: typeof report.source_checked === "boolean" ? report.source_checked : undefined }),
+      sync_status: status,
+      ...(!run && !terminal ? { reason: "dispatch_unconfirmed", should_continue_polling: false, retry_after_seconds: 60 } : {}),
       latency: latency(run, pipeline, request.requestedAt,
         snapshot.complete && snapshot.source_fresh && snapshot.status === "ready", this.now()),
       pipeline_diagnostics: pipeline,
