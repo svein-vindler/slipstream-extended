@@ -8,6 +8,7 @@ import {
 import { structuredToolResult, outputSchemas } from "./mcp-output";
 import { R2Storage, COACH_CONFIG_R2_LIMITS } from "./r2-storage";
 import { exactDate, dateRange, sport, PRIVATE_READ_TOOL_ANNOTATIONS } from "./tool-contracts";
+import { trainingContext } from "./training-context";
 
 const COACH_PROFILE_PREFIX = "coach/profiles/v1/";
 const COACH_PROFILE_INDEX_KEY = "coach/indexes/profiles-v1.json";
@@ -243,7 +244,7 @@ export class ActivityCoachTools {
 
   registerDetailTools(server: McpServer) {
     server.registerTool("strength_session", {
-      description: "Read normalized sets for one Garmin strength activity: exercise, reps, weight, active time and following rest. Raw FIT messages and GPS are not returned.",
+      description: "Read normalized sets for one Garmin strength activity: exercise, reps, weight, active time and following rest. Includes optional recorded aerobic/anaerobic Training Effect estimates from verified stored FIT sessions. Raw FIT messages and GPS are not returned.",
       inputSchema: z.object({
         activity_id: z.string().regex(/^(garmin-)?\d{1,20}$/)
           .describe('Activity ID from list_activities, for example "garmin-24431147581"'),
@@ -268,6 +269,7 @@ export class ActivityCoachTools {
           available: false,
           activity: toSummary(activity),
           message: "No granular export is stored for this activity yet.",
+          training_context: trainingContext(activity, stored?.data),
         });
       }
       const payload = stored.data as Record<string, unknown>;
@@ -277,13 +279,15 @@ export class ActivityCoachTools {
           available: false,
           activity: toSummary(activity),
           message: "The stored activity predates the normalized strength schema; rerun the granular export.",
+          training_context: trainingContext(activity, payload),
         });
       }
-      return this.text({ available: true, activity: toSummary(activity), session });
+      return this.text({ available: true, activity: toSummary(activity), session,
+        training_context: trainingContext(activity, payload) });
     });
 
     server.registerTool("endurance_session", {
-      description: "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series.",
+      description: "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates with one bounded stored FIT JSON read; missing context does not change dataset availability.",
       inputSchema: z.object({
         activity_id: z.string().regex(/^(garmin-)?\d{1,20}$/)
           .describe('Activity ID from list_activities, for example "garmin-24444691902"'),
@@ -315,10 +319,19 @@ export class ActivityCoachTools {
           message: "No normalized TCX analysis is stored for this activity yet. Run the activity backfill or recent granular export.",
         });
       }
+      let context;
+      try {
+        const fit = await this.getR2Json(activityJsonObjectKeys(activity));
+        context = trainingContext(activity, fit?.data);
+      } catch {
+        // Optional source failure is not absence or a reason to refresh Garmin.
+        context = trainingContext(activity, null, "source_unreadable");
+      }
       return this.text({
         available: true,
         activity: toSummary(activity),
         session: stored.data,
+        training_context: context,
       });
     });
 

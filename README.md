@@ -28,6 +28,8 @@ and prepared analyses remain available between refreshes.
 - Optional revision-verified monthly weight indexes retaining all weighings and clocks
 - Strength exercises, sets, reps, weight, work time and rest time
 - Endurance laps, kilometre splits, heart-rate distribution and drift
+- Optional [aerobic/anaerobic Training Effect](docs/TRAINING_CONTEXT.md) from
+  verified stored FIT sessions in activity detail reads
 - Versioned coach profiles, append-only RPE/context and prepared coach-input JSON
 - Optional [encrypted local backup and isolated recovery testing](docs/PRIVATE_BACKUP.md)
   of user-owned profile/context history and immutable coach inputs; see the

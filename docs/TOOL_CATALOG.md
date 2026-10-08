@@ -420,7 +420,7 @@ Check the fitness data is connected; returns count, date range, sources.
 
 ### `endurance_session`
 
-Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series.
+Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates with one bounded stored FIT JSON read; missing context does not change dataset availability.
 
 **Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
 
@@ -840,7 +840,7 @@ Analyze sleep by morning wake-date. Daily rows expose local night_of and weekly 
 
 ### `strength_session`
 
-Read normalized sets for one Garmin strength activity: exercise, reps, weight, active time and following rest. Raw FIT messages and GPS are not returned.
+Read normalized sets for one Garmin strength activity: exercise, reps, weight, active time and following rest. Includes optional recorded aerobic/anaerobic Training Effect estimates from verified stored FIT sessions. Raw FIT messages and GPS are not returned.
 
 **Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
 

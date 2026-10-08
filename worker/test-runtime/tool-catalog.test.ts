@@ -99,7 +99,22 @@ it.each([false, true])("preserves the previous contracts apart from optional con
     }));
   }
   const tools = modes.find(mode => mode.writes === writes && mode.refresh)!.tools
-    .map(tool => ({ ...tool, outputSchema: previousSchema(tool.outputSchema) }));
+    .map(tool => {
+      // Only these two reviewed detail outputs/descriptions change in Worker 06.
+      const descriptions: Record<string, string> = {
+        strength_session: "Read normalized sets for one Garmin strength activity: exercise, reps, weight, active time and following rest. Raw FIT messages and GPS are not returned.",
+        endurance_session: "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series.",
+      };
+      const outputSchema = structuredClone(tool.outputSchema);
+      if (tool.name in descriptions) {
+        const properties = outputSchema!.properties as Record<string, unknown>;
+        expect(properties.training_context).toBeDefined();
+        expect(outputSchema!.required).not.toContain("training_context");
+        delete properties.training_context;
+        return { ...tool, description: descriptions[tool.name], outputSchema: previousSchema(outputSchema) };
+      }
+      return { ...tool, outputSchema: previousSchema(outputSchema) };
+    });
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(tools)));
   const hash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
   expect(hash).toBe(writes ? "98af2252c0b4126f3118d8869b32186f2acad77b06e747075a4c51a5cc506508"
