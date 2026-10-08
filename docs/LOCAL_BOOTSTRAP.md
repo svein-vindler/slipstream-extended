@@ -133,7 +133,11 @@ gh workflow enable coach-input-backfill.yml
 
 The local status `complete` means all selected plans are complete or contain
 only deliberately blocked items. The scheduled jobs may then remain enabled;
-their normal self-quiescing checks notice future data without rebuilding history.
+normal recent refresh continues to check recent data. Completed historical
+activity ranges require explicit reconciliation for late uploads/edits outside
+that recent window; see [ACTIVITY_BACKFILL.md](ACTIVITY_BACKFILL.md). Resumed
+activity ranges share the same ten-page budget per cycle and keep pending imports
+until source end and file completion are confirmed.
 
 For activity backfill, an empty but valid Garmin TCX file is finalized with an
 explicit unavailable endurance object instead of remaining blocked. If a real

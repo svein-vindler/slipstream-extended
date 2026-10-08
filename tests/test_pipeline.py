@@ -379,13 +379,9 @@ def test_activity_backfill_writes_resumable_progress_when_range_is_complete(
             self.puts.append((key, data, content_type, encoding))
 
     class FakeGarmin:
-        def get_activities_by_date(self, start_date, end_date, sortorder=None):
-            assert (start_date, end_date, sortorder) == (
-                "2024-01-01",
-                "2024-12-31",
-                "desc",
-            )
-            return [activity]
+        def get_activity_page(self, start_date, end_date, *, offset=0):
+            assert (start_date, end_date) == ("2024-01-01", "2024-12-31")
+            return [activity] if offset == 0 else []
 
     store = FakeStore()
     manifest = run_activity_backfill(
@@ -474,7 +470,8 @@ def test_scheduled_backfill_starts_with_newest_unfinished_range(monkeypatch):
         max_activities=50, store=store, garmin=garmin
     )
 
-    assert calls == [{
+    assert calls[0]["metadata_budget"].limit == 10
+    assert [{k: v for k, v in call.items() if k != "metadata_budget"} for call in calls] == [{
         "start_date": "2017-01-01",
         "end_date": "2017-06-01",
         "max_activities": 50,

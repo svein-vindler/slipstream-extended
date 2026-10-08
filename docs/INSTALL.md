@@ -155,6 +155,11 @@ your own repository when you want older data. Historical work uses the same
 resumable plans and does not need to finish before the connector is usable.
 Use `gh workflow enable` with those same three filenames when ready.
 
+Activity backfill resumes bounded metadata pages and pending imports in the
+existing range progress. Completion requires confirmed source end; completed
+historical plans stay read-only. See [ACTIVITY_BACKFILL.md](ACTIVITY_BACKFILL.md)
+for call limits, explicit reconciliation/retry and handling legacy plans.
+
 For an initial installation with years of history, a trusted computer can
 optionally advance the exact same plans overnight. Complete the normal setup
 first, then follow [LOCAL_BOOTSTRAP.md](LOCAL_BOOTSTRAP.md). The cloud schedules
