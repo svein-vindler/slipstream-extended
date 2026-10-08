@@ -12,12 +12,15 @@ from typing import Any
 from .activity_backfill import (
     MAX_ACTIVITIES_PER_RUN,
     progress_key,
+    validate_backfill_request,
 )
 from .activity_backfill import (
     run as run_backfill,
 )
+from .activity_pagination import MAX_CHECKPOINT_BYTES, load_cursor, range_status
 from .granular import json_bytes
 from .r2_store import R2Store
+from .sources.activity_page import MetadataBudget
 from .sources.garmin import _login
 from .summary_restore import decode_summary
 
@@ -67,7 +70,10 @@ def new_plan(activities_csv: bytes) -> dict[str, Any]:
 
 def _load_json(store: R2Store, key: str) -> dict[str, Any]:
     try:
-        value = json.loads(store.get(key))
+        raw = store.get(key)
+        if len(raw) > MAX_CHECKPOINT_BYTES:
+            raise ValueError("Activity backfill plan/progress exceeds payload limit")
+        value = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValueError(f"R2 JSON object is invalid: {key}") from exc
     if not isinstance(value, dict):
@@ -89,23 +95,26 @@ def _next_range(
             continue
         start_date = str(item.get("start_date") or "")
         end_date = str(item.get("end_date") or "")
+        validate_backfill_request(start_date, end_date, 1)
         key = progress_key(start_date, end_date)
         if key not in existing_progress_keys:
             item["status"] = "pending"
             return item
 
         progress = _load_json(store, key)
-        remaining = int(progress.get("remaining_activities", 0))
+        load_cursor(progress, start_date, end_date)
+        status = range_status(progress)
+        remaining = int(progress["remaining_activities"])
         blocked = int(progress.get("blocked_after_three_failures", 0))
         item.update({
             "complete_activities": int(progress.get("complete_activities", 0)),
             "remaining_activities": remaining,
             "blocked_activities": blocked,
         })
-        if remaining == 0:
+        if status == "complete":
             item["status"] = "complete"
             continue
-        if remaining <= blocked:
+        if status == "blocked":
             item["status"] = "blocked"
             continue
         item["status"] = "active"
@@ -119,7 +128,7 @@ def run(
     store: R2Store | None = None,
     garmin=None,
 ) -> dict[str, Any]:
-    if not 1 <= max_activities <= MAX_ACTIVITIES_PER_RUN:
+    if type(max_activities) is not int or not 1 <= max_activities <= MAX_ACTIVITIES_PER_RUN:
         raise ValueError(
             f"max_activities must be between 1 and {MAX_ACTIVITIES_PER_RUN}"
         )
@@ -128,16 +137,21 @@ def run(
 
     if PLAN_KEY in progress_keys:
         plan = _load_json(store, PLAN_KEY)
+        if plan.get("schema_version") not in {1, 2}:
+            raise ValueError("Unsupported activity backfill plan schema")
         if plan.get("status") == "complete":
             print(json.dumps(plan, indent=2, ensure_ascii=False))
             return plan
     else:
         plan = new_plan(store.get("summary/activities.csv"))
 
+    if plan.get("schema_version") not in {1, 2}:
+        raise ValueError("Unsupported activity backfill plan schema")
+    metadata_budget = MetadataBudget()
     remaining_budget = max_activities
     processed_ranges = []
     garmin_client = garmin
-    while remaining_budget > 0:
+    while remaining_budget > 0 and metadata_budget.remaining:
         selected = _next_range(store, plan, progress_keys)
         if selected is None:
             ranges = plan.get("ranges", [])
@@ -156,15 +170,12 @@ def run(
             max_activities=remaining_budget,
             garmin=garmin_client,
             store=store,
+            metadata_budget=metadata_budget,
         )
         attempted = int(result.get("attempted_this_run", 0))
         remaining = int(result["remaining_activities"])
         blocked = int(result["blocked_after_three_failures"])
-        status = (
-            "complete" if remaining == 0
-            else "blocked" if remaining <= blocked
-            else "active"
-        )
+        status = range_status(result)
         selected.update({
             "status": status,
             "complete_activities": result["complete_activities"],

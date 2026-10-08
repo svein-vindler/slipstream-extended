@@ -132,6 +132,13 @@ are staggered and serialized so Garmin is never queried concurrently. Historical
 backfills skip existing objects, persist progress, pause repeated item failures,
 and quiesce automatically when complete.
 
+Historical activity discovery resumes bounded metadata pages and pending imports
+from the existing range progress. It preserves accumulated failure counts and
+the three-failure automatic retry threshold. Checkpoint wire version 2 reads
+older state, but rolling back to an older reader needs preserved compatible
+progress. See [activity backfill](docs/ACTIVITY_BACKFILL.md) for limits,
+reconciliation, compatibility and measured resource tradeoffs.
+
 Each six-hour summary refresh also refreshes the three most recent HRV and
 detailed-sleep dates. A chat-triggered refresh performs the same recent-health
 steps, checks recent activity artifacts and prepares coach input for selected

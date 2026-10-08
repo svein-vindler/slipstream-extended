@@ -12,7 +12,10 @@ from datetime import date
 from functools import wraps
 from urllib.parse import unquote, urlsplit
 
+from .activity_page import page_params
+
 READ_METHODS = frozenset({
+    "get_activity_page",
     "get_activities_by_date", "get_activity", "get_activity_exercise_sets",
     "download_activity", "get_daily_steps", "get_sleep_daily", "get_hrv_data_range",
     "get_body_battery", "get_weigh_ins", "get_stats", "get_sleep_data",
@@ -179,6 +182,18 @@ class ReadOnlyGarmin:
     def __init__(self, sdk):
         _install_transport_policy(sdk)
         self.__sdk = sdk
+
+    def get_activity_page(self, start_date, end_date, *, offset=0, limit=20):
+        """Fixed GET route and query, zero SDK/network retries (auth replay <=1).
+
+        Use the reviewed native client directly to avoid the outer SDK's
+        retry/logging decorator. Both installed transport guards still apply.
+        No URL, method, headers or arbitrary query options enter this method.
+        """
+        params = page_params(start_date, end_date, offset, limit)
+        return self.__sdk.client.connectapi(
+            "/activitylist-service/activities/search/activities", params=params
+        )
 
     @property
     def connectapi(self):

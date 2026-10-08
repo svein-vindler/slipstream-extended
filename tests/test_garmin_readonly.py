@@ -189,6 +189,49 @@ def test_diagnostics_wrapping_preserves_both_policy_and_call_counts(guarded):
         client.connectapi = provider.original
 
 
+def test_bounded_page_uses_only_reviewed_get_route_and_native_transport(guarded, monkeypatch):
+    client, sdk, calls = guarded
+    # The outer SDK's decorator retries/logs raw exceptions; the page adapter
+    # intentionally calls the reviewed native transport with zero outer retries.
+    monkeypatch.setattr(sdk, "connectapi", lambda *a, **kw: pytest.fail("Unbounded SDK wrapper"))
+    assert client.get_activity_page(DAY, DAY, offset=40) == []
+    assert len(calls) == 1
+    method, url, options = calls[0]
+    assert method == "GET" and url == "https://connectapi.garmin.com/activitylist-service/activities/search/activities"
+    assert options["params"] == {"startDate": DAY, "endDate": DAY,
+                                "start": "40", "limit": "20", "sortOrder": "desc"}
+    assert options["allow_redirects"] is False
+    assert sdk.client._api_session.get_adapter(url).max_retries.total == 0
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"offset": True}, {"offset": -1}, {"offset": 100001}, {"limit": 21},
+    {"limit": 0}, {"params": {"_method": "POST"}}, {"method": "POST"},
+    {"headers": {"X-HTTP-Method-Override": "DELETE"}},
+    {"url": "https://evil.invalid"}, {"retry_attempts": 100},
+])
+def test_bounded_page_rejects_overrides_before_transport(guarded, kwargs):
+    client, _, calls = guarded
+    with pytest.raises((ValueError, TypeError)):
+        client.get_activity_page(DAY, DAY, **kwargs)
+    assert not calls
+
+
+def test_page_network_failure_is_one_attempt_without_raw_exception_logging(monkeypatch, caplog):
+    sdk, calls = Garmin(), []
+    monkeypatch.setattr(sdk.client, "get_api_headers", lambda: {})
+
+    def timeout(*args, **kwargs):
+        calls.append(True)
+        raise TimeoutError("synthetic-private-marker")
+
+    monkeypatch.setattr(sdk.client._api_session, "request", timeout)
+    client = ReadOnlyGarmin(sdk)
+    with pytest.raises(TimeoutError):
+        client.get_activity_page(DAY, DAY)
+    assert len(calls) == 1 and "synthetic-private-marker" not in caplog.text
+
+
 def test_shared_login_installs_guard_before_login_and_returns_facade(monkeypatch, guarded):
     _, sdk, calls = guarded
     logins = []
