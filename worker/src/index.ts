@@ -170,7 +170,7 @@ class FitnessService {
       const night = latestNightReportSchema.safeParse(stored?.data);
       if (night.success) {
         return { ...await this.freshData().completedDetails(run,
-          { kind: "night", date: night.data.wake_date }, pipeline, night.data.source_checked),
+          { kind: "night", date: night.data.wake_date }, pipeline, night.data.source_checked, night.data.checked_at),
           latest_night: night.data };
       }
       const parsed = refreshReportSchema.safeParse(stored?.data);
@@ -199,7 +199,7 @@ class FitnessService {
           ...await this.freshData().completedDetails(run, { kind: "activity",
             date: parts?.[1] === "latest" ? undefined : parts?.[1] ?? latest.data.expected_date ?? undefined,
             activityId: parts?.[2] === "latest" ? undefined : parts?.[2] ?? latest.data.activity_id?.replace("garmin-", ""),
-            newExpected: parts ? parts[3] === "new" : false }, pipeline, latest.data.source_checked),
+            newExpected: parts ? parts[3] === "new" : false }, pipeline, latest.data.source_checked, latest.data.checked_at),
           latest_activity: latest.data,
         };
       }

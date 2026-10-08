@@ -39,7 +39,10 @@ All refresh tools add `sync_status` and `latency`. Read `sync_status` consistent
 | --- | --- |
 | `kind` | `general`, `activity`, `night`, or `unknown` when the report cannot establish scope |
 | `job_state`, `job_conclusion` | No job, accepted, queued, running, completed or failed; separate from data availability |
+| `job_start_confirmed` | A validated GitHub run is linked (`true`); start remains unconfirmed/rejected (`false`); no job or unavailable status (`null`). A queued run is not proof that its runner has started |
 | `source_checked`, `source_checked_at` | Successful scoped Garmin check and receipt time; a successful empty check is still a check |
+| `current_job_source_checked`, `current_job_source_checked_at` | Evidence from this run's validated report/diagnostics, without falling back to an older stored receipt; `null` means unverified or source-free |
+| `stored_source_checked_at` | Last successful scoped receipt retained with the stored package, including when the current job fails to confirm its source check |
 | `complete`, `fresh` | Canonical package completeness and age of its last successful source check; `null` when unverified |
 | `data_state` | `ready`, `partial`, `source_pending`, `stale`, `unknown`, `blocked`, or `error` |
 | `missing_components` | Exact missing files, analysis, Coach Input, sleep or HRV components |
@@ -60,6 +63,23 @@ not assert that any particular activity/night is complete. The package's
 `freshness.source_checked_at` still identifies its last successful receipt when
 the current attempt fails. R2-only Coach Input repair does not claim a new
 Garmin check.
+
+The additive `freshness.source_freshness_reason` distinguishes `within_ttl`,
+`ttl_expired`, `no_confirmed_check`, `invalid_check_time` and
+`current_check_failed`. The existing five-minute boundary remains inclusive;
+one millisecond beyond it is expired. A future-dated receipt cannot establish
+freshness. Package completeness, source confirmation and freshness age are
+independent: a complete stored package can have a confirmed Garmin check and
+an expired freshness window. Its response names the last confirmed stored
+check time, rather than saying the check was never confirmed.
+
+Keep the older `source_checked` contract: where current-run evidence is absent,
+it can still reflect a successful stored receipt. Use the new current-job fields
+to attribute a check to this particular job. `freshness.source_checked_at` and
+`stored_source_checked_at` identify the package's scoped receipt; the current-job
+time comes from that run's report or diagnostics. A newer run report does not
+silently refresh the stored receipt or extend its TTL. No source-check migration
+or additional storage reads/writes are introduced by these fields.
 
 Existing fields remain compatible. On `refresh_today` and run-only
 `refresh_status`, legacy `data_ready=true` means the workflow succeeded; it can
@@ -138,6 +158,17 @@ An uncertain POST retains its reservation. A definite dispatch rejection (for
 example, invalid inputs or access denied) ends that job and retains the cooldown,
 so corrected requests can retry without leaving the scope permanently active.
 Failure to read run details after an accepted POST still retains correlation.
+An empty dispatch response whose private receipt has not arrived yet also
+returns `dispatch_unconfirmed`, stops immediate polling and retains the same
+reservation. A later explicit `refresh_status(request_id=...)` can bind that
+receipt, even after the short polling windows end. It does not dispatch another
+job. Receipt lookup verifies the exact UUID key and scope, and run lookup
+verifies the configured workflow before exposing the run. A successful later
+lookup cannot establish why the original dispatch confirmation was absent:
+an uncertain POST, malformed/empty receipt or failed follow-up lookup are
+distinct possibilities. Investigating a concrete original response requires
+separate evidence; neither workflow success nor delayed correlation proves
+that cause.
 Failed or cancelled runs do not
 confirm readiness, and partial/failed source retrieval does not advance a
 successful source checkpoint. A successful empty source response gives a

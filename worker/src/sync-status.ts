@@ -39,7 +39,11 @@ export const syncStatusSchema = z.object({
   kind: z.enum(["general", "activity", "night", "unknown"]),
   job_state: z.enum(["not_started", "accepted", "queued", "running", "completed", "failed", "unknown"]),
   job_conclusion: z.string().nullable(),
+  job_start_confirmed: z.boolean().nullable().optional(),
   source_checked: z.boolean().nullable(), source_checked_at: timestamp.nullable(),
+  current_job_source_checked: z.boolean().nullable().optional(),
+  current_job_source_checked_at: timestamp.nullable().optional(),
+  stored_source_checked_at: timestamp.nullable().optional(),
   data_state: z.enum(["ready", "partial", "source_pending", "stale", "unknown", "blocked", "error"]),
   complete: z.boolean().nullable(), fresh: z.boolean().nullable(), missing_components: z.array(z.string()),
   user_action_required: z.boolean(),
@@ -58,12 +62,21 @@ type Snapshot = { status: string; complete: boolean; source_fresh: boolean;
 
 export function syncStatus(options: { kind: SyncStatus["kind"]; run?: RefreshRun | null;
   accepted?: boolean; snapshot?: Snapshot; polling?: boolean; reason?: string;
-  pipeline?: PipelineDiagnostics | null; sourceChecked?: boolean | null }): SyncStatus {
+  pipeline?: PipelineDiagnostics | null; sourceChecked?: boolean | null; sourceCheckedAt?: string | null }): SyncStatus {
   const { run, snapshot, reason, pipeline } = options;
   const checks = pipeline?.source_checks ?? [];
   const checked = options.sourceChecked !== undefined ? options.sourceChecked : (checks.length ? checks.every(c => c.checked === true) :
     snapshot?.source_checked_at ? true : null);
-  const checkedAt = checks.filter(c => c.checked && c.checked_at).map(c => c.checked_at!).sort().at(-1)
+  // Keep the legacy stored-receipt fallback above. Current-job evidence must
+  // come only from this run's report/diagnostics, including its own check time.
+  const reportTime = timestamp.safeParse(options.sourceCheckedAt);
+  const currentChecked = run ? options.sourceChecked !== undefined ? options.sourceChecked
+    : checks.length && checks.every(c => c.checked === true) ? true
+      : checks.some(c => c.checked === false) ? false : null : null;
+  const currentCheckedAt = currentChecked === true ? reportTime.success ? reportTime.data
+    : checks.filter(c => c.checked && c.checked_at).map(c => c.checked_at!)
+      .sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null : null;
+  const checkedAt = currentCheckedAt ?? checks.filter(c => c.checked && c.checked_at).map(c => c.checked_at!).sort().at(-1)
     ?? snapshot?.source_checked_at ?? null;
   const ready = snapshot?.complete && snapshot.source_fresh && snapshot.status === "ready";
   const selection = ["ambiguous_activity", "activity_date_unknown", "unsupported_sport"].includes(snapshot?.status ?? "");
@@ -79,7 +92,11 @@ export function syncStatus(options: { kind: SyncStatus["kind"]; run?: RefreshRun
       : run.status === "in_progress" ? "running" : "queued"
       : reason === "status_error" ? "unknown" : options.accepted ? "accepted" : "not_started",
     job_conclusion: run?.conclusion ?? null,
+    job_start_confirmed: run ? true : reason === "status_error" ? null
+      : options.accepted || reason === "dispatch_rejected" ? false : null,
     source_checked: checked, source_checked_at: checked === true ? checkedAt : null,
+    current_job_source_checked: currentChecked, current_job_source_checked_at: currentCheckedAt,
+    stored_source_checked_at: snapshot?.source_checked_at ?? null,
     data_state: blocked ? "blocked" : ready ? "ready" : failed || checks.some(c => c.outcome === "failed") ? "error" : sourcePending ? "source_pending"
       : snapshot ? snapshot.complete ? "stale" : Object.keys(snapshot.package).length ? "partial" : "unknown"
         : pipeline?.status === "failed" ? "error" : pipeline?.status === "partial" ? "partial" : "unknown",

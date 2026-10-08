@@ -82,6 +82,30 @@ it.each([false, true])("preserves the complete tool contracts with writes=%s", a
   expect({ writes, count: tools.length, hash }).toMatchSnapshot();
 });
 
+it.each([false, true])("preserves the previous contracts apart from optional confirmation outputs with writes=%s", async writes => {
+  const additions = new Set(["job_start_confirmed", "current_job_source_checked",
+    "current_job_source_checked_at", "stored_source_checked_at", "source_freshness_reason"]);
+  function previousSchema(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(previousSchema);
+    if (!value || typeof value !== "object") return value;
+    const schema = value as Record<string, unknown>;
+    return Object.fromEntries(Object.entries(schema).map(([key, child]) => {
+      if (key !== "properties" || !child || typeof child !== "object") return [key, previousSchema(child)];
+      const properties = Object.entries(child);
+      const required = Array.isArray(schema.required) ? schema.required : [];
+      for (const [name] of properties) if (additions.has(name)) expect(required).not.toContain(name);
+      return [key, Object.fromEntries(properties.filter(([name]) => !additions.has(name))
+        .map(([name, item]) => [name, previousSchema(item)]))];
+    }));
+  }
+  const tools = modes.find(mode => mode.writes === writes && mode.refresh)!.tools
+    .map(tool => ({ ...tool, outputSchema: previousSchema(tool.outputSchema) }));
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(tools)));
+  const hash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  expect(hash).toBe(writes ? "98af2252c0b4126f3118d8869b32186f2acad77b06e747075a4c51a5cc506508"
+    : "af7b4408ac88a0eda1af5d9c7079a73766323331bdb3377d4f8100782855acbf");
+});
+
 it("matches the deterministic catalog from all actual registration modes", async () => {
   expect(modes.map(mode => mode.tools.length)).toEqual([19, 23, 21, 25]);
   const rendered = renderCatalog(modes);
