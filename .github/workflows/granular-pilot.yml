@@ -44,10 +44,13 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - name: Export pilot data to private R2
+        env:
+          HRV_DAYS: ${{ inputs.hrv_days }}
+          ACTIVITY_DAYS: ${{ inputs.activity_days }}
         run: |
           python -m pipeline.granular_export \
-            --hrv-days "${{ inputs.hrv_days }}" \
-            --activity-days "${{ inputs.activity_days }}" \
+            --hrv-days "$HRV_DAYS" \
+            --activity-days "$ACTIVITY_DAYS" \
             --cardio-count 2 \
             --strength-count 2 \
             --upload-r2

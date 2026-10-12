@@ -52,13 +52,18 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Export missing activity artifacts to private R2
         shell: bash
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          MAX_ACTIVITIES: ${{ inputs.max_activities }}
+          RETRY_FAILURES: ${{ inputs.retry_failures }}
         run: |
           args=(
-            --start-date "${{ inputs.start_date }}"
-            --end-date "${{ inputs.end_date }}"
-            --max-activities "${{ inputs.max_activities }}"
+            --start-date "$START_DATE"
+            --end-date "$END_DATE"
+            --max-activities "$MAX_ACTIVITIES"
           )
-          if [ "${{ inputs.retry_failures }}" = "true" ]; then
+          if [ "$RETRY_FAILURES" = "true" ]; then
             args+=(--retry-failures)
           fi
           python -m pipeline.activity_backfill "${args[@]}"
