@@ -1,7 +1,6 @@
 """Bounded summary refresh with separately checkpointed daily reconciliation."""
 from __future__ import annotations
 
-import argparse
 import json
 import time
 from contextlib import contextmanager
@@ -12,6 +11,7 @@ from botocore.exceptions import ClientError
 
 from .granular import json_bytes
 from .health_writer import write_health_dataset
+from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2Store, missing_object
 from .sources import garmin, garmin_health
 from .summary_export import run as export_summaries
@@ -197,12 +197,13 @@ def run(data_dir="data", *, store=None, client=None, now=None, force_reconcile=F
               "health_diagnostics": health_stats, "provider_diagnostics": calls,
               "checkpoints_written": checkpoints,
               "elapsed_ms": round((time.perf_counter() - started) * 1000)}
-    print(json.dumps(report))
+    log_report("refresh_summaries", report)
     return report
 
 
+@safe_cli
 def main():
-    parser = argparse.ArgumentParser(description="Refresh recent summaries and reconcile daily.")
+    parser = SafeArgumentParser(description="Refresh recent summaries and reconcile daily.")
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--force-reconcile", action="store_true")
     args = parser.parse_args()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import csv
 import io
 import json
@@ -16,6 +15,7 @@ from .activity_backfill import is_job_stopping_error
 from .granular import gzip_json, json_bytes
 from .health_detail import normalize_body_composition, normalize_sleep_detail
 from .health_history_index import sync_dates
+from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2BudgetError, R2Store
 from .sources.garmin import _login
 from .summary_restore import decode_summary
@@ -463,12 +463,13 @@ def run(
         if isinstance(plan, dict)
     }
     report["schema_version"] = result["schema_version"]
-    print(json.dumps(report, indent=2, ensure_ascii=False))
+    log_report("health_detail_backfill", report)
     return result
 
 
+@safe_cli
 def main():
-    parser = argparse.ArgumentParser(
+    parser = SafeArgumentParser(
         description="Advance detailed Garmin sleep and body-composition backfills."
     )
     parser.add_argument("--max-sleep-days", type=int, default=100)

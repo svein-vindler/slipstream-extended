@@ -1,3 +1,4 @@
+import { ApplicationToolError } from "./application-errors";
 import { healthHistoryIndexKey } from "./lib";
 import { nightContext } from "./night-context";
 
@@ -19,7 +20,7 @@ export const HEALTH_HISTORY_BUILDER_REVISION = 2;
 function parseDate(value: string): Date {
   const parsed = new Date(`${value}T00:00:00Z`);
   if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
-    throw new Error(`Invalid calendar date: ${value}`);
+    throw new ApplicationToolError({ kind: "calendar_date" });
   }
   return parsed;
 }
@@ -27,9 +28,9 @@ function parseDate(value: string): Date {
 export function historyDates(startDate: string, endDate: string): string[] {
   const start = parseDate(startDate);
   const end = parseDate(endDate);
-  if (start > end) throw new Error("start_date cannot be after end_date.");
+  if (start > end) throw new ApplicationToolError({ kind: "reversed_dates" });
   const days = Math.floor((end.getTime() - start.getTime()) / DAY_MS) + 1;
-  if (days > 366) throw new Error("Health history is limited to 366 days per request.");
+  if (days > 366) throw new ApplicationToolError({ kind: "history_limit" });
   return Array.from({ length: days }, (_, offset) =>
     new Date(start.getTime() + offset * DAY_MS).toISOString().slice(0, 10));
 }
@@ -43,10 +44,10 @@ export function resolveHistoryRequest(
   const dates = historyDates(startDate, endDate);
   if (detail === "full") {
     if (dates.length > 7) {
-      throw new Error("Full HRV readings or sleep stages are limited to 7 days per request.");
+      throw new ApplicationToolError({ kind: "full_history_limit" });
     }
     if (granularity === "weekly") {
-      throw new Error("Full detail requires daily granularity.");
+      throw new ApplicationToolError({ kind: "full_granularity" });
     }
     return { dates, granularity: "daily" };
   }
@@ -54,7 +55,7 @@ export function resolveHistoryRequest(
     ? (dates.length <= 31 ? "daily" : "weekly")
     : granularity;
   if (resolved === "daily" && dates.length > 31) {
-    throw new Error("Daily summaries are limited to 31 days; use weekly or auto granularity.");
+    throw new ApplicationToolError({ kind: "daily_history_limit" });
   }
   return { dates, granularity: resolved };
 }

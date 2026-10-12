@@ -1,7 +1,6 @@
 """One bounded refresh orchestration for chat dispatch, schedules and local use."""
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
@@ -28,6 +27,7 @@ from . import (
 from .freshness import recent_day
 from .granular import json_bytes
 from .local_bootstrap import prepare_environment
+from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2Store
 from .sources.garmin import _login
 from .training_day import configuration as training_configuration
@@ -157,7 +157,7 @@ def _publish_diagnostics(report, *, store, run_id, original_failure):
             r2_sdk_operations={key: value - before.get(key, 0)
                                for key, value in getattr(store, "operations", {}).items()})
         # Its own PUT cannot time itself in the stored object without another PUT.
-        print(json.dumps(publication))
+        log_report("refresh-diagnostics-publication", publication)
 
 
 def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
@@ -327,12 +327,13 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
                 temporary = diagnostics_file.with_suffix(".tmp")
                 temporary.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
                 temporary.replace(diagnostics_file)
-            print(json.dumps(report))
+            log_report("refresh-diagnostics", report)
     return report
 
 
+@safe_cli
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = SafeArgumentParser(description=__doc__)
     parser.add_argument("--workflow", action="store_true", help="Read the established GitHub workflow inputs")
     parser.add_argument("--mode", choices=("general", "activity", "night"), default="general")
     parser.add_argument("--include-granular", action="store_true")

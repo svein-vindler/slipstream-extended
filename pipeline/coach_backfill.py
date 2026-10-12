@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import csv
 import gzip
 import io
@@ -13,6 +12,7 @@ from typing import Any
 from .coach import ANALYZER_VERSION, build_coach_input, select_profile
 from .granular import gzip_json, sha256
 from .measurements import measured_component
+from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2Store
 
 PLAN_KEY = "backfill/coach-input/v1/plan.json"
@@ -412,12 +412,13 @@ def run(
     if status in {"complete", "complete_with_blocked"}:
         plan["completed_at"] = now
     store.put(PLAN_KEY, json.dumps(plan, separators=(",", ":")).encode(), "application/json")
-    print(json.dumps(plan, indent=2, ensure_ascii=False))
+    log_report("coach_backfill", plan)
     return plan
 
 
+@safe_cli
 def main():
-    parser = argparse.ArgumentParser(description="Generate coach inputs from existing R2 artifacts.")
+    parser = SafeArgumentParser(description="Generate coach inputs from existing R2 artifacts.")
     parser.add_argument("--max-activities", type=int, default=50)
     args = parser.parse_args()
     try:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -11,6 +10,7 @@ from typing import Any
 from botocore.exceptions import ClientError
 
 from .granular import gzip_bytes, json_bytes, sha256
+from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import missing_object
 
 SUMMARY_FILES = (
@@ -106,12 +106,13 @@ def run(data_dir: str = "data", *, store=None) -> dict[str, Any]:
             written += 1
     print(json.dumps({"event": "summary_export", "objects_written": written,
                       "objects_unchanged": len(objects) - written}))
-    print(json.dumps(manifest, indent=2, ensure_ascii=False))
+    log_report("summary_export_manifest", manifest)
     return manifest
 
 
+@safe_cli
 def main():
-    parser = argparse.ArgumentParser(description="Upload Slipstream summaries to private R2.")
+    parser = SafeArgumentParser(description="Upload Slipstream summaries to private R2.")
     parser.add_argument("--data-dir", default="data")
     args = parser.parse_args()
     run(args.data_dir)

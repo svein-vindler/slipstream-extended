@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
-import json
 from datetime import date, timedelta
 
 from .activity_backfill import is_job_stopping_error
@@ -14,6 +12,7 @@ from .health_sync import (
     publish_completed_nights,
     store_day,
 )
+from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2Store
 from .sources.garmin import _login
 
@@ -64,12 +63,13 @@ def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
               "status": "complete" if all(item["days_ready"] == days for item in results.values()) else "partial",
               "night_checkpoints_written": publish_completed_nights(store, all_records),
               "streams": results}
-    print(json.dumps(report))
+    log_report("recent_health", report)
     return report
 
 
+@safe_cli
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Reconcile recent sleep and HRV incrementally")
+    parser = SafeArgumentParser(description="Reconcile recent sleep and HRV incrementally")
     parser.add_argument("--days", type=int, default=3)
     parser.add_argument("--stream", action="append", choices=NIGHT_STREAMS)
     args = parser.parse_args()

@@ -22,6 +22,9 @@
  * Pure data helpers live in ./lib; bounded reads and summary reuse live in
  * ./r2-storage. This file wires those services to MCP tools.
  */
+import { applicationToolResult } from "./application-errors";
+import { errorCategory, PrivacyMcpServer, safeMcpHttpError } from "./output-privacy";
+
 import { createMcpHandler } from "agents/mcp/server";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
@@ -188,7 +191,9 @@ class FitnessService {
         return {
           message: `${refreshReportMessage(parsed.data)} General refresh does not verify a specific complete, fresh activity or night; use the matching targeted tool for that package.`,
           activity_ready: activityReady(parsed.data),
-          activity_refresh: parsed.data,
+          activity_refresh: { ...parsed.data, activities: parsed.data.activities.map(item => ({
+            ...item, ...(item.error !== undefined ? { error: "Activity files could not be refreshed." } : {}),
+          })) },
           sync_status: status, latency: latency(run, pipeline),
           pipeline_diagnostics: pipeline,
         };
@@ -365,7 +370,7 @@ class FitnessService {
       }),
       outputSchema: outputSchemas.weight_history,
       annotations: PRIVATE_READ_TOOL_ANNOTATIONS,
-    }, async (args) => {
+    }, async (args, mcpContext) => applicationToolResult(server, mcpContext, async () => {
       const request = resolveWeightRequest(args.start_date, args.end_date,
         args.morning_start, args.morning_end, args.timezone, this.env.HEALTH_TIMEZONE);
       const { days, sourceObjectsRead, listOperations } = await new WeightHistoryReader(
@@ -381,7 +386,7 @@ class FitnessService {
         source_list_operations: listOperations,
         days,
       });
-    });
+    }));
 
     this.activities.registerDetailTools(server);
 
@@ -501,12 +506,12 @@ class FitnessService {
         await coordinator.release("refresh-today", lease.token);
         console.error(JSON.stringify({
           message: "Could not request Garmin refresh",
-          error: error instanceof Error ? error.message : String(error),
+          error: errorCategory(error),
         }));
         return {
           ...this.text({
             accepted: false,
-            message: error instanceof Error ? error.message : "Could not request the Garmin refresh.",
+            message: "Could not request the Garmin refresh. Check workflow configuration, access and service availability.",
             terminal: true,
             data_ready: false,
             should_continue_polling: false,
@@ -582,12 +587,12 @@ class FitnessService {
       } catch (error) {
         console.error(JSON.stringify({
           message: "Could not read Garmin refresh status",
-          error: error instanceof Error ? error.message : String(error),
+          error: errorCategory(error),
         }));
         return {
           ...this.text({
             available: false,
-            message: error instanceof Error ? error.message : "Could not read Garmin refresh status.",
+            message: "Could not read Garmin refresh status. Check workflow configuration, access and service availability.",
             terminal: true,
             data_ready: false,
             should_continue_polling: false,
@@ -602,52 +607,62 @@ class FitnessService {
 }
 
 function createServer(env: Env, actorKey: string): McpServer {
-  const server = new McpServer({ name: "slipstream-fitness", version: "1.0.0" });
+  const server = new PrivacyMcpServer({ name: "slipstream-fitness", version: "1.0.0" });
   new FitnessService(env, actorKey).registerTools(server);
   return server;
 }
 
 // Cloudflare Access performs the OAuth flow at the edge. The Worker still
 // validates the signed Access assertion, issuer and application audience.
+async function handleRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const url = new URL(request.url);
+  const authentication = await authenticateMcpRequest(request, env);
+  if (authentication instanceof Response) return authentication;
+
+  const rateLimit = await env.MCP_RATE_LIMITER.limit({ key: authentication.rateLimitKey });
+  if (!rateLimit.success) {
+    const retryAfterSeconds = 60;
+    // Some MCP clients expose the error body to the model but omit headers.
+    return secureResponse(new Response(`Too many requests. Retry after ${retryAfterSeconds} seconds.`, {
+      status: 429,
+      headers: { "retry-after": String(retryAfterSeconds) },
+    }));
+  }
+
+  let boundedRequest: Request;
+  try {
+    boundedRequest = await limitRequestBody(request, REQUEST_BODY_LIMIT_BYTES);
+  } catch (error) {
+    if (error instanceof PayloadTooLargeError) {
+      return secureResponse(new Response("Request body too large", { status: 413 }));
+    }
+    throw error;
+  }
+
+  const actorKey = await contentId(authentication.rateLimitKey);
+  const handler = createMcpHandler(() => createServer(env, actorKey), {
+    route: url.pathname,
+    legacy: "stateless",
+    allowedHostnames: [authentication.hostname],
+    onerror(error) {
+      console.error(JSON.stringify({
+        message: "MCP transport error",
+        error: errorCategory(error),
+      }));
+    },
+  });
+  const response = await handler(boundedRequest, env, ctx);
+  return secureResponse(await safeMcpHttpError(response));
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-    const authentication = await authenticateMcpRequest(request, env);
-    if (authentication instanceof Response) return authentication;
-
-    const rateLimit = await env.MCP_RATE_LIMITER.limit({ key: authentication.rateLimitKey });
-    if (!rateLimit.success) {
-      const retryAfterSeconds = 60;
-      // Some MCP clients expose the error body to the model but omit headers.
-      return secureResponse(new Response(`Too many requests. Retry after ${retryAfterSeconds} seconds.`, {
-        status: 429,
-        headers: { "retry-after": String(retryAfterSeconds) },
-      }));
-    }
-
-    let boundedRequest: Request;
     try {
-      boundedRequest = await limitRequestBody(request, REQUEST_BODY_LIMIT_BYTES);
-    } catch (error) {
-      if (error instanceof PayloadTooLargeError) {
-        return secureResponse(new Response("Request body too large", { status: 413 }));
-      }
-      throw error;
+      return await handleRequest(request, env, ctx);
+    } catch {
+      // Keep failure semantics, with a fixed exception for platform-level logging.
+      // No cause/stack/provider text from the original exception crosses this boundary.
+      throw new Error("MCP request failed.");
     }
-
-    const actorKey = await contentId(authentication.rateLimitKey);
-    const handler = createMcpHandler(() => createServer(env, actorKey), {
-      route: url.pathname,
-      legacy: "stateless",
-      allowedHostnames: [authentication.hostname],
-      onerror(error) {
-        console.error(JSON.stringify({
-          message: "MCP transport error",
-          error: error.message,
-        }));
-      },
-    });
-    const response = await handler(boundedRequest, env, ctx);
-    return secureResponse(response);
   },
 } satisfies ExportedHandler<Env>;

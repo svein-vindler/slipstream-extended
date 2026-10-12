@@ -1,6 +1,8 @@
 /** Bounded R2 reads and parsed summary reuse; no MCP, dispatch or write logic. */
+import { errorCategory } from "./output-privacy";
+
 import { Activity, HealthDay, parseCsv, parseHealthCsv } from "./lib";
-import { decodePossiblyGzippedText } from "./security";
+import { PayloadTooLargeError, decodePossiblyGzippedText } from "./security";
 
 export interface R2ReadLimits { stored: number; decoded: number }
 export const SUMMARY_R2_LIMITS = { stored: 2 * 1024 * 1024, decoded: 16 * 1024 * 1024 };
@@ -50,7 +52,7 @@ export class R2Storage {
     } catch (error) {
       console.error(JSON.stringify({
         message: "R2 activity summary unavailable",
-        error: error instanceof Error ? error.message : String(error),
+        error: errorCategory(error),
       }));
       throw new Error("Activity data is unavailable in private R2.");
     }
@@ -75,7 +77,7 @@ export class R2Storage {
     } catch (error) {
       console.error(JSON.stringify({
         message: "R2 health summary unavailable",
-        error: error instanceof Error ? error.message : String(error),
+        error: errorCategory(error),
       }));
       throw new Error("Health data is unavailable in private R2.");
     }
@@ -87,7 +89,7 @@ export class R2Storage {
       const object = await this.bucket.get(key);
       if (!object) continue;
       if (object.size > limits.stored) {
-        throw new Error(`R2 object ${key} exceeds the stored-size limit.`);
+        throw new PayloadTooLargeError("R2 object exceeds the stored-size limit.");
       }
       const buffer = await object.arrayBuffer();
       const text = await decodePossiblyGzippedText(buffer, limits.decoded);

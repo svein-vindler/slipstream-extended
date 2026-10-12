@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -15,6 +14,7 @@ from .freshness import activity_scope, publish, receipt, recent_day
 from .granular import activity_type, gzip_json
 from .granular_export import activity_artifact_keys
 from .manual_activity_refresh import _complete_activity_details, _rows
+from .output_privacy import SafeArgumentParser, safe_cli
 from .r2_store import R2BudgetError, R2Store
 from .schema import Activity
 from .sources import garmin as garmin_source
@@ -247,9 +247,9 @@ def run(
                         report["coach_status"] = _coach_status(store, selected, plan)
                     except R2BudgetError:
                         raise
-                    except Exception as exc:
+                    except Exception:
                         report["coach_status"] = "error"
-                        print(f"Latest activity coach input failed: {type(exc).__name__}")
+                        print("Latest activity coach input failed: operation_failed")
                     if report["coach_status"] != "ready":
                         report["status"] = "coach_pending"
                 else:
@@ -270,14 +270,15 @@ def run(
             )
             report["coach_status"] = "waiting_for_files"
             # Do not write provider exception details into an MCP-visible report.
-            print(f"Latest activity files unavailable: {type(exc).__name__}")
+            print("Latest activity files unavailable: operation_failed")
 
     return publish(store, run_id, scope, report,
                    source_checked=report["file_status"] != "import_error")
 
 
+@safe_cli
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Import one recent Garmin activity")
+    parser = SafeArgumentParser(description="Import one recent Garmin activity")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--lookback-days", type=int, default=MAX_LOOKBACK_DAYS)

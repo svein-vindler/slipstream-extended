@@ -108,7 +108,23 @@ secret files. Before publishing, inspect `git status` and the staged diff.
 
 ## Logging
 
-Application logs contain bounded error categories, not tokens or object data.
+Hosted pipeline logs project fixed event names, controlled status/error categories
+and validated aggregates. Activity names, source dates, object keys, stored
+reports and provider exception text are excluded. CLI failures retain failed
+exit codes without exposing raw arguments or tracebacks; private in-process
+callers still receive the original errors. The pinned Garmin SDK's two loggers
+are temporarily projected during the hosted CLI invocation, without changing
+levels, handlers or propagation; their prior filters are restored on exit.
+
+Worker console and MCP/HTTP error boundaries use fixed messages/categories,
+including SDK tool validation and transport errors. Explicitly typed application
+errors preserve date/granularity, timezone/morning-window and coach write-limit
+guidance with validated retry seconds. Provider text or a matching exception
+name/message cannot select that guidance. Normal authorized fitness
+responses retain their intended data. Outgoing refresh report errors are
+projected separately; detailed private R2 reports, their schemas and persistence
+remain unchanged and must stay private. This does not scrub historical logs or
+cover third-party/platform-generated telemetry outside these application sinks.
 Cloudflare invocation logs are disabled in the default configuration to reduce
 noise and retention. Distributed traces use 1% head sampling for low-cost
 incident diagnosis; the application adds no fitness payloads or credentials as

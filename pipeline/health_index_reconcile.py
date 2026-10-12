@@ -13,6 +13,7 @@ from botocore.exceptions import ClientError
 
 from .granular import json_bytes
 from .health_history_index import BUILDER_REVISION, SCHEMA_VERSION, STREAMS, sync_stream
+from .output_privacy import log_report
 from .r2_store import R2Store, missing_object
 
 INTERVAL = timedelta(days=7)
@@ -95,5 +96,5 @@ def run(*, store=None, streams=STREAMS, now=None):
               "status": "complete" if all(r["status"] == "complete" for r in results.values()) else "partial",
               "results": results, "r2_operations": {k: store.operations[k] - v for k, v in before.items()},
               "elapsed_ms": round((time.perf_counter() - started) * 1000)}
-    print(json.dumps(report))
+    log_report("health_index_reconcile", report)
     return report

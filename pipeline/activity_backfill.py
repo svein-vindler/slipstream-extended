@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +21,7 @@ from .activity_pagination import (
 )
 from .granular import activity_type, is_endurance_activity
 from .granular_export import activity_artifact_keys, export_activity
+from .output_privacy import SafeArgumentParser, safe_cli
 from .r2_store import R2BudgetError, R2Store
 from .sources.activity_page import MetadataBudget, bounded_int, page_params
 from .sources.garmin import _login
@@ -279,8 +279,9 @@ def run(
     return manifest
 
 
+@safe_cli
 def main():
-    parser = argparse.ArgumentParser(
+    parser = SafeArgumentParser(
         description="Backfill detailed Garmin activity artifacts into private R2."
     )
     parser.add_argument("--start-date", required=True)

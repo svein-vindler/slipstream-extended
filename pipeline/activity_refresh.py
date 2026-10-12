@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -13,6 +12,7 @@ from .activity_backfill import is_job_stopping_error, is_supported_activity
 from .granular import activity_prefix, activity_type, json_bytes, sha256
 from .granular_export import activity_artifact_keys, export_activity
 from .measurements import measured_component
+from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2BudgetError, R2Store
 from .sources.garmin import _login
 
@@ -236,12 +236,13 @@ def run(
         "by_status": counts,
         "activities": results,
     }
-    print(json.dumps(report, indent=2, ensure_ascii=False))
+    log_report("activity_refresh", report)
     return report
 
 
+@safe_cli
 def main():
-    parser = argparse.ArgumentParser(
+    parser = SafeArgumentParser(
         description="Refresh changed recent Garmin activity artifacts."
     )
     parser.add_argument("--lookback-days", type=int, default=30)

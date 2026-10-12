@@ -1,16 +1,15 @@
 """Recheck recent measured dates without scanning or mutating backfill plans."""
 from __future__ import annotations
 
-import argparse
 import csv
 import io
-import json
 from datetime import date, timedelta
 from pathlib import Path
 
 from .activity_backfill import is_job_stopping_error
 from .health_detail_backfill import history_dates
 from .health_sync import HealthNotReady, finalize_days, store_day
+from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2Store
 from .sources.garmin import _login
 from .summary_restore import decode_summary
@@ -61,12 +60,13 @@ def run(*, max_days: int = 3, health_csv: bytes | None = None, store=None, garmi
               "source_errors": failures, "objects_written": sum(item["written"] for item in records),
               "objects_unchanged": sum(not item["written"] for item in records),
               "checkpoints_written": len(records)}
-    print(json.dumps(report))
+    log_report("recent_body", report)
     return report
 
 
+@safe_cli
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Reconcile recent individual weigh-in dayviews")
+    parser = SafeArgumentParser(description="Reconcile recent individual weigh-in dayviews")
     parser.add_argument("--max-days", type=int, default=3)
     parser.add_argument("--summary", type=Path)
     args = parser.parse_args()
