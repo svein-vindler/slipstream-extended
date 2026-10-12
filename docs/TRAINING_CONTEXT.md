@@ -1,5 +1,9 @@
 # Training Effect from existing activity data
 
+Daily Readiness and Recovery Time are a separate default-off additive source;
+see [stored training days](TRAINING_READINESS.md). Training Effect below continues
+to use the existing activity/FIT path without new fetching or reinterpretation.
+
 ## Source inventory
 
 This inventory is based on the current code and the installed, pinned Garmin

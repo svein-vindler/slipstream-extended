@@ -4,20 +4,22 @@ Generated from the authenticated Worker `tools/list` response, including domain 
 
 | Profile writes | Refresh configured | Registered tools |
 | --- | --- | --- |
-| off | no | 19 |
-| off | yes | 23 |
-| on | no | 21 |
-| on | yes | 25 |
+| off | no | 20 |
+| off | yes | 24 |
+| on | no | 22 |
+| on | yes | 26 |
 
 Profile writes and refresh availability are independent. Disabling profile writes does not disable sync. Every mode still requires authentication and existing server limits. Annotations describe intent; server validation, transport controls and budgets enforce safety. No tool allows Garmin fitness-account writes.
 
 ## Data limits and runtime rules
 
+- Readiness and Recovery are independent: a partial training day can contain either valid measurement. Recovery 0 minutes is valid. Missing/invalid fields do not establish missing hardware support; support stays unknown. Candidates never combine measurements across devices. Watch display and Connect availability can differ; see [data-source limitations](TRAINING_READINESS.md#watch-display-versus-garmin-connect-data).
 - Summary coverage follows stored indexes and retained data; there is no fixed 30-day activity-history limit. Status tools describe summary coverage, not detailed-package readiness. Null/missing values are unknown, never zero. Summary dates alone do not establish an activity's Garmin-local day.
 - Detail tools return normalized, GPS-free datasets. There is no tool for arbitrary URLs/R2 keys or raw FIT/TCX download. Summary availability does not guarantee detailed streams or Coach Input. Planned workout steps differ from executed laps.
 - Sleep/HRV history: inclusive range at most 366 days; auto is daily through 31 days and weekly thereafter. Explicit daily summary is at most 31 days; full readings/stages at most 7 days and require daily/auto, never weekly. Dates must be real calendar dates in ascending order. Weekly history verifies recent seven days directly; older index-only rows are not proof of complete raw detail. Report coverage, per-day status and index_consistency.
 - Night dates are Garmin-local wake-dates; night_of is the local sleep-start date. Use returned local timestamps/provenance, matching sleep context for HRV and IANA/DST fallback. Missing context stays unknown; do not manually shift dates or apply a fixed offset. Garmin HRV summaries and Slipstream-derived statistics have different provenance.
 - Weight history: inclusive range at most 31 days; same-day local window with morning_start < morning_end; explicit timezone must be IANA-valid. Default window is [04:00,12:00). Select the earliest actual local weighing in the window. Daily averages, daily_health.weight_kg and later weighings never replace a missing morning value. Report selected_days, per-day status and time provenance.
+- Training history: 1–31 real inclusive dates, direct canonical day GETs, at most four active readers, 16KiB per day, 64KiB structured content/128KiB MCP result. Compact-v1 shares source/units; candidate observation references and metric time_ref/check_ref resolve within each day's observations/clocks/checks. Identical morning/latest share one observation; retained fields keep their own clocks/checks. Ordinary 31-day one-device results fit; oversized legal cases still return output_limit. No index/cache/LIST/sync/write. Collection defaults off and needs separate activation approval. Readiness 1–100 and Recovery minutes are estimates at observation time; 0 is valid only for Recovery. No countdown or first-device/wakeup fallback. REACHED_ZERO with positive minutes is a conflict. Last collection outcome and selection status remain separate: failed/partial data cannot prove selected-device absence. Field ages, retained values, ambiguity and unknown support remain explicit; the eight-hour display policy does not change fresh-data rules.
 - Targeted fresh activity/night requests accept only the server's recent-date window (last seven days or today's Garmin-local day, with a UTC boundary allowance). Supply expected_date/activity_id or wake_date to pin the request, especially during travel. R2 is checked first; existing source can support derived-data repair, and compatible jobs share IDs. Use sync_status.data_state=ready, matching ID/date, source_checked_at and missing_components. A successful job or legacy data_ready alone is insufficient.
 - Follow refresh_status with the same targeted request_id only while should_continue_polling is true, respecting poll_after_seconds and retry_after_seconds. Targeted jobs allow three short polling windows. Stop on exhaustion, cooldown, source-pending, blocked state or 429; honor Retry-After and never start a replacement job to extend polling.
 - Profile zones must be ordered and non-overlapping (30–250 BPM); context needs at least one non-null user field. Values/RPE/thresholds are user supplied. Versions are immutable; changed zones do not rewrite historical analyses. Existing payload, concurrency and write budgets also apply.
@@ -917,6 +919,40 @@ Use only when the user explicitly authorizes fetching fresh sleep/night data or 
       "type": "string"
     }
   },
+  "type": "object"
+}
+```
+
+### `training_history`
+
+Read canonical private R2 training days directly, 1–31 inclusive real dates, at most four simultaneous reads. Compact-v1 shares source/metric_units at result level. Each day's candidate latest_observation/morning_observation references its observations; each metric time_ref/check_ref references that day's clocks/checks, preserving retained fields' own times and ages. Identical morning/latest share one observation; distinct ones remain separate. No cache, index, Garmin call, sync or write. Collection defaults off and needs separate approval. Missing objects mean not_collected, with Garmin support unknown. Readiness is a Garmin estimate on a 1–100 scale; Recovery Time is reported minutes at observation time, with no countdown. Positive minutes with REACHED_ZERO are conflicting. Device/wakeup ambiguity stays explicit with no first-row fallback; failure/partial is not proof of selected-device absence. Check last_attempt, selection_status and retained_previous separately. The eight-hour display policy is separate from existing fresh-data contracts; stored values do not claim current Garmin state. Sleep wake-date/night_of remain distinct. At most 16KiB per day, 64KiB structured content and 128KiB MCP result; ordinary 31-day one-device responses fit, with output_limit retained for genuinely oversized results.
+
+**Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
+
+**Availability:** All authenticated registration modes.
+
+**Registered input schema** (bounds/defaults; runtime rules above also apply):
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "end_date": {
+      "description": "YYYY-MM-DD",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "type": "string"
+    },
+    "start_date": {
+      "description": "YYYY-MM-DD",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "start_date",
+    "end_date"
+  ],
   "type": "object"
 }
 ```

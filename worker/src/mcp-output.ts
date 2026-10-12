@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { trainingContextSchema } from "./training-context";
+import { trainingHistorySchema } from "./training-history";
 import { refreshReportSchema } from "./refresh-report";
 import { latestActivityReportSchema } from "./latest-activity-report";
 import { freshResultSchema, freshnessSchema, requestIdSchema } from "./fresh-data";
@@ -295,6 +296,7 @@ const bodyMeasurement = z.object({
 });
 
 export const outputSchemas = {
+  training_history: trainingHistorySchema,
   data_status: z.object({
     connected: z.boolean(),
     count: z.number().int().nonnegative(),

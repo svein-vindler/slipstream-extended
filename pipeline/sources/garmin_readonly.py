@@ -10,11 +10,24 @@ import inspect
 import re
 from datetime import date
 from functools import wraps
+from importlib.metadata import version
 from urllib.parse import unquote, urlsplit
 
+import requests
+from garminconnect.client import Client, GarminConnectAuthenticationError
+from requests.adapters import HTTPAdapter
+
 from .activity_page import page_params
+from .garmin_policy import GarminReadOnlyViolation
+from .training_readiness import ReadinessRead, bounded_read
+
+_READINESS_ROUTE = r"/metrics-service/metrics/trainingreadiness/([0-9]{4}-[0-9]{2}-[0-9]{2})"
+_REVIEWED_HEADERS = Client.get_api_headers
+_REVIEWED_ADAPTER_SEND = HTTPAdapter.send
+_REVIEWED_SESSION_SEND = requests.Session.send
 
 READ_METHODS = frozenset({
+    "get_training_readiness_bounded",
     "get_activity_page",
     "get_activities_by_date", "get_activity", "get_activity_exercise_sets",
     "download_activity", "get_daily_steps", "get_sleep_daily", "get_hrv_data_range",
@@ -41,10 +54,6 @@ _ROUTES = (
     (rf"/hrv-service/hrv/(?:{_DAY}|daily/{_DAY}/{_DAY})", frozenset()),
     (rf"/weight-service/weight/(?:dayview/{_DAY}|range/{_DAY}/{_DAY})", frozenset({"includeAll"})),
 )
-
-
-class GarminReadOnlyViolation(PermissionError):
-    """A blocked operation; errors deliberately omit URLs, bodies and tokens."""
 
 
 def _deny():
@@ -125,6 +134,35 @@ def _install_transport_policy(sdk):
     if (origin.scheme != "https" or origin.netloc not in {"connectapi.garmin.com", "connectapi.garmin.cn"}
             or origin.path or origin.query or origin.fragment):
         _deny()
+    readiness_capability = object()
+
+    def readiness_path(path):
+        match = re.fullmatch(_READINESS_ROUTE, path)
+        if not match:
+            _deny()
+        _valid_day(match[1])
+
+    def readiness_transport_valid():
+        # Pin the reviewed SDK/session/header surface. No saved, unguarded send
+        # is exposed to the application; the lower guard is always traversed.
+        if (version("garminconnect") != "0.3.17" or type(client) is not Client
+                or type(session) is not requests.Session
+                or sdk.client is not client or client._run_request is not read_request
+                or client._api_session is not session or session.request is not send_read
+                or client._connectapi != f"https://{origin.netloc}"
+                or getattr(client.get_api_headers, "__func__", None) is not _REVIEWED_HEADERS
+                or getattr(session.send, "__func__", None) is not _REVIEWED_SESSION_SEND
+                or session.verify is not True or session.auth is not None or session.params
+                or any(session.hooks.values())
+                or any(str(key).lower() in {"x-http-method-override", "x-http-method", "x-method-override"}
+                       for key in session.headers)):
+            _deny()
+        adapter = session.get_adapter(f"https://{origin.netloc}/")
+        if (type(adapter) is not HTTPAdapter or adapter.max_retries.total != 0
+                or adapter.max_retries.connect not in {None, 0}
+                or adapter.max_retries.read not in {None, 0}
+                or getattr(adapter.send, "__func__", None) is not _REVIEWED_ADAPTER_SEND):
+            _deny()
 
     @wraps(original)
     def read_request(method, path, **kwargs):
@@ -136,22 +174,40 @@ def _install_transport_policy(sdk):
 
     @wraps(send)
     def send_read(method, url, **kwargs):
+        context = kwargs.pop("_readiness_context", None)
+        bounded = isinstance(context, tuple) and len(context) == 2 and context[0] is readiness_capability
+        if context is not None and not bounded:
+            _deny()
         if (method != "GET" or not isinstance(url, str)
-                or not kwargs.keys() <= {"params", "headers", "timeout", "allow_redirects"}):
+                or not kwargs.keys() <= ({"headers", "timeout", "allow_redirects", "stream", "verify"}
+                                        if bounded else {"params", "headers", "timeout", "allow_redirects"})):
             _deny()
         target = urlsplit(url)
         if (target.scheme != "https" or target.netloc != origin.netloc
                 or target.query or target.fragment or any(key in kwargs for key in ("data", "json", "files"))):
             _deny()
-        _validate_path(target.path, kwargs.get("params"))
+        if bounded:
+            readiness_transport_valid()
+            readiness_path(target.path)
+            if (kwargs.get("stream") is not True or kwargs.get("verify") is not True
+                    or kwargs.get("allow_redirects") is not False):
+                _deny()
+        else:
+            _validate_path(target.path, kwargs.get("params"))
         headers = kwargs.get("headers", {})
         if not isinstance(headers, dict) or any(not isinstance(key, str) or key.lower() in {
                 "x-http-method-override", "x-http-method", "x-method-override"} for key in headers):
             _deny()
+        if bounded and any(not isinstance(value, str) or "\r" in value or "\n" in value for value in headers.values()):
+            _deny()
         if kwargs.get("allow_redirects") not in {None, False}:
             _deny()
         kwargs["allow_redirects"] = False
+        if bounded:
+            context[1]["fitness_http_attempts"] += 1
         response = send(method, url, **kwargs)
+        if bounded:
+            return response  # The bounded reader closes even 401/3xx before handling.
         if 300 <= response.status_code < 400:
             _deny()  # Never forward an authenticated request to a redirect.
         return response
@@ -174,14 +230,41 @@ def _install_transport_policy(sdk):
     sdk.connectapi = checked_api
     sdk.download = checked_download
 
+    def read_readiness(cdate):
+        _valid_day(cdate)  # Upper guard, before headers or transport.
+        path = f"/metrics-service/metrics/trainingreadiness/{cdate}"
+        readiness_path(path)
+        readiness_transport_valid()
+        try:
+            headers = client.get_api_headers()  # DI or JWT_WEB; does not mutate tokens.
+        except GarminConnectAuthenticationError:
+            return ReadinessRead("auth_required")
+        headers = {**headers, "Accept": "application/json", "Accept-Encoding": "identity"}
+
+        def fixed_send(auth_headers, timeout, metrics):
+            return session.request("GET", f"https://{origin.netloc}{path}", headers=auth_headers,
+                timeout=timeout, stream=True, verify=True, allow_redirects=False,
+                _readiness_context=(readiness_capability, metrics))
+
+        result = bounded_read(fixed_send, headers)
+        if result.status == "redirect":
+            _deny()
+        return result
+
+    return read_readiness
+
 
 class ReadOnlyGarmin:
     """Expose only explicitly reviewed reads, with no runtime opt-out flag."""
-    __slots__ = ("__sdk",)
+    __slots__ = ("__sdk", "__readiness")
 
     def __init__(self, sdk):
-        _install_transport_policy(sdk)
+        self.__readiness = _install_transport_policy(sdk)
         self.__sdk = sdk
+
+    def get_training_readiness_bounded(self, cdate):
+        """Fixed bounded GET; <=1 fitness send, zero auth/refresh/replay."""
+        return self.__readiness(cdate)
 
     def get_activity_page(self, start_date, end_date, *, offset=0, limit=20):
         """Fixed GET route and query, zero SDK/network retries (auth replay <=1).

@@ -3,6 +3,9 @@ import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_training_day_contract.py", "worker/test-runtime/generated/training-day.json",
+], { cwd: root, stdio: "inherit" });
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
   "scripts/build_training_context_contract.py", "worker/test-runtime/generated/training-context.json",
 ], { cwd: root, stdio: "inherit" });
 execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [

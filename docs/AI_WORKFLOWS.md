@@ -164,6 +164,21 @@ Use `granularity=weekly` for compact history even over a short period. Week
 summaries group wake-dates; use the returned night-of weekday fields when comparing
 Friday/Saturday nights. Coverage follows the stored indexes, not a fixed 30 days.
 
+When stored Garmin Readiness/Recovery context is useful, add one bounded
+`training_history` read for the review period (at most 31 dates). Collection
+defaults off: `not_collected` does not authorize a sync. Inspect observation
+and check ages, retained fields, device/wakeup ambiguity and Recovery conflicts.
+These are estimates at the reported time; do not count down recovery minutes or
+infer medical causes. This read always uses canonical days, independently of
+the existing sleep/HRV indexes and their freshness contracts.
+The compact response shares source/units at result level. Resolve each candidate's
+latest/morning observation reference within that day's observations, then each
+field's time_ref/check_ref within the same day's clocks/checks. A retained field
+can have an older clock/check than its surrounding observation. Inspect last_attempt
+separately from selection_status; an auth/source failure or partial response does
+not prove that the configured device is absent. A normal one-device month fits
+the existing output limits; complex oversized cases return output_limit explicitly.
+
 ```json
 [
   {"tool":"activity_stats","arguments":{"start_date":"2026-09-14","end_date":"2026-09-20","group_by":"sport"}},
@@ -171,6 +186,12 @@ Friday/Saturday nights. Coverage follows the stored indexes, not a fixed 30 days
   {"tool":"sleep_history","arguments":{"start_date":"2026-09-07","end_date":"2026-09-20","granularity":"weekly","detail_level":"summary"}},
   {"tool":"hrv_history","arguments":{"start_date":"2026-09-07","end_date":"2026-09-20","granularity":"weekly","detail_level":"summary"}}
 ]
+```
+
+Optional stored training context:
+
+```json
+[{"tool":"training_history","arguments":{"start_date":"2026-09-07","end_date":"2026-09-20"}}]
 ```
 
 ## 5. Long-term sleep and HRV

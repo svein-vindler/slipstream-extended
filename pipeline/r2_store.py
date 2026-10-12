@@ -28,6 +28,14 @@ class R2BudgetError(RuntimeError):
     """Raised before a write would exceed a configured free-tier safety limit."""
 
 
+class R2ReadBoundaryError(ValueError):
+    """A bounded object could not be consumed safely; contains no key/body."""
+
+    def __init__(self, status):
+        self.status = status
+        super().__init__("Bounded storage read rejected")
+
+
 @dataclass
 class _BucketBudget:
     """Conservative accounting owned by one serial refresh, never persisted."""
@@ -99,6 +107,7 @@ class R2Store:
         # Inventory pages used by write guards are included.
         self.operations = {"get": 0, "head": 0, "list_pages": 0, "listed_objects": 0, "put": 0}
         self.timings_ms = {"get": 0.0, "head": 0.0, "list": 0.0, "put": 0.0, "inventory": 0.0}
+        self.bounded_read_bytes = 0  # Application-consumed bytes, including overflow checks.
 
     @property
     def write_budget_initialized(self) -> bool:
@@ -214,6 +223,41 @@ class R2Store:
         with timed(self.timings_ms, "get"):
             response = self.client.get_object(Bucket=self.bucket, Key=key)
             return response["Body"].read()
+
+    def get_bounded(self, key: str, max_bytes: int) -> bytes:
+        """One counted GET; identity bytes only, limit before parsing, always close.
+
+        Additive reader: existing unbounded consumers are unchanged. Underlying
+        SDK retries are outside these application-operation counters.
+        """
+        if type(max_bytes) is not int or max_bytes <= 0:
+            raise ValueError("Invalid storage read limit")
+        self.operations["get"] += 1
+        with timed(self.timings_ms, "get"):
+            response = self.client.get_object(Bucket=self.bucket, Key=key)
+            body = response["Body"]
+            try:
+                length = response.get("ContentLength")
+                if length is not None and (type(length) is not int or length < 0):
+                    raise R2ReadBoundaryError("schema_unverified")
+                if length is not None and length > max_bytes:
+                    raise R2ReadBoundaryError("oversize")
+                if response.get("ContentEncoding") not in {None, "", "identity"}:
+                    raise R2ReadBoundaryError("schema_unverified")
+                data = bytearray()
+                while True:
+                    chunk = body.read(min(4096, max_bytes + 1 - len(data)))
+                    self.bounded_read_bytes += len(chunk)
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                    if len(data) > max_bytes:
+                        raise R2ReadBoundaryError("oversize")
+                if length is not None and len(data) != length:
+                    raise R2ReadBoundaryError("schema_unverified")
+                return bytes(data)
+            finally:
+                body.close()
 
     def put_if_changed(self, key: str, data: bytes, content_type: str, *, encoding: str | None = None) -> bool:
         """Skip identical single-PUT objects, including their serving metadata."""
