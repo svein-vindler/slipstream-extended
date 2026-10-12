@@ -23,12 +23,14 @@ from . import (
     refresh_summaries,
     summary_export,
     summary_restore,
+    training_sync,
 )
 from .freshness import recent_day
 from .granular import json_bytes
 from .local_bootstrap import prepare_environment
 from .r2_store import R2Store
 from .sources.garmin import _login
+from .training_day import configuration as training_configuration
 
 
 @dataclass(frozen=True)
@@ -199,7 +201,7 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
             add("body", checked, "not_checked" if not result["days_checked"] else
                 "failed" if not checked else "not_ready" if result["days_not_ready"] else "checked")
 
-    def stage(name, operation, *, storage=True):
+    def stage(name, operation, *, storage=True, same_budget=False):
         nonlocal last_store, publication_store
         expects_source = name in {"refresh_summaries", "historical_health", "recent_health", "recent_body",
                                   "manual_activity", "latest_activity", "latest_night"} and not request.repair_only
@@ -208,16 +210,19 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
         # their factory semantics.
         store = None
         before = {}
+        before_timings = {}
         calls, errors = provider.calls, provider.errors
         source_ms = provider.elapsed_ms
         started = time.perf_counter()
         entry = {"stage": name, "status": "complete"}
         try:
-            store = (last_store.new_stage() if isinstance(last_store, R2Store)
+            store = (last_store if same_budget and last_store is not None else
+                     last_store.new_stage() if isinstance(last_store, R2Store)
                      else store_factory()) if storage else None
             if store is not None:
                 last_store = store
             before = dict(getattr(store, "operations", {}))
+            before_timings = dict(getattr(store, "timings_ms", {}))
             result = operation(store)
             source_checks(result)
             if isinstance(result, dict) and result.get("status") in {
@@ -242,14 +247,14 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
                          garmin_connectapi_calls=provider.calls - calls if provider.available or not expects_source else None,
                          garmin_connectapi_errors=provider.errors - errors if provider.available or not expects_source else None,
                          garmin_fetch_ms=round(provider.elapsed_ms - source_ms) if provider.available or not expects_source else None,
-                         r2_read_ms=round(sum(getattr(store, "timings_ms", {}).get(k, 0) for k in ("get", "head", "list")))
+                         r2_read_ms=round(sum(getattr(store, "timings_ms", {}).get(k, 0) - before_timings.get(k, 0) for k in ("get", "head", "list")))
                              if hasattr(store, "timings_ms") else None if storage else 0,
-                         r2_write_ms=round(store.timings_ms["put"]) if hasattr(store, "timings_ms") else None if storage else 0,
-                         **{f"r2_{key}_ms": round(store.timings_ms[key]) if hasattr(store, "timings_ms")
+                         r2_write_ms=round(store.timings_ms["put"] - before_timings.get("put", 0)) if hasattr(store, "timings_ms") else None if storage else 0,
+                         **{f"r2_{key}_ms": round(store.timings_ms[key] - before_timings.get(key, 0)) if hasattr(store, "timings_ms")
                             and key in store.timings_ms else None if storage else 0
                             for key in ("get", "head", "list", "inventory")},
-                         activity_file_import_ms=getattr(store, "component_timings_ms", {}).get("activity_file_import"),
-                         coach_input_ms=getattr(store, "component_timings_ms", {}).get("coach_input"),
+                         activity_file_import_ms=None if same_budget else getattr(store, "component_timings_ms", {}).get("activity_file_import"),
+                         coach_input_ms=None if same_budget else getattr(store, "component_timings_ms", {}).get("coach_input"),
                          r2_sdk_operations={key: value - before.get(key, 0)
                                             for key, value in getattr(store, "operations", {}).items()})
             report["stages"].append(entry)
@@ -291,6 +296,13 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
                 stage("manual_activity", lambda store: manual_activity_refresh.run(
                     baseline=baseline, summary=data / "activities.csv", run_id=request.run_id,
                     store=store, garmin=provider.get()))
+            # Optional source after critical work; no new stage allowance,
+            # targeted/backfill/repair fetch, or component login fallback.
+            if not request.backfill and not request.repair_only:
+                training_config = training_configuration(os.environ)
+                if training_config["status"] == "enabled":
+                    stage("training_context", lambda store: training_sync.run(
+                        config=training_config, store=store, garmin=provider.client), same_budget=True)
     finally:
         try:
             # As with the old !cancelled() scheduled-only step, repair derived

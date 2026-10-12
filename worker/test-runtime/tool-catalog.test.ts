@@ -99,6 +99,7 @@ it.each([false, true])("preserves the previous contracts apart from optional con
     }));
   }
   const tools = modes.find(mode => mode.writes === writes && mode.refresh)!.tools
+    .filter(tool => tool.name !== "training_history") // Worker 07's one additive read tool.
     .map(tool => {
       // Only these two reviewed detail outputs/descriptions change in Worker 06.
       const descriptions: Record<string, string> = {
@@ -122,7 +123,7 @@ it.each([false, true])("preserves the previous contracts apart from optional con
 });
 
 it("matches the deterministic catalog from all actual registration modes", async () => {
-  expect(modes.map(mode => mode.tools.length)).toEqual([19, 23, 21, 25]);
+  expect(modes.map(mode => mode.tools.length)).toEqual([20, 24, 22, 26]);
   const rendered = renderCatalog(modes);
   expect(renderCatalog([...modes].reverse().map(mode => ({ ...mode, tools: [...mode.tools].reverse() })))).toBe(rendered);
   await expect(rendered).toMatchFileSnapshot("../../docs/TOOL_CATALOG.md");

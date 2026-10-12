@@ -5,6 +5,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { outputSchemas, structuredToolResult } from "../src/mcp-output";
 
 const TOOL_NAMES = [
+  "training_history",
   "data_status",
   "list_activities",
   "activity_stats",

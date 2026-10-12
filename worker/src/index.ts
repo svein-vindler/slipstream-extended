@@ -30,6 +30,7 @@ import {
   healthBucketKey, bodyCompositionObjectKeys,
 } from "./lib";
 import { SleepHrvTools } from "./sleep-hrv-tools";
+import { registerTrainingTools } from "./training-tools";
 import { ActivityCoachTools } from "./activity-coach-tools";
 import { exactDate, dateRange, PRIVATE_READ_TOOL_ANNOTATIONS } from "./tool-contracts";
 import {
@@ -322,6 +323,7 @@ class FitnessService {
     });
 
     this.nights.registerTools(server);
+    registerTrainingTools(server, this.env.SLIPSTREAM_DATA);
 
     server.registerTool("body_composition", {
       description: "Read all Garmin body-composition measurements stored for one date, including weight, BMI, body fat, water, muscle, bone mass and related scale metrics.",
