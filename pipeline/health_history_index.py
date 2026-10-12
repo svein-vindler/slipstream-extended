@@ -7,7 +7,6 @@ index per month.  It never calls Garmin.
 
 from __future__ import annotations
 
-import argparse
 import gzip
 import json
 import math
@@ -22,6 +21,7 @@ from typing import Any
 from botocore.exceptions import ClientError
 
 from .granular import gzip_json
+from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2Store, missing_object
 
 SCHEMA_VERSION = 1
@@ -514,14 +514,15 @@ def run(
         "r2_operations": {key: store.operations[key] - value for key, value in before.items()},
         "elapsed_ms": round((time.perf_counter() - started) * 1000),
     }
-    print(json.dumps(report, indent=2, ensure_ascii=False))
+    log_report("health_history_index", report)
     return report
 
 
+@safe_cli
 def main() -> None:
     from .local_bootstrap import load_env_file
 
-    parser = argparse.ArgumentParser(
+    parser = SafeArgumentParser(
         description="Build compact monthly HRV/sleep history indexes from private R2."
     )
     parser.add_argument("--stream", action="append", choices=STREAMS)

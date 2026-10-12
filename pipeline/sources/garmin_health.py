@@ -63,12 +63,12 @@ def _call(label: str, fn: Callable[[], Any], pause: float, diagnostics: dict | N
             rate_limited = "TooManyRequests" in type(exc).__name__ or "429" in str(exc)
             if rate_limited and attempt < len(delays):
                 wait = delays[attempt]
-                print(f"[garmin-health] rate limited in {label}; waiting {wait}s", file=sys.stderr)
+                print(f"[garmin-health] rate limited; waiting {wait}s", file=sys.stderr)
                 time.sleep(wait)
                 continue
             if diagnostics is not None:
                 diagnostics["source_errors"] = diagnostics.get("source_errors", 0) + 1
-            print(f"[garmin-health] skipped {label}: {type(exc).__name__}", file=sys.stderr)
+            print("[garmin-health] skipped source request: operation_failed", file=sys.stderr)
             return None
     return None
 
@@ -246,7 +246,7 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15,
     for index, current in enumerate(_days(start, end), start=1):
         day = current.isoformat()
         if index == 1 or index % 30 == 0 or index == total_days:
-            print(f"[garmin-health] daily summaries {index}/{total_days}: {day}", file=sys.stderr)
+            print(f"[garmin-health] daily summaries {index}/{total_days}", file=sys.stderr)
 
         stats = call(f"daily stats {day}", lambda d=day: g.get_stats(d), request_pause) or {}
         if isinstance(stats, dict):

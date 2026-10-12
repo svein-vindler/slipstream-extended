@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import csv
 import json
 from datetime import date, datetime, timedelta, timezone
@@ -15,6 +14,7 @@ from .coach_backfill import _float, _json
 from .coach_backfill import run_one as run_coach_one
 from .granular import activity_prefix, activity_type, gzip_json
 from .granular_export import activity_artifact_keys
+from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2BudgetError, R2Store
 from .sources.garmin import _login
 
@@ -218,9 +218,9 @@ def run(
                             result["coach_reused"] = activity_id in plan.get("reused_sources", {})
                     except R2BudgetError:
                         raise
-                    except Exception as exc:
+                    except Exception:
                         result["coach_status"] = "error"
-                        print(f"On-demand coach input failed: {type(exc).__name__}")
+                        print("On-demand coach input failed: operation_failed")
         except R2BudgetError:
             raise
         except Exception as exc:
@@ -246,12 +246,13 @@ def run(
             json.dumps(report, separators=(",", ":"), ensure_ascii=False).encode(),
             "application/json",
         )
-    print(json.dumps(report, indent=2, ensure_ascii=False))
+    log_report("manual_activity_refresh", report)
     return report
 
 
+@safe_cli
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Prioritize workouts in an on-demand refresh")
+    parser = SafeArgumentParser(description="Prioritize workouts in an on-demand refresh")
     subparsers = parser.add_subparsers(dest="action", required=True)
     before = subparsers.add_parser("snapshot")
     before.add_argument("--summary", type=Path, required=True)

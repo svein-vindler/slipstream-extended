@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import csv
 import io
 import json
@@ -19,6 +18,7 @@ from .activity_backfill import (
 )
 from .activity_pagination import MAX_CHECKPOINT_BYTES, load_cursor, range_status
 from .granular import json_bytes
+from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2Store
 from .sources.activity_page import MetadataBudget
 from .sources.garmin import _login
@@ -140,7 +140,7 @@ def run(
         if plan.get("schema_version") not in {1, 2}:
             raise ValueError("Unsupported activity backfill plan schema")
         if plan.get("status") == "complete":
-            print(json.dumps(plan, indent=2, ensure_ascii=False))
+            log_report("activity_backfill_scheduler", plan)
             return plan
     else:
         plan = new_plan(store.get("summary/activities.csv"))
@@ -207,12 +207,13 @@ def run(
     plan["last_run_at"] = datetime.now(timezone.utc).isoformat()
     plan["last_run_ranges"] = processed_ranges
     store.put(PLAN_KEY, json_bytes(plan), "application/json")
-    print(json.dumps(plan, indent=2, ensure_ascii=False))
+    log_report("activity_backfill_scheduler", plan)
     return plan
 
 
+@safe_cli
 def main():
-    parser = argparse.ArgumentParser(
+    parser = SafeArgumentParser(
         description="Advance the automatic activity backfill by one safe batch."
     )
     parser.add_argument("--max-activities", type=int, default=50)

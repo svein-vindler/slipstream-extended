@@ -1,3 +1,4 @@
+import { applicationToolResult } from "./application-errors";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { hrvObjectKeys, sleepObjectKeys } from "./lib";
@@ -222,7 +223,7 @@ export class SleepHrvTools {
       }),
       outputSchema: outputSchemas.hrv_history,
       annotations: PRIVATE_READ_TOOL_ANNOTATIONS,
-    }, async (args) => {
+    }, async (args, mcpContext) => applicationToolResult(server, mcpContext, async () => {
       const request = resolveHistoryRequest(
         args.start_date, args.end_date, args.granularity, args.detail_level,
       );
@@ -302,7 +303,7 @@ export class SleepHrvTools {
           invalid_index_objects: invalidIndexObjects,
         },
       });
-    });
+    }));
 
     server.registerTool("sleep_detail", {
       description: "Read detailed Garmin sleep for one morning wake-date. Local night_of is the sleep-start date, using Garmin's local timestamps when available and HEALTH_TIMEZONE only as fallback. Includes window, stages and score without raw Garmin payload.",
@@ -362,7 +363,7 @@ export class SleepHrvTools {
       }),
       outputSchema: outputSchemas.sleep_history,
       annotations: PRIVATE_READ_TOOL_ANNOTATIONS,
-    }, async (args) => {
+    }, async (args, mcpContext) => applicationToolResult(server, mcpContext, async () => {
       const request = resolveHistoryRequest(
         args.start_date, args.end_date, args.granularity, args.detail_level,
       );
@@ -421,7 +422,7 @@ export class SleepHrvTools {
           invalid_index_objects: invalidIndexObjects,
         },
       });
-    });
+    }));
 
   }
 }

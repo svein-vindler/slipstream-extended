@@ -7,13 +7,12 @@ Runs on a schedule and on-demand (GitHub Actions or locally):
 
 from __future__ import annotations
 
-import argparse
-import json
 import os
 import sys
 from datetime import date, timedelta
 
 from .health_writer import write_health_dataset
+from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .writer import write_dataset
 
 
@@ -43,12 +42,13 @@ def run(
     health = garmin_health.fetch(start, end, client=client)
     print(f"[garmin-health] fetched {len(health)} populated days", file=sys.stderr)
     summary.update(write_health_dataset(health, data_dir, preserve_existing=True))
-    print(json.dumps(summary, indent=2))
+    log_report("fetch", summary)
     return summary
 
 
+@safe_cli
 def main():
-    ap = argparse.ArgumentParser(description="Fetch Garmin activities into data/.")
+    ap = SafeArgumentParser(description="Fetch Garmin activities into data/.")
     ap.add_argument("--days", type=int, default=int(os.environ.get("DAYS_BACK", "30")))
     ap.add_argument("--data-dir", default=os.environ.get("DATA_DIR", "data"))
     ap.add_argument("--skip-activities", action="store_true")

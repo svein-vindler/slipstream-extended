@@ -1,3 +1,4 @@
+import { ApplicationToolError } from "./application-errors";
 import { historyDates } from "./health-history";
 import { nightContext, validatedHealthTimezone } from "./night-context";
 
@@ -42,7 +43,7 @@ function record(value: unknown): Record<string, unknown> | null {
 
 function clockMinutes(value: string): number {
   const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(value);
-  if (!match) throw new Error("Morning window times must use HH:MM (24-hour local time).");
+  if (!match) throw new ApplicationToolError({ kind: "morning_format" });
   return Number(match[1]) * 60 + Number(match[2]);
 }
 
@@ -56,16 +57,16 @@ export function resolveWeightRequest(
 ) {
   const dates = historyDates(startDate, endDate);
   if (dates.length > 31) {
-    throw new Error("Weight history is limited to 31 calendar days per request.");
+    throw new ApplicationToolError({ kind: "weight_history_limit" });
   }
   const startMinute = clockMinutes(morningStart);
   const endMinute = clockMinutes(morningEnd);
   if (startMinute >= endMinute) {
-    throw new Error("morning_start must be earlier than morning_end on the same day.");
+    throw new ApplicationToolError({ kind: "morning_order" });
   }
   const timezone = validatedHealthTimezone(requestedTimezone ?? configuredTimezone);
   if (requestedTimezone !== undefined && timezone === null) {
-    throw new Error("timezone must be a valid IANA timezone, such as Europe/Oslo.");
+    throw new ApplicationToolError({ kind: "timezone" });
   }
   return { dates, startMinute, endMinute, timezone };
 }

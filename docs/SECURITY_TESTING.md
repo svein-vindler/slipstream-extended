@@ -54,6 +54,27 @@ server behavior. Also confirm:
   before parsing
 - error responses contain no tokens, email addresses or object contents
 
+## Hosted output privacy
+
+Run `pytest -q tests/test_output_privacy.py` and, from `worker`,
+`npm run test:unit -- test/output-privacy.test.ts` and
+`npm run test:runtime -- test-runtime/output-privacy.test.ts`.
+Use only synthetic inputs, fake providers and the local Workers test runtime.
+The tests capture CLI stdout/stderr, console and actual MCP responses, including
+text/structured content and SDK HTTP refusals. They preserve private reports,
+normal authorized fitness data, failure exits and existing status/rate limits.
+Actual JSON and SSE tool calls verify controlled period/granularity and
+weight timezone/window guidance, both coach write cooldowns and UTC-day budgets,
+and accepted boundary values. Matching provider text, forged error names/fields
+and non-Error exceptions must still receive generic text. SDK schema errors
+remain generic; application guidance is carried before SDK result validation
+copies the result, using the existing MCP ID within the request-scoped server.
+Test annotations hold aggregate byte/event/attempt measurements; they add no
+production logs, bindings or provider calls. Compare identical fixtures and
+include provider failures, unknown fields, long messages and control characters.
+Local tests do not establish that a production leak occurred, or measure
+production retention, account usage or hidden wire retries.
+
 ## Garmin read-only boundary
 
 Run `pytest -q tests/test_garmin_readonly.py` without real credentials. The suite

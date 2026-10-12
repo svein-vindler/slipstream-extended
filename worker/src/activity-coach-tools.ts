@@ -1,4 +1,7 @@
+import { ApplicationToolError, applicationToolResult } from "./application-errors";
 import { McpServer } from "@modelcontextprotocol/server";
+import { errorCategory } from "./output-privacy";
+
 import { z } from "zod";
 import {
   Activity, filterActs, activityFilterWarning, summarize, toSummary, bucketKey,
@@ -119,9 +122,9 @@ export class ActivityCoachTools {
         1, Math.ceil((lease.retryAfterMs ?? ttlMs) / 1000),
       );
       if (lease.reason === "daily_limit") {
-        throw new Error(`The daily MCP write safety limit has been reached. Retry in ${retrySeconds} seconds.`);
+        throw new ApplicationToolError({ kind: "write_daily_limit", retrySeconds });
       }
-      throw new Error(`A similar write was accepted recently. Retry in ${retrySeconds} seconds.`);
+      throw new ApplicationToolError({ kind: "write_cooldown", retrySeconds });
     }
   }
 
@@ -388,7 +391,7 @@ export class ActivityCoachTools {
       outputSchema: outputSchemas.add_coach_profile,
       annotations: { readOnlyHint: false, destructiveHint: false,
         idempotentHint: true, openWorldHint: false },
-    }, async (args) => {
+    }, async (args, mcpContext) => applicationToolResult(server, mcpContext, async () => {
       for (let index = 0; index < args.zones.length; index++) {
         const zone = args.zones[index];
         if (zone.min_bpm > zone.max_bpm || (index > 0
@@ -422,7 +425,7 @@ export class ActivityCoachTools {
         } catch (error) {
           console.error(JSON.stringify({
             message: "Coach profile was saved but its read index could not be updated",
-            error: error instanceof Error ? error.message : String(error),
+            error: errorCategory(error),
           }));
         }
       }
@@ -432,7 +435,7 @@ export class ActivityCoachTools {
         message: existing
           ? "This identical immutable profile was already stored."
           : "The immutable profile was saved. The R2-only coach backfill will use it for activities on or after its effective date." });
-    });
+    }));
 
       server.registerTool("add_activity_context", {
       title: "Add user context to an activity",
@@ -449,7 +452,7 @@ export class ActivityCoachTools {
       outputSchema: outputSchemas.add_activity_context,
       annotations: { readOnlyHint: false, destructiveHint: false,
         idempotentHint: false, openWorldHint: false },
-    }, async (args) => {
+    }, async (args, mcpContext) => applicationToolResult(server, mcpContext, async () => {
       const requested = rawGarminActivityId(args.activity_id);
       const activity = (await this.getActivities()).find(
         (item) => rawGarminActivityId(item.id) === requested,
@@ -474,7 +477,7 @@ export class ActivityCoachTools {
       await this.putSmallJson(key, context);
       return this.text({ saved: true, activity_id: requested, context_id: contextId,
         key, context, message: "The append-only context was saved. A later coach-input run will create a new analysis revision without overwriting the old one." });
-    });
+    }));
     }
 
     server.registerTool("coach_input", {

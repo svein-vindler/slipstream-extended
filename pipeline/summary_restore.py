@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import argparse
 import gzip
 import json
 from pathlib import Path
 from typing import Any
 
 from .granular import sha256
+from .output_privacy import SafeArgumentParser, log_report, safe_cli
 
 SUMMARY_FILES = (
     ("activities.csv", "summary/activities.csv", "Activity ID,"),
@@ -80,7 +80,7 @@ def restore_summaries(data_dir: str, store: Any) -> dict[str, Any]:
             for path, raw in restored
         ],
     }
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    log_report("summary_restore", result)
     return result
 
 
@@ -90,8 +90,9 @@ def run(data_dir: str = "data") -> dict[str, Any]:
     return restore_summaries(data_dir, R2Store())
 
 
+@safe_cli
 def main():
-    parser = argparse.ArgumentParser(description="Restore Slipstream summaries from private R2.")
+    parser = SafeArgumentParser(description="Restore Slipstream summaries from private R2.")
     parser.add_argument("--data-dir", default="data")
     args = parser.parse_args()
     run(args.data_dir)

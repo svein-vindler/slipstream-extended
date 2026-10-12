@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import argparse
-
 from .activity_backfill import is_job_stopping_error
 from .freshness import publish, receipt, recent_day
 from .health_sync import HealthNotReady, finalize_days, store_day
+from .output_privacy import SafeArgumentParser, safe_cli
 from .r2_store import R2BudgetError, R2Store
 from .sources.garmin import _login
 
@@ -48,8 +47,9 @@ def run(*, run_id: str, wake_date: str, request_id: str | None = None,
     return publish(store, run_id, scope, report, source_checked=source_checked)
 
 
+@safe_cli
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Import one recent Garmin night")
+    parser = SafeArgumentParser(description="Import one recent Garmin night")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--wake-date", required=True)
     parser.add_argument("--request-id")

@@ -101,10 +101,8 @@ async function githubJson(
     headers: { ...headers(config), ...init.headers },
   });
   if (!response.ok) {
-    const requestId = response.headers.get("x-github-request-id");
-    const suffix = requestId ? ` (request ${requestId})` : "";
     throw new GitHubRequestError(response.status, init.method ?? "GET",
-      `GitHub Actions request failed with HTTP ${response.status}${suffix}.`);
+      `GitHub Actions request failed with HTTP ${response.status}.`);
   }
   if (response.status === 204) return null;
   return response.json() as Promise<unknown>;

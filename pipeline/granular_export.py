@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 from datetime import date, timedelta
@@ -23,6 +22,7 @@ from .granular import (
     sha256,
 )
 from .health_history_index import sync_dates
+from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .sources.garmin import _login
 
 MAX_HRV_DAYS_PER_RUN = 60
@@ -264,12 +264,13 @@ def run(
     _write_or_upload(
         output, "pilot/manifest.json", manifest_data, "application/json", store
     )
-    print(json.dumps(manifest, indent=2, ensure_ascii=False))
+    log_report("granular_export", manifest)
     return manifest
 
 
+@safe_cli
 def main():
-    parser = argparse.ArgumentParser(description="Export a small granular Garmin pilot.")
+    parser = SafeArgumentParser(description="Export a small granular Garmin pilot.")
     parser.add_argument("--hrv-days", type=int, default=7)
     parser.add_argument("--activity-days", type=int, default=180)
     parser.add_argument("--cardio-count", type=int, default=2)
@@ -281,8 +282,8 @@ def main():
         validate_granular_request(
             args.hrv_days, args.activity_days, args.cardio_count, args.strength_count
         )
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
+    except ValueError:
+        print("Invalid granular export arguments; check --help.", file=sys.stderr)
         raise SystemExit(2) from None
     run(
         hrv_days=args.hrv_days,

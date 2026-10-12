@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import csv
 import io
 import json
@@ -12,6 +11,7 @@ from typing import Any
 from .activity_backfill import is_job_stopping_error
 from .granular import gzip_json, json_bytes, normalize_hrv
 from .health_history_index import sync_dates
+from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2BudgetError, R2Store
 from .sources.garmin import _login
 from .summary_restore import decode_summary
@@ -156,9 +156,7 @@ def run(
         if previous_status in {"complete", "complete_with_blocked"}:
             retrying = previous_status == "complete_with_blocked" and retry_failures
             if not changed and not retrying:
-                print(json.dumps({
-                    key: value for key, value in plan.items() if key != "target_dates"
-                }, indent=2, ensure_ascii=False))
+                log_report("hrv_backfill", plan)
                 return plan
             plan["status"] = "active"
             plan.pop("completed_at", None)
@@ -247,14 +245,13 @@ def run(
     if status in {"complete", "complete_with_blocked"}:
         plan["completed_at"] = datetime.now(timezone.utc).isoformat()
     store.put(PLAN_KEY, json_bytes(plan), "application/json")
-    print(json.dumps({
-        key: value for key, value in plan.items() if key != "target_dates"
-    }, indent=2, ensure_ascii=False))
+    log_report("hrv_backfill", plan)
     return plan
 
 
+@safe_cli
 def main():
-    parser = argparse.ArgumentParser(
+    parser = SafeArgumentParser(
         description="Advance the automatic detailed HRV backfill by one safe batch."
     )
     parser.add_argument("--max-days", type=int, default=50)
