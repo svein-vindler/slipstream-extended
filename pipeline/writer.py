@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from .schema import Activity
+from .schema import Activity, activity_metric, activity_text
 
 _HEADERS = [
     "Activity ID", "Activity Date", "Activity Name", "Activity Type", "Raw Sport",
@@ -16,6 +16,7 @@ _HEADERS = [
 
 
 def _num(v, ndigits):
+    v = activity_metric(v)
     if v is None:
         return ""
     r = round(float(v), ndigits)
@@ -23,8 +24,9 @@ def _num(v, ndigits):
 
 
 def _avg_speed_ms(a: Activity) -> float | None:
-    if a.distance_km and a.moving_s:
-        return (a.distance_km * 1000.0) / a.moving_s
+    distance, moving = activity_metric(a.distance_km), activity_metric(a.moving_s)
+    if distance is not None and moving is not None and moving > 0:
+        return (distance * 1000.0) / moving
     return None
 
 
@@ -32,13 +34,13 @@ def _row(a: Activity) -> list:
     return [
         f"{a.source}-{a.source_id}" if a.source_id else "",
         a.start.strftime("%Y-%m-%d %H:%M:%S") if a.start else "",
-        a.name or "",
-        (a.sport or "other").title(),
-        a.raw_sport or "",
+        activity_text(a.name) or "",
+        (activity_text(a.sport) or "other").title(),
+        activity_text(a.raw_sport) or "",
         _num(a.distance_km, 3),
-        a.track_file or "",
-        a.moving_s if a.moving_s is not None else "",
-        a.elapsed_s if a.elapsed_s is not None else "",
+        activity_text(a.track_file) or "",
+        _num(a.moving_s, 0),
+        _num(a.elapsed_s, 0),
         _num(a.max_hr, 0),
         _num(a.avg_hr, 1),
         _num(a.elevation_gain_m, 1),
@@ -62,6 +64,13 @@ def _existing_rows(csv_path: Path) -> dict[str, list[str]]:
         }
 
 
+def _stored_metric(value):
+    try:
+        return activity_metric(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def write_dataset(
     activities: list[Activity], data_dir: str, *, preserve_existing: bool = False
 ) -> dict:
@@ -73,14 +82,32 @@ def write_dataset(
     existing = _existing_rows(csv_path) if preserve_existing else {}
     fetched = [_row(a) for a in activities if a.start is not None]
 
-    # Keep the historical dataset, while letting a newly fetched activity
-    # replace the older copy with the same source/id. If track downloads are
-    # disabled for routine refreshes, retain any existing private GPX filename.
+    # Missing fields in a legitimate partial response are not deletions.
+    # Retained values remain previous observations, not fresh measurements.
     merged = dict(existing)
-    for row in fetched:
+    for activity, row in zip((a for a in activities if a.start is not None), fetched, strict=True):
         activity_id = str(row[0])
-        if activity_id in existing and not row[6]:
-            row[6] = existing[activity_id][6]
+        if activity_id in merged:
+            old = list(merged[activity_id])
+            for index in (5, 7, 8, 9, 10, 11, 12, 13, 14):
+                if _stored_metric(old[index]) is None:
+                    old[index] = ""
+            for index, value in enumerate(row):
+                if value == "":
+                    row[index] = old[index]
+            if row[3] == "Other" and not activity_text(activity.raw_sport):
+                row[3] = old[3]
+            if activity.moving_s_is_elapsed_fallback and old[7] != "":
+                row[7] = old[7]
+            # Speed derives from the merged distance and moving time. Retaining
+            # an old derived value after either input changes would be stale.
+            distance, moving = _stored_metric(row[5]), _stored_metric(row[7])
+            if distance is None or moving is None or moving == 0:
+                row[12] = ""
+            elif (distance, moving) == (_stored_metric(old[5]), _stored_metric(old[7])) and old[12] != "":
+                row[12] = old[12]
+            else:
+                row[12] = _num(distance * 1000 / moving, 3)
         merged[activity_id] = row
 
     rows = sorted(merged.values(), key=lambda row: row[1], reverse=True)

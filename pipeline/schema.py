@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import isfinite
 
 # Map Garmin's many sport keys onto a tidy family for display/filtering.
 _SPORT_FAMILY = {
@@ -40,6 +41,21 @@ def to_utc(dt: datetime | None) -> datetime | None:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 
+def activity_metric(value) -> float | None:
+    """Summary metrics accept finite nonnegative numbers, including zero."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if isfinite(number) and number >= 0 else None
+
+
+def activity_text(value) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
 @dataclass
 class Activity:
     source: str
@@ -59,6 +75,7 @@ class Activity:
     track_file: str | None = None
     local_start_date: str | None = None
     local_start_time: str | None = None
+    moving_s_is_elapsed_fallback: bool = False
 
     def __post_init__(self):
         self.start = to_utc(self.start)

@@ -9,6 +9,7 @@ from botocore.exceptions import ClientError
 
 from pipeline.r2_store import R2BudgetError, R2Store
 from pipeline.refresh_summaries import checkpoint_key, run, select_windows
+from pipeline.summary_restore import decode_summary, restore_summaries
 from scripts.benchmark_summary_windows import NOW, HealthClient, SummaryGarmin
 
 
@@ -267,6 +268,30 @@ def test_valid_empty_activity_window_is_checked_without_deleting_history(environ
     result = refresh(now=NOW + timedelta(minutes=1))
     assert result["windows"]["activities"]["source_checked"] is True
     assert (root / "activities.csv").read_bytes() == original
+
+
+def test_valid_sparse_activity_preserves_published_values_and_restore(environment, monkeypatch, tmp_path):
+    storage, sdk, root, refresh = environment
+    refresh()
+    original = (root / "activities.csv").read_bytes()
+    rows = list(csv.DictReader(StringIO(original.decode())))
+    previous = rows[0]
+    activity_id = int(previous["Activity ID"].removeprefix("garmin-"))
+    monkeypatch.setattr(sdk, "get_activities_by_date", lambda *args: [{
+        "activityId": activity_id, "startTimeGMT": previous["Activity Date"],
+        "activityName": "Renamed synthetic activity"}])
+    result = refresh(now=NOW + timedelta(minutes=1))
+    published = decode_summary(storage.objects["summary/activities.csv"]["Body"], "Activity ID,")
+    after = list(csv.DictReader(StringIO(published.decode())))
+    assert after == [{**previous, "Activity Name": "Renamed synthetic activity"}, *rows[1:]]
+    assert result["windows"]["activities"]["source_checked"] is True
+    restored = tmp_path / "restored"
+    restore_summaries(str(restored), R2Store(client=storage, bucket="synthetic-summary"))
+    assert (restored / "activities.csv").read_bytes() == published
+    storage.reset()
+    refresh(now=NOW + timedelta(minutes=2))
+    assert (root / "activities.csv").read_bytes() == published
+    assert storage.writes == [checkpoint_key(s, False) for s in ("activities", "health")]
     assert check(storage, "activities", False)["scope"] == "recent"
 
 
