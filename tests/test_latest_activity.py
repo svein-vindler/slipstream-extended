@@ -28,6 +28,12 @@ class FakeStore:
     def put(self, key, data, content_type, *, encoding=None):
         self.objects[key] = data
 
+    def put_if_absent(self, key, data, content_type, *, encoding=None):
+        if key in self.objects:
+            return False
+        self.put(key, data, content_type, encoding=encoding)
+        return True
+
 
 class FakeGarmin:
     def __init__(self):

@@ -319,12 +319,18 @@ objects under the activity's `context/v1/` prefix.
 
 Profiles live under `coach/profiles/v1/` and have an `effective_from` date.
 Changing zones therefore affects later activities without silently rewriting
-historical analyses. The analysis identifier includes the source hashes,
-profile, context revision and analyzer version, so explicit reanalysis produces
-a new object rather than overwriting the previous one.
+historical analyses. Bulk and targeted generation share a deterministic
+content identity covering relevant metadata and derived measurements as well as
+source hashes, profile, context and analyzer version. Conditional create-only
+publication preserves prior bytes even after retries or concurrent writes.
+A shared current-selection pointer is published before bulk progress; consumers
+use it rather than canonical upload time, with bounded ordinary legacy fallback.
+See [Coach Input versioning](COACH_INPUT_VERSIONING.md) for legacy compatibility,
+collision handling and synthetic operation counts.
 
-The scheduled job processes 50 activities by default and at maximum, with 60
-R2 writes and 64 MiB per run. A completed plan remains passive until the activity
+The scheduled job requests at most 50 activities, with unchanged limits of 60
+R2 writes and 64 MiB per run. It reserves current-selection and plan checkpoints,
+so a batch of new analyses handles at most 29 activities under that write limit. A completed plan remains passive until the activity
 summary, a source manifest, a profile, or activity context changes. Heavy TCX
 calculation runs in GitHub Actions; the Worker only performs bounded validation
 and small R2 reads/writes. The existing per-user MCP rate limit still applies.

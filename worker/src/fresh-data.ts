@@ -1,3 +1,4 @@
+import { readCurrentCoachInput } from "./coach-selection";
 /** R2-first, explicitly authorized recent activity/night retrieval. */
 import { z } from "zod";
 import { Activity, hrvObjectKeys, rawGarminActivityId, sleepObjectKeys } from "./lib";
@@ -341,27 +342,28 @@ export class FreshDataService {
         || String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")))[0] : null;
     let coach: Json = {};
     if (running) {
-      const pointer = await this.json([`${prefix}/coach-input/v1/latest-ready.json`], true);
-      const revisions = record(pointer.source_revisions);
-      const sources = ["activity.v1.json", "activity.endurance.v1.json", "activity.tcx"];
-      const pointerValid = pointer.schema_version === 1 && sources.every((name) => {
-        const key = `${prefix}/${name}`;
-        return revisions[key] && objects.find((item) => item.key === key)?.etag === revisions[key];
+      const selection = await readCurrentCoachInput({
+        canonicalPrefix: `${prefix}/coach-input/v1/canonical/`, activityId: id,
+        date: selected.local.slice(0, 10), allowLegacy: false,
+        pointerUploaded: objects.find(item => item.key === `${prefix}/coach-input/v1/latest-ready.json`)?.uploaded,
+        read: async (keys, limits) => {
+          const data = await this.json(keys, Boolean(limits));
+          return Object.keys(data).length ? { key: keys[0], data } : null;
+        },
+        versions: async () => objects,
+        acceptPointer: (pointer) => {
+          const revisions = record(pointer.source_revisions);
+          return ["activity.v1.json", "activity.endurance.v1.json", "activity.tcx"].every((name) => {
+            const key = `${prefix}/${name}`;
+            return revisions[key] && objects.find(item => item.key === key)?.etag === revisions[key];
+          });
+        },
       });
-      const analysisKey = typeof pointer.analysis_key === "string" ? pointer.analysis_key : "";
-      const versions = pointerValid && analysisKey.startsWith(`${prefix}/coach-input/v1/canonical/`)
-        ? objects.filter((object) => object.key === analysisKey) : [];
-      for (const version of versions) {
-        const candidate = await this.json([version.key]);
-        if (candidate.schema_version === 1 && typeof candidate.analysis_id === "string"
-          && String(candidate.activity_id) === id && record(candidate.activity).date === selected.local.slice(0, 10)
-          && record(candidate.user_context).context_id === context.context_id
-          && typeof decoded.source_fit_sha256 === "string"
-          && record(candidate.source).fit_sha256 === decoded.source_fit_sha256
-          && profile && record(candidate.profile).profile_id === profile.profile_id) {
-          coach = candidate; break;
-        }
-      }
+      const candidate = selection.status === "available" ? selection.analysis : null;
+      if (candidate && record(candidate.user_context).context_id === context.context_id
+        && typeof decoded.source_fit_sha256 === "string"
+        && record(candidate.source).fit_sha256 === decoded.source_fit_sha256
+        && profile && record(candidate.profile).profile_id === profile.profile_id) coach = candidate;
     }
     if (running && !Object.keys(coach).length) {
       result.missing_components.push("coach_input");

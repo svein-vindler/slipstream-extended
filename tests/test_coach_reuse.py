@@ -184,7 +184,8 @@ def test_store_without_revision_metadata_rebuilds_conservatively(store, builds, 
     run_one(activity=ACTIVITY, store=store)
     run_one(activity=ACTIVITY, store=store)
     assert len(builds) == 2
-    assert POINTER not in store.objects
+    assert json.loads(store.objects[POINTER])["source_revisions"] == {}
+    assert "input_signature" not in json.loads(store.objects[POINTER])
 
 
 def test_missing_context_revision_disables_reuse(store, builds, monkeypatch):

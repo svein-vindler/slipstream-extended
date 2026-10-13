@@ -1,3 +1,4 @@
+import { readCurrentCoachInput } from "./coach-selection";
 import { ApplicationToolError, applicationToolResult } from "./application-errors";
 import { McpServer } from "@modelcontextprotocol/server";
 import { errorCategory } from "./output-privacy";
@@ -497,16 +498,24 @@ export class ActivityCoachTools {
       if (!activity) return this.text({ available: false, activity_id: args.activity_id,
         message: "The activity ID was not found in the Slipstream activity index." });
       const prefix = coachInputPrefix(activity);
-      const listed = prefix ? await this.env.SLIPSTREAM_DATA.list({ prefix, limit: 1000 }) : null;
-      const latest = listed?.objects.sort((a, b) =>
-        b.uploaded.getTime() - a.uploaded.getTime())[0];
-      const stored = latest ? await this.getR2Json([latest.key]) : null;
-      if (!stored || !stored.data || typeof stored.data !== "object" || Array.isArray(stored.data)) {
+      const selection = await readCurrentCoachInput({
+        canonicalPrefix: prefix, activityId: requested,
+        // The summary clock is UTC; historical analysis dates may be Garmin-local.
+        read: (keys, limits) => this.storage.getR2JsonWithMetadata(keys, limits),
+        versions: async () => {
+          const listed = await this.env.SLIPSTREAM_DATA.list({ prefix, limit: 1000 });
+          if (listed.truncated) throw new Error("Coach analysis versions exceed the bounded legacy limit.");
+          return listed.objects;
+        },
+      });
+      if (selection.status !== "available") {
         return this.text({ available: false, activity: toSummary(activity),
-          message: "No coach input is stored yet. Add a coach profile and let the R2-only coach backfill run." });
+          message: selection.status === "absent"
+            ? "No coach input is stored yet. Add a coach profile and let the R2-only coach backfill run."
+            : "The current coach input could not be verified. Retry this read later; if it persists, ask the maintainer to check stored analysis compatibility." });
       }
       return this.text({ available: true, activity: toSummary(activity),
-        analysis: stored.data as Record<string, unknown>, message: "Coach input is available." });
+        analysis: selection.analysis, message: "Coach input is available." });
     });
 
   }
