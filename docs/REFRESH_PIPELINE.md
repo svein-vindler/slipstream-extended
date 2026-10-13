@@ -36,6 +36,24 @@ later imports; scheduled derived-index repair still runs after ordinary failure,
 but is skipped after interruption. Failed or partial checks retain the existing
 receipt rules. A workflow success alone does not assert data readiness.
 
+Incremental activity summaries merge fields for the same source and activity ID.
+Missing, null, invalid or empty fields retain valid previous observations; finite
+nonnegative numeric values, including zero, replace them. Missing sport does not
+replace a known sport with `Other`. Elapsed-time fallback can fill a new activity's
+moving time, but cannot replace an existing valid moving time. Average speed is
+recomputed when its merged distance or moving time changes; zero moving time
+leaves speed unknown. Obviously invalid old numeric fields are not carried into
+the refreshed row. Unfetched historical rows and the CSV schema stay unchanged.
+
+The summary receipt records a successful source-window check and the merged CSV
+hash. It does not assert that every metric was returned again: retained values
+remain earlier Garmin observations, with no new per-field measurement timestamp.
+The `Source` column still identifies Garmin; there is no historical regeneration
+or migration. A later valid response can update each metric normally.
+Targeted Coach Input takes moving time from the merged summary for the selected
+source/activity ID, so an omitted moving field cannot become a new elapsed-time
+estimate in an immutable analysis while the CSV retains the measured value.
+
 ## Local use
 
 Prepare ignored local credentials as described in [LOCAL_BOOTSTRAP.md](LOCAL_BOOTSTRAP.md).

@@ -8,7 +8,7 @@ from typing import Any
 
 from .activity_backfill import is_job_stopping_error, is_supported_activity
 from .activity_refresh import refresh_activity
-from .coach_backfill import _json
+from .coach_backfill import _float, _json
 from .coach_backfill import run_one as run_coach_one
 from .freshness import activity_scope, publish, receipt, recent_day
 from .granular import activity_type, gzip_json
@@ -202,6 +202,8 @@ def run(
         # Publish the same recent summaries used to select the activity. This
         # keeps list_activities and the selected ID consistent after the run.
         write_dataset(fetched, data_dir, preserve_existing=True)
+        selected_summary = next(row for row in _rows(summary_path)
+                                if row["Activity ID"] == report["activity_id"])
         export_summaries(data_dir, store=store)
         report["summary_updated"] = True
 
@@ -242,7 +244,9 @@ def run(
                         plan = run_coach_one(activity={
                             "id": activity_id, "date": selected.local_start_date,
                             "name": selected.name, "type": selected.raw_sport or selected.sport,
-                            "moving_seconds": selected.moving_s,
+                            # The saved summary resolves absent moving data and
+                            # elapsed fallback against this source/id's history.
+                            "moving_seconds": _float(selected_summary.get("Moving Time")),
                         }, store=store)
                         report["coach_status"] = _coach_status(store, selected, plan)
                     except R2BudgetError:

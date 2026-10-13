@@ -10,7 +10,7 @@ import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from ..schema import Activity, canonical_sport
+from ..schema import Activity, activity_metric, activity_text, canonical_sport
 from .garmin_readonly import ReadOnlyGarmin
 
 
@@ -72,24 +72,33 @@ def fetch(
     out: list[Activity] = []
     for r in raw_list:
         aid = r.get("activityId")
-        type_key = (r.get("activityType") or {}).get("typeKey")
-        dist_m = r.get("distance")
+        activity_type = r.get("activityType")
+        type_key = activity_text(activity_type.get("typeKey")) if isinstance(activity_type, dict) else None
+        dist_m = activity_metric(r.get("distance"))
+        elapsed = activity_metric(r.get("duration"))
+        moving = activity_metric(r.get("movingDuration"))
+        moving_fallback = moving is None and elapsed is not None
+        if moving is None:
+            moving = elapsed
+        power = activity_metric(r.get("avgPower"))
+        if power is None:
+            power = activity_metric(r.get("averagePower"))
         out.append(Activity(
             source="garmin",
             source_id=str(aid),
             start=_parse_start(r),
             sport=canonical_sport(type_key),
             raw_sport=type_key,
-            name=r.get("activityName"),
-            distance_km=(dist_m / 1000.0) if dist_m else None,
-            moving_s=int(r["movingDuration"]) if r.get("movingDuration") else (
-                int(r["duration"]) if r.get("duration") else None),
-            elapsed_s=int(r["duration"]) if r.get("duration") else None,
-            elevation_gain_m=r.get("elevationGain"),
-            avg_hr=r.get("averageHR"),
-            max_hr=r.get("maxHR"),
-            avg_watts=r.get("avgPower") or r.get("averagePower"),
-            calories=r.get("calories"),
+            name=activity_text(r.get("activityName")),
+            distance_km=(dist_m / 1000.0) if dist_m is not None else None,
+            moving_s=int(moving) if moving is not None else None,
+            moving_s_is_elapsed_fallback=moving_fallback,
+            elapsed_s=int(elapsed) if elapsed is not None else None,
+            elevation_gain_m=activity_metric(r.get("elevationGain")),
+            avg_hr=activity_metric(r.get("averageHR")),
+            max_hr=activity_metric(r.get("maxHR")),
+            avg_watts=power,
+            calories=activity_metric(r.get("calories")),
             track_file=_download_track(g, aid, data_dir) if download_tracks else None,
             local_start_date=(
                 str(r.get("startTimeLocal"))[:10]
