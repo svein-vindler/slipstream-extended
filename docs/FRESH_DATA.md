@@ -198,6 +198,13 @@ historical coach backfill plan remain readable. The single-activity coach path
 does not list the full activity inventory or replace the backfill plan. No data
 migration or deletion is needed to publish this code.
 
+Both bulk and targeted producers now commit the same current-analysis pointer;
+canonical upload time does not determine the selected version. Ordinary Coach
+Input reads have bounded fallback only when that pointer is absent. Freshness
+reads retain source revision, Garmin-local date, profile and context checks and
+never use uploaded-time fallback as readiness proof. See
+[Coach Input versioning](COACH_INPUT_VERSIONING.md).
+
 ## Incremental targeted Coach Input
 
 The single-activity pipeline records an additive `input_signature` on the

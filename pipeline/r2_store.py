@@ -102,12 +102,17 @@ class R2Store:
         )
         self._bucket_budget = _BucketBudget()
         self._writes = 0
+        self.last_write_revision: str | None = None
         self._write_bytes = 0
         # Successful LIST pages; GET/HEAD/PUT SDK calls, excluding internal retries.
         # Inventory pages used by write guards are included.
         self.operations = {"get": 0, "head": 0, "list_pages": 0, "listed_objects": 0, "put": 0}
         self.timings_ms = {"get": 0.0, "head": 0.0, "list": 0.0, "put": 0.0, "inventory": 0.0}
         self.bounded_read_bytes = 0  # Application-consumed bytes, including overflow checks.
+
+    @property
+    def remaining_write_attempts(self) -> int:
+        return max(0, self.max_writes_per_run - self._writes)
 
     @property
     def write_budget_initialized(self) -> bool:
@@ -283,6 +288,22 @@ class R2Store:
         return True
 
     def put(self, key: str, data: bytes, content_type: str, *, encoding: str | None = None):
+        self._put(key, data, content_type, encoding=encoding)
+
+    def put_if_absent(
+        self, key: str, data: bytes, content_type: str, *, encoding: str | None = None,
+    ) -> bool:
+        """Create only: a concurrent/existing object is never overwritten.
+
+        A rejected attempt remains budgeted, just like uncertain ordinary PUTs.
+        Only a failed precondition means an object exists; other failures escape.
+        """
+        return self._put(key, data, content_type, encoding=encoding, if_absent=True)
+
+    def _put(
+        self, key: str, data: bytes, content_type: str, *,
+        encoding: str | None = None, if_absent: bool = False,
+    ) -> bool:
         self._check_write_budget(data)
         # Reserve before transmission: a timeout may follow a committed PUT.
         # Neither a later stage nor a caught retry can reclaim that capacity.
@@ -299,5 +320,18 @@ class R2Store:
         if encoding:
             args["ContentEncoding"] = encoding
         self.operations["put"] += 1
-        with timed(self.timings_ms, "put"):
-            self.client.put_object(**args)
+        if if_absent:
+            args["IfNoneMatch"] = "*"
+        try:
+            with timed(self.timings_ms, "put"):
+                self.last_write_revision = None
+                response = self.client.put_object(**args)
+                etag = response.get("ETag") if isinstance(response, dict) else None
+                self.last_write_revision = etag.strip('"') if isinstance(etag, str) and etag else None
+        except ClientError as exc:
+            if if_absent and str(exc.response.get("Error", {}).get("Code")) in {
+                "PreconditionFailed", "412",
+            }:
+                return False
+            raise
+        return True

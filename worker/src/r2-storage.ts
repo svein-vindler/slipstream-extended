@@ -85,6 +85,12 @@ export class R2Storage {
 
   async getR2Text(keys: string[], limits: R2ReadLimits = GRANULAR_R2_LIMITS):
     Promise<{ key: string; text: string; etag: string } | null> {
+    const stored = await this.readR2Text(keys, limits);
+    return stored ? { key: stored.key, text: stored.text, etag: stored.etag } : null;
+  }
+
+  private async readR2Text(keys: string[], limits: R2ReadLimits):
+    Promise<{ key: string; text: string; etag: string; uploaded?: Date } | null> {
     for (const key of keys) {
       const object = await this.bucket.get(key);
       if (!object) continue;
@@ -93,7 +99,7 @@ export class R2Storage {
       }
       const buffer = await object.arrayBuffer();
       const text = await decodePossiblyGzippedText(buffer, limits.decoded);
-      return { key, text, etag: object.etag };
+      return { key, text, etag: object.etag, ...(object.uploaded ? { uploaded: object.uploaded } : {}) };
     }
     return null;
   }
@@ -102,5 +108,12 @@ export class R2Storage {
     Promise<{ key: string; data: unknown } | null> {
     const stored = await this.getR2Text(keys, limits);
     return stored ? { key: stored.key, data: JSON.parse(stored.text) as unknown } : null;
+  }
+
+  async getR2JsonWithMetadata(keys: string[], limits: R2ReadLimits = GRANULAR_R2_LIMITS):
+    Promise<{ key: string; data: unknown; uploaded?: Date } | null> {
+    const stored = await this.readR2Text(keys, limits);
+    return stored ? { key: stored.key, data: JSON.parse(stored.text) as unknown,
+      ...(stored.uploaded ? { uploaded: stored.uploaded } : {}) } : null;
   }
 }

@@ -1945,12 +1945,23 @@ def test_coach_backfill_uses_only_r2_and_becomes_passive_when_complete():
         def list_keys(self, prefix=""):
             return {key for key in self.objects if key.startswith(prefix)}
 
+        def list_object_revisions(self, prefix=""):
+            return {key: hashlib.sha256(value).hexdigest() for key, value in self.objects.items()
+                    if key.startswith(prefix)}
+
         def get(self, key):
             return self.objects[key]
 
         def put(self, key, data, content_type, *, encoding=None):
             self.objects[key] = data
+            self.last_write_revision = hashlib.sha256(data).hexdigest()
             self.puts.append(key)
+
+        def put_if_absent(self, key, data, content_type, *, encoding=None):
+            if key in self.objects:
+                return False
+            self.put(key, data, content_type, encoding=encoding)
+            return True
 
     store = FakeStore()
     first = run_coach_backfill(max_activities=25, store=store)
@@ -2072,7 +2083,14 @@ def test_coach_backfill_reads_only_new_activity_sources_after_initial_index():
 
         def put(self, key, data, content_type, *, encoding=None):
             self.objects[key] = data
+            self.last_write_revision = hashlib.sha256(data).hexdigest()
             self.puts.append(key)
+
+        def put_if_absent(self, key, data, content_type, *, encoding=None):
+            if key in self.objects:
+                return False
+            self.put(key, data, content_type, encoding=encoding)
+            return True
 
     store = TrackingStore()
     first = run_coach_backfill(max_activities=50, store=store)

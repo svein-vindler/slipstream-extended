@@ -16,3 +16,7 @@ execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
   "scripts/build_weight_contract.py", "--output",
   "worker/test-runtime/generated/weight-contract.json",
 ], { cwd: root, stdio: "inherit" });
+
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_coach_versions_contract.py", "worker/test-runtime/generated/coach-versions.json",
+], { cwd: root, stdio: "inherit" });

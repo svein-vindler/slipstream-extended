@@ -57,6 +57,13 @@ class CountingStore:
     def put(self, key, data, content_type, *, encoding=None):
         self.counts["put"] += 1
         self.objects[key] = data
+        self.last_write_revision = hashlib.sha256(data).hexdigest()
+
+    def put_if_absent(self, key, data, content_type, *, encoding=None):
+        if key in self.objects:
+            return False
+        self.put(key, data, content_type, encoding=encoding)
+        return True
 
 
 def measure(store, activity):
