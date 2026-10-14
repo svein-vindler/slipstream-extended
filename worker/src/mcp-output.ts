@@ -1,5 +1,9 @@
+import { dispatchStatusSchema } from "./dispatch-status";
 import { z } from "zod";
 import { trainingContextSchema } from "./training-context";
+import { detailClock, hrvReadingSchema, hrvSummarySchema,
+  sleepDetailSummarySchema, sleepDetailScoreSchema, sleepDetailStageSchema,
+  strengthSessionSchema, enduranceSessionSchema } from "./detail-projection";
 import { trainingHistorySchema } from "./training-history";
 import { refreshReportSchema } from "./refresh-report";
 import { latestActivityReportSchema } from "./latest-activity-report";
@@ -348,17 +352,14 @@ export const outputSchemas = {
   }).catchall(z.record(z.string(), healthStats)),
   hrv_curve: z.object({
     available: z.boolean(),
-    date: z.unknown(),
+    date: z.string(),
     message: z.string().optional(),
     ...Object.fromEntries(Object.entries(nightContextFields).map(([key, schema]) => [key, schema.optional()])),
-    sleep_start_gmt: z.unknown().optional(),
-    sleep_end_gmt: z.unknown().optional(),
-    summary: z.unknown().optional(),
+    sleep_start_gmt: detailClock.optional(),
+    sleep_end_gmt: detailClock.optional(),
+    summary: hrvSummarySchema.optional(),
     reading_count: z.number().int().nonnegative().optional(),
-    readings: z.array(z.object({
-      timestamp: z.unknown(),
-      hrv_ms: z.unknown(),
-    })).optional(),
+    readings: z.array(hrvReadingSchema).optional(),
   }),
   hrv_history: z.object({
     ...historyBase,
@@ -373,10 +374,10 @@ export const outputSchemas = {
     sleep_start_gmt: nullableTimestamp.optional(),
     sleep_end_gmt: nullableTimestamp.optional(),
     confirmed: nullableBoolean.optional(),
-    summary: sleepSummary.optional(),
-    score_breakdown: z.record(z.string(), sleepScore).optional(),
+    summary: sleepDetailSummarySchema.optional(),
+    score_breakdown: z.record(z.string(), sleepDetailScoreSchema).optional(),
     stage_count: z.number().int().nonnegative().optional(),
-    stages: z.array(sleepStage).optional(),
+    stages: z.array(sleepDetailStageSchema).optional(),
   }),
   sleep_history: z.object({
     ...historyBase,
@@ -431,7 +432,7 @@ export const outputSchemas = {
     activity_id: z.string().optional(),
     activity: activitySummary.optional(),
     message: z.string().optional(),
-    session: openObject.optional(),
+    session: strengthSessionSchema.optional(),
     training_context: trainingContextSchema.optional(),
   }),
   endurance_session: z.object({
@@ -439,7 +440,7 @@ export const outputSchemas = {
     activity_id: z.string().optional(),
     activity: activitySummary.optional(),
     message: z.string().optional(),
-    session: openObject.optional(),
+    session: enduranceSessionSchema.optional(),
     training_context: trainingContextSchema.optional(),
   }),
   coach_profile: z.object({
@@ -472,6 +473,7 @@ export const outputSchemas = {
     message: z.string(),
   }),
   refresh_today: z.object({
+    dispatch_status: dispatchStatusSchema.optional(),
     pipeline_diagnostics: pipelineDiagnosticsSchema.nullable().optional(),
     sync_status: syncStatusSchema.optional(), latency: latencySchema.optional(),
     freshness: freshnessSchema.optional(), latest_night: latestNightReportSchema.optional(),
@@ -491,6 +493,7 @@ export const outputSchemas = {
   sync_latest_activity: freshResultSchema.extend({ latest_activity: latestActivityReportSchema.optional() }),
   sync_latest_night: freshResultSchema,
   refresh_status: z.object({
+    dispatch_status: dispatchStatusSchema.optional(),
     pipeline_diagnostics: pipelineDiagnosticsSchema.nullable().optional(),
     sync_status: syncStatusSchema.optional(), latency: latencySchema.optional(),
     latest_night: latestNightReportSchema.optional(),

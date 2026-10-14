@@ -8,12 +8,13 @@ import { z } from "zod";
 import {
   Activity, filterActs, activityFilterWarning, summarize, toSummary, bucketKey,
   rawGarminActivityId, activityJsonObjectKeys, activityEnduranceObjectKeys,
-  coachInputPrefix, activityContextPrefix, activityCalendarDay,
+  coachInputPrefix, activityContextPrefix, activityCalendarDay, validCalendarDay,
 } from "./lib";
 import { structuredToolResult, outputSchemas } from "./mcp-output";
 import { R2Storage, COACH_CONFIG_R2_LIMITS } from "./r2-storage";
 import { exactDate, dateRange, sport, PRIVATE_READ_TOOL_ANNOTATIONS } from "./tool-contracts";
 import { trainingContext } from "./training-context";
+import { strengthSessionSchema, enduranceSessionSchema } from "./detail-projection";
 
 const COACH_PROFILE_PREFIX = "coach/profiles/v1/";
 const COACH_PROFILE_INDEX_KEY = "coach/indexes/profiles-v1.json";
@@ -271,17 +272,20 @@ export class ActivityCoachTools {
       const resolved = await resolveActivityClock(indexed, keys => this.getR2Json(keys));
       const activity = resolved.activity;
       const stored = indexed.localDate ? await this.getR2Json(activityJsonObjectKeys(activity)) : resolved.stored;
-      if (!stored || !stored.data || typeof stored.data !== "object" || Array.isArray(stored.data)) {
+      if (!stored) {
         return this.text({
           available: false,
           activity: toSummary(activity),
           message: "No granular export is stored for this activity yet.",
-          training_context: trainingContext(activity, stored?.data),
+          training_context: trainingContext(activity, null),
         });
+      }
+      if (!stored.data || typeof stored.data !== "object" || Array.isArray(stored.data)) {
+        throw new Error("Unsupported stored activity shape.");
       }
       const payload = stored.data as Record<string, unknown>;
       const session = payload.normalized_strength_session;
-      if (!session || typeof session !== "object" || Array.isArray(session)) {
+      if (session === undefined || session === null) {
         return this.text({
           available: false,
           activity: toSummary(activity),
@@ -289,7 +293,7 @@ export class ActivityCoachTools {
           training_context: trainingContext(activity, payload),
         });
       }
-      return this.text({ available: true, activity: toSummary(activity), session,
+      return this.text({ available: true, activity: toSummary(activity), session: strengthSessionSchema.parse(session),
         training_context: trainingContext(activity, payload) });
     });
 
@@ -329,7 +333,7 @@ export class ActivityCoachTools {
         context = trainingContext(activity, null, "source_unreadable");
       }
       const stored = await this.getR2Json(activityEnduranceObjectKeys(activity));
-      if (!stored || !stored.data || typeof stored.data !== "object" || Array.isArray(stored.data)) {
+      if (!stored) {
         return this.text({
           available: false,
           activity: toSummary(activity),
@@ -339,7 +343,7 @@ export class ActivityCoachTools {
       return this.text({
         available: true,
         activity: toSummary(activity),
-        session: stored.data,
+        session: enduranceSessionSchema.parse(stored.data),
         training_context: context,
       });
     });
@@ -398,6 +402,9 @@ export class ActivityCoachTools {
       annotations: { readOnlyHint: false, destructiveHint: false,
         idempotentHint: true, openWorldHint: false },
     }, async (args, mcpContext) => applicationToolResult(server, mcpContext, async () => {
+      if (!validCalendarDay(args.effective_from)) {
+        throw new ApplicationToolError({ kind: "calendar_date" });
+      }
       for (let index = 0; index < args.zones.length; index++) {
         const zone = args.zones[index];
         if (zone.min_bpm > zone.max_bpm || (index > 0
@@ -465,11 +472,15 @@ export class ActivityCoachTools {
       );
       if (!indexed || !indexed.date) throw new Error("The activity ID was not found.");
       const { activity } = await resolveActivityClock(indexed, keys => this.getR2Json(keys));
+      const activityDate = activityCalendarDay(activity);
+      if (!validCalendarDay(activityDate)) {
+        throw new ApplicationToolError({ kind: "calendar_date" });
+      }
       const createdAt = new Date().toISOString();
       const core = {
         schema_version: 1,
         activity_id: requested,
-        activity_date: activityCalendarDay(activity),
+        activity_date: activityDate,
         date_source: activity.localDate ? "garmin_local" : "utc_fallback",
         rpe: args.rpe ?? null,
         conditions: args.conditions ?? null,

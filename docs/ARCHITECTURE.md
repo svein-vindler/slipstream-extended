@@ -241,6 +241,12 @@ handling clears both summary caches through the shared module. The caches hold
 only parsed summaries and revisions, never request state, bindings or in-flight
 I/O. Object keys, schemas and stored/decoded payload limits are unchanged.
 
+R2 object bodies are counted while streaming before they are combined for
+decoding. Declared stored oversize cancels the body before reading; actual
+stored overflow cancels the reader without retaining the excess chunk.
+The same bounded stream reader enforces expanded gzip limits. These are
+per-object limits, not an aggregate request or history budget.
+
 - Each request gets a fresh, stateless MCP SDK v2 server. On a tool call it
   reads the required summary or detailed object from R2 through a private
   binding and answers in-memory. Parsed summaries are cached per isolate, but

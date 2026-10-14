@@ -248,10 +248,22 @@ class R2Store:
             )
 
     def get(self, key: str) -> bytes:
+        """Read legacy bytes unchanged; close the body without masking read failures."""
         self.operations["get"] += 1
         with timed(self.timings_ms, "get"):
             response = self.client.get_object(Bucket=self.bucket, Key=key)
-            return response["Body"].read()
+            body = response["Body"]
+            try:
+                data = body.read()
+            except BaseException:
+                try:
+                    body.close()
+                except BaseException:
+                    pass  # Preserve the original read failure, including cancellation.
+                raise
+            else:
+                body.close()
+                return data
 
     def get_snapshot(self, key: str, *, max_bytes: int | None = None) -> R2ObjectSnapshot:
         """Capture bytes/ETag together; bounds are optional for existing CSV sizes."""

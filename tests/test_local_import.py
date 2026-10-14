@@ -59,8 +59,8 @@ def test_read_export_accepts_raw_and_combined_files(tmp_path):
 def test_indexed_records_skips_errors_and_tracks_duplicate_dates(tmp_path):
     source = tmp_path / "hrv.json"
     source.write_text(json.dumps([
-        {"hrvSummary": {"calendarDate": "2026-09-21"}},
-        {"hrvSummary": {"calendarDate": "2026-09-21"}},
+        {"hrvSummary": {"calendarDate": "2026-09-21"}, "hrvReadings": []},
+        {"hrvSummary": {"calendarDate": "2026-09-21"}, "hrvReadings": []},
         {"date": "2026-09-20", "error": "rate limit"},
         {"unexpected": True},
     ]))
@@ -111,8 +111,8 @@ def test_import_file_skips_existing_and_writes_canonical_gzip(tmp_path):
 def test_import_cycle_shares_one_bounded_write_budget_across_streams(tmp_path):
     hrv = tmp_path / "hrv.json"
     hrv.write_text(json.dumps([
-        {"hrvSummary": {"calendarDate": "2026-09-21"}},
-        {"hrvSummary": {"calendarDate": "2026-09-20"}},
+        {"hrvSummary": {"calendarDate": "2026-09-21"}, "hrvReadings": []},
+        {"hrvSummary": {"calendarDate": "2026-09-20"}, "hrvReadings": []},
     ]))
     sleep = tmp_path / "sleep.json"
     sleep.write_text(json.dumps([
@@ -134,8 +134,8 @@ def test_import_cycle_shares_one_bounded_write_budget_across_streams(tmp_path):
 def test_local_import_is_resumable_across_cycles(tmp_path):
     source = tmp_path / "hrv.json"
     source.write_text(json.dumps([
-        {"hrvSummary": {"calendarDate": "2026-09-21"}},
-        {"hrvSummary": {"calendarDate": "2026-09-20"}},
+        {"hrvSummary": {"calendarDate": "2026-09-21"}, "hrvReadings": []},
+        {"hrvSummary": {"calendarDate": "2026-09-20"}, "hrvReadings": []},
     ]))
     store = MemoryStore()
     sleeps = []
@@ -149,6 +149,7 @@ def test_local_import_is_resumable_across_cycles(tmp_path):
         lock_file=tmp_path / "lock",
         store_factory=lambda: store,
         monotonic=lambda: 0,
+        max_cycles=3,
         sleep=sleeps.append,
     )
 

@@ -5,9 +5,10 @@ export class PayloadTooLargeError extends Error {
   }
 }
 
-async function readStreamLimited(
+export async function readStreamLimited(
   stream: ReadableStream<Uint8Array>,
   maxBytes: number,
+  overflowMessage = `Decoded payload exceeds ${maxBytes} bytes.`,
 ): Promise<ArrayBuffer> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
@@ -19,7 +20,7 @@ async function readStreamLimited(
       total += value.byteLength;
       if (total > maxBytes) {
         await reader.cancel("size limit exceeded");
-        throw new PayloadTooLargeError(`Decoded payload exceeds ${maxBytes} bytes.`);
+        throw new PayloadTooLargeError(overflowMessage);
       }
       chunks.push(value);
     }

@@ -1,3 +1,6 @@
+import { DispatchReader } from "./dispatch-reader";
+import { dispatchStatus, dispatchStatusSchema } from "./dispatch-status";
+import type { DispatchClaim, DispatchDescriptor, DispatchOperation } from "./dispatch-operations";
 import { readCurrentCoachInput } from "./coach-selection";
 import { activityCalendarYears, localCalendarDay, supportedActivityCalendarContract } from "./activity-clock";
 /** R2-first, explicitly authorized recent activity/night retrieval. */
@@ -27,6 +30,7 @@ export const freshnessSchema = z.object({
   package: z.record(z.string(), z.unknown()),
 });
 export const freshResultSchema = z.object({
+  dispatch_status: dispatchStatusSchema.optional(),
   accepted: z.boolean(), available: z.boolean().optional(), message: z.string(),
   reason: z.string().optional(), request_id: requestIdSchema.optional(),
   run: z.object({ id: z.number(), status: z.string(), conclusion: z.string().nullable(),
@@ -132,7 +136,8 @@ export class FreshDataService {
     summary_reads: 0, profile_reads: 0, github_requests: 0, r2_read_ms: 0, github_ms: 0 };
   constructor(private env: Env, private reader: FreshReader, private config: RefreshConfig,
     private now = () => Date.now(), private fetcher: Fetcher = fetch,
-    private sleeper = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))) {
+    private sleeper = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    private actorKey = "internal-targeted") {
     const originalFetch = this.fetcher;
     this.fetcher = async (input, init) => {
       this.diagnostics.github_requests++;
@@ -427,6 +432,15 @@ export class FreshDataService {
       latency: latency(run, pipeline, request.requestedAt, status.data_state === "ready", this.now()) };
   }
 
+  private overlap(snapshot: Snapshot, operation: DispatchOperation): Json {
+    const status = syncStatus({ kind: snapshot.scope.startsWith("night/") ? "night" : "activity", snapshot });
+    status.job_state = "unknown"; status.job_start_confirmed = null;
+    status.polling_state = "stopped"; status.next_action = "none";
+    return this.response(snapshot, "An existing operation may overlap this request. Keep its correlation for maintainer inspection; no new job was started.",
+      { accepted: false, terminal: false, data_ready: false, should_continue_polling: false, reason: "dispatch_overlap",
+        sync_status: status, dispatch_status: dispatchStatus(operation) });
+  }
+
   async request(request: FreshRequest): Promise<Json> {
     const snapshot = await this.snapshot(request);
     if (snapshot.status === "ambiguous_activity" || snapshot.status === "activity_date_unknown" && snapshot.source_fresh
@@ -438,7 +452,9 @@ export class FreshDataService {
     }
     const coordinator = this.env.REFRESH_COORDINATOR.getByName("global");
     const active = await coordinator.activeFreshJob(snapshot.scope, this.now());
-    if (active) return this.status(active);
+    if (active) return this.status(active, false, "shared");
+    const blocked = await coordinator.blockingDispatch(request.kind, "targeted:" + snapshot.scope);
+    if (blocked) return this.overlap(snapshot, blocked);
     if (snapshot.source_fresh && ["no_effective_profile", "endurance_data_unavailable"].includes(String(snapshot.package.coach_status))) {
       return this.response(snapshot, `Activity data is stored, but Coach Input is blocked (${snapshot.package.coach_status}). Add an effective profile or use supported analysis before retrying; polling cannot resolve this.`,
         { reason: String(snapshot.package.coach_status) });
@@ -449,96 +465,84 @@ export class FreshDataService {
       return this.response(snapshot, "Garmin was checked recently; the requested package is still unavailable or incomplete. Retry after the short source-check cooldown.",
         { reason: "negative_cooldown", retry_after_seconds: Math.max(1, 120 - snapshot.source_age_seconds!) });
     }
+    const sent = repairOnly ? { ...request,
+      activityId: rawGarminActivityId(String(snapshot.package.activity_id)),
+      date: String(snapshot.package.activity_date) } : request;
+    const descriptor: DispatchDescriptor = { repository: this.config.repository, workflow: this.config.workflow,
+      ref: this.config.ref, mode: request.kind, scope: freshScope(sent), date: sent.date ?? null,
+      activity_id: sent.activityId ?? null, new_expected: sent.newExpected ?? false, repair_only: repairOnly,
+      include_granular: false, components: request.kind === "night" ? ["sleep", "hrv"] : ["activity_files", "coach_input", "context"] };
     const reservation = await coordinator.beginFresh(snapshot.scope, request.kind,
-      JSON.stringify({ ...request, requestedAt: this.now() }), this.now(), repairOnly);
+      JSON.stringify({ ...request, requestedAt: this.now() }), this.now(), repairOnly, descriptor);
+    if (reservation.operation) return this.overlap(snapshot, reservation.operation);
     if (!reservation.job) return this.response(snapshot, "The targeted sync cooldown or daily safety budget prevents another job.",
       { reason: reservation.reason, retry_after_seconds: Math.max(1, Math.ceil((reservation.retryAfterMs ?? 1000) / 1000)) });
-    if (!reservation.acquired) return this.status(reservation.job);
+    if (!reservation.acquired) return this.status(reservation.job, false, "shared");
     const job = reservation.job;
-    try {
-      const run = request.kind === "night"
-        ? await dispatchLatestNight(this.config, request.date!, job.request_id, this.fetcher)
-        : await dispatchLatestActivity(this.config, { activityId: repairOnly
-          ? rawGarminActivityId(String(snapshot.package.activity_id)) : request.activityId,
-          expectedDate: repairOnly ? String(snapshot.package.activity_date) : request.date,
-          newActivityExpected: request.newExpected ?? false, requestId: job.request_id, repairOnly }, this.fetcher);
-      if (run) { await coordinator.bindFreshRun(job.request_id, run.id); job.run_id = run.id; }
-    } catch (error) {
-      if (error instanceof GitHubRequestError && error.method === "POST"
-        && [400, 401, 403, 404, 422, 429].includes(error.status)) {
-        await coordinator.finishFresh(job.request_id, false);
-        return this.response(snapshot, `GitHub rejected the dispatch (HTTP ${error.status}); no import was accepted. Correct access or workflow inputs before retrying after the cooldown.`,
-          { request_id: job.request_id, reason: "dispatch_rejected", retry_after_seconds: 300 });
-      }
-      return this.response(snapshot, "Dispatch could not be confirmed. The correlation ID and reservation are retained to prevent duplicate imports; check refresh_status with request_id.",
-        { accepted: true, request_id: job.request_id, terminal: false, should_continue_polling: false,
-          reason: "dispatch_unconfirmed", retry_after_seconds: 60 });
+    const identity = { operation_id: job.request_id, owner_key: "targeted:" + job.scope, owner_token: job.request_id };
+    const outcome = request.kind === "night"
+      ? await dispatchLatestNight(this.config, request.date!, job.request_id, this.fetcher)
+      : await dispatchLatestActivity(this.config, { activityId: sent.activityId, expectedDate: sent.date,
+        newActivityExpected: sent.newExpected ?? false, requestId: job.request_id, repairOnly }, this.fetcher);
+    const operation = await coordinator.mergeDispatchPost(identity, outcome, this.now());
+    if (operation?.dispatch_state === "post_rejected") {
+      return this.response(snapshot, "GitHub rejected this dispatch. Check workflow inputs and access before retrying after the cooldown.",
+        { accepted: false, request_id: job.request_id, reason: "dispatch_rejected",
+          terminal: true, should_continue_polling: false, retry_after_seconds: 300, dispatch_status: dispatchStatus(operation) });
     }
-    return this.status(job, true);
+    return this.status(job, true, "initial");
   }
 
-  async status(job: FreshJob, accepted = false): Promise<Json> {
+  async status(job: FreshJob, accepted = false, intent: DispatchClaim["intent"] = "status"): Promise<Json> {
     const coordinator = this.env.REFRESH_COORDINATOR.getByName("global");
     const request = JSON.parse(job.request) as FreshRequest;
-    if (!job.run_id) {
-      const receipt = await this.json([`refresh/requests/${job.request_id}.json`], true);
-      if (receipt.scope === job.scope && Number.isSafeInteger(receipt.run_id) && Number(receipt.run_id) > 0) {
-        job.run_id = Number(receipt.run_id);
-        await coordinator.bindFreshRun(job.request_id, job.run_id);
-      }
+    const operation = await coordinator.dispatchOperation(job.request_id) ?? await coordinator.adoptFreshDispatch(job.request_id);
+    if (!operation) {
+      return this.response(await this.snapshot(request), "This legacy operation has no verified dispatch record. Keep its correlation for maintainer inspection.",
+        { accepted, request_id: job.request_id, terminal: false, should_continue_polling: false });
     }
-    const canPoll = job.expires_at > this.now() && await coordinator.takeFreshPoll(job.request_id);
-    let run: RefreshRun | null = null;
-    try {
-      run = job.run_id ? canPoll
-        ? await pollRefreshRun(this.config, { runId: job.run_id, maxPolls: 2, intervalMs: 4_000 }, this.fetcher, this.sleeper)
-        : await getRefreshRun(this.config, job.run_id, this.fetcher) : null;
-    } catch {
-      const snapshot = await this.snapshot(request);
-      return this.response(snapshot, "The GitHub job status could not be read. Check workflow access or service availability; the existing reservation is retained.",
-        { accepted, request_id: job.request_id, terminal: job.state !== "active", should_continue_polling: false,
-          reason: "status_error", retry_after_seconds: 60 });
-    }
-    const terminal = job.state !== "active" || run?.status === "completed";
-    if (run?.status === "completed") await coordinator.finishFresh(job.request_id, run.conclusion === "success");
+    const observed = await new DispatchReader(this.env, this.config, keys => this.json(keys, true), this.now, this.fetcher)
+      .observe(operation, intent, this.actorKey);
     const snapshot = await this.snapshot(request);
-    const rawReport = run && terminal ? await this.json([`refresh/reports/${run.id}.json`], true) : {};
-    const validated = z.union([latestNightReportSchema, latestActivityReportSchema, activityRepairReportSchema]).safeParse(rawReport);
-    const report = validated.success && validated.data.scope === job.scope
-      && (request.kind === "night" ? validated.data.kind === "latest-night" : validated.data.kind !== "latest-night")
-      ? record(validated.data) : {};
-    const parsed = run && terminal ? pipelineDiagnosticsSchema.safeParse(
-      await this.json([`refresh/diagnostics/v1/${run.id}.json`], true)) : null;
-    const pipeline = parsed?.success && parsed.data.mode === request.kind ? parsed.data : null;
-    if (report.source_checked === false && report.kind !== "activity-repair") {
-      snapshot.source_fresh = false;
-      snapshot.source_freshness_reason = "current_check_failed";
+    if (observed.report.source_checked === false && observed.report.kind !== "activity-repair") {
+      snapshot.source_fresh = false; snapshot.source_freshness_reason = "current_check_failed";
       if (snapshot.complete) snapshot.status = "source_stale";
     }
-    const persisted = await coordinator.freshJob(job.request_id);
-    const stillPolling = run !== null && !terminal && canPoll && (persisted?.polls ?? 3) < 3 && job.expires_at > this.now();
-    const blocked = String(report.coach_status ?? "");
-    const status = syncStatus({ kind: request.kind, run, snapshot, pipeline, accepted: true, polling: stillPolling,
-      sourceChecked: typeof report.source_checked === "boolean" ? report.source_checked : undefined,
-      sourceCheckedAt: typeof report.checked_at === "string" ? report.checked_at : undefined });
-    const message = terminal
-      ? run?.conclusion !== "success" ? `The targeted job ended with ${run?.conclusion ?? job.state}; requested data readiness is unconfirmed.`
-        : snapshot.complete && snapshot.source_fresh && snapshot.status === "ready" ? "The requested canonical package is ready."
-          : blocked === "no_effective_profile" || blocked === "endurance_data_unavailable"
-            ? `Activity files are stored; Coach Input is blocked (${blocked}). Add an effective profile or use supported analysis; polling will not resolve this.`
-            : "The job ended."
-      : run ? "The targeted job is queued or running. Polling is bounded; check this correlation ID later if the polling window has ended."
-        : "Job start is unconfirmed. The existing reservation is retained; check refresh_status with this request_id later.";
-    return this.response(snapshot, `${message} ${packageStatusMessage(request.kind, snapshot, status)}`,
-    { accepted, available: run !== null, request_id: job.request_id, run,
-      terminal, should_continue_polling: stillPolling,
-      sync_status: status,
-      ...(!run && !terminal ? { reason: "dispatch_unconfirmed", should_continue_polling: false, retry_after_seconds: 60 } : {}),
-      latency: latency(run, pipeline, request.requestedAt,
-        snapshot.complete && snapshot.source_fresh && snapshot.status === "ready", this.now()),
-      pipeline_diagnostics: pipeline,
-      ...(terminal && run?.conclusion !== "success" ? { data_ready: false,
-        activity_ready: request.kind === "activity" ? false : null } : {}),
-      ...(stillPolling ? { poll_after_seconds: 4 } : !terminal ? { retry_after_seconds: 60 } : {}) });
+    if (observed.fresh && observed.run) {
+      const status = syncStatus({ kind: request.kind, snapshot, run: observed.run, pipeline: observed.pipeline,
+        sourceChecked: typeof observed.report.source_checked === "boolean" ? observed.report.source_checked : undefined,
+        sourceCheckedAt: typeof observed.report.checked_at === "string" ? observed.report.checked_at : undefined });
+      return this.response(snapshot, packageStatusMessage(request.kind, snapshot, status),
+        { accepted, available: true, request_id: job.request_id, run: observed.run,
+          terminal: observed.operation.owner_released_at !== null, should_continue_polling: false, sync_status: status,
+          pipeline_diagnostics: observed.pipeline, dispatch_status: dispatchStatus(observed.operation),
+          latency: latency(observed.run, observed.pipeline, request.requestedAt, status.data_state === "ready", this.now()),
+          ...(observed.run.conclusion !== "success" ? { data_ready: false, activity_ready: request.kind === "activity" ? false : null } : {}) });
+    }
+    const status = syncStatus({ kind: request.kind, snapshot });
+    if (observed.operation.dispatch_state === "verified_terminal") {
+      const success = observed.operation.last_observation?.conclusion === "success";
+      status.job_state = success ? "completed" : "failed";
+      status.job_conclusion = observed.operation.last_observation?.conclusion ?? null;
+      status.job_start_confirmed = true; status.polling_state = "complete"; status.next_action = "none";
+      status.fresh = null;
+      if (snapshot.complete) status.data_state = "unknown";
+      return this.response(snapshot, "The verified job has ended. Current-job source evidence is not re-read, so current package readiness is unverified. Stored data remain available through read tools.",
+        { accepted, available: true, request_id: job.request_id, terminal: true, should_continue_polling: false,
+          data_ready: false, activity_ready: null,
+          sync_status: status, dispatch_status: dispatchStatus(observed.operation) });
+    }
+    if (observed.operation.dispatch_state === "post_rejected") {
+      status.job_start_confirmed = false; status.polling_state = "stopped";
+      return this.response(snapshot, "This dispatch was rejected. Keep the existing cooldown before retrying.",
+        { accepted: false, available: false, request_id: job.request_id, terminal: true, should_continue_polling: false,
+          sync_status: status, dispatch_status: dispatchStatus(observed.operation) });
+    }
+    status.job_state = "unknown"; status.job_start_confirmed = null;
+    status.current_job_source_checked = null; status.current_job_source_checked_at = null;
+    status.polling_state = "stopped"; status.next_action = "none";
+    return this.response(snapshot, "Dispatch verification is incomplete. Preserve the correlation for maintainer inspection; do not start another sync to test it.",
+      { accepted, available: false, request_id: job.request_id, terminal: false, should_continue_polling: false,
+        reason: "dispatch_unconfirmed", sync_status: status, dispatch_status: dispatchStatus(observed.operation) });
   }
 }

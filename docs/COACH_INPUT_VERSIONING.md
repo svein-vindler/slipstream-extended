@@ -204,3 +204,51 @@ The missing-original-reference JSON/SSE regression measures 2 GET, 1 HEAD,
 synthetic R2 bodies are 221 versus 1084 bytes; the eight positive legacy cases
 retain their operation/body-byte counts. No new inventory or resource limit is
 introduced; these are offline body measurements with the same exclusions above.
+
+## Lap heart rate and the 1.0.1 engine transition
+
+Engine `1.0.1` weights executed-lap heart rate only by positive elapsed time
+whose lap also has a finite numeric average heart rate. Missing, boolean and
+non-finite values do not contribute. Numeric zero remains a supplied value;
+no physiological clamps or changes to user zones are introduced. No contributing
+time returns `null`. Total section time and distance retain their existing source
+semantics. `heart_rate_coverage` reports the elapsed-time basis, covered seconds,
+contributing lap count and complete/partial/none/unknown status. This is coverage
+of lap averages, not proof of continuous heart-rate sampling. Missing or invalid
+lap duration makes coverage unknown.
+
+New, changed-source and explicitly targeted calculations use the new engine and
+new immutable content identity. Ordinary bulk jobs do not upgrade history merely
+because the engine changed. Known `1.0.0` selections are retained only with verified
+input/profile/context revisions, calendar and pointer evidence, canonical content
+identity and matching engine provenance. Their bytes, pointer and old engine label
+remain unchanged; they are not presented as newly corrected calculations.
+
+The additive bulk reuse checkpoint binds input signature, actual engine,
+canonical revision and selection revision. The global fingerprint also covers
+profile contents and input revisions. Before such a checkpoint is available,
+verification reads the selected pointer and canonical object within the existing
+activity batch allowance, never historical FIT/TCX solely for an engine upgrade.
+A legacy-only verification or unknown historical selection performs no writes;
+verified reuse metadata is persisted with the next real bounded checkpoint.
+Unknown legacy or calendar proof is held with a controlled blocked reason, outside
+the generation queue. A smaller batch or priority ordering is not authority to
+regenerate the rest of history. Explicit historical engine upgrades require
+separate authorization. Limits, schedules and conditional publication stay intact.
+
+## Bulk profile snapshot
+
+Each bulk invocation lists the complete profile namespace once. The same local
+keyset drives profile loading and the source fingerprint, including keys whose
+bodies are missing or cannot be parsed. Existing storage errors still propagate;
+this does not turn provider failures into an empty profile set. Profile contents,
+opaque input revisions, selection rules and immutable history checks keep their
+existing meaning. Targeted single-activity reads keep their independent inventory.
+
+An appended profile after that snapshot is considered by the next invocation.
+There is no global or persistent profile cache, and concurrent invocations own
+separate snapshots. Profile pagination and the separate full bucket inventory
+used by shared write guards remain complete. This does not change capacity,
+write limits or schedules. Synthetic caller tests compare no-op, new/changed,
+input-invalidation and 99-to-100-profile workloads; removing a repeated LIST is
+not a claim about live latency, provider billing or total account consumption.

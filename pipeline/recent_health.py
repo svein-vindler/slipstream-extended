@@ -46,8 +46,10 @@ def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
                 continue
             try:
                 records.append(store_day(store, stream, day, raw))
-            except HealthNotReady:
+            except HealthNotReady as exc:
                 not_ready += 1
+                if exc.status != "garmin_not_ready":
+                    failures += 1
         # Storage/auth/budget/index failures propagate; failed scopes keep their
         # previous successful check. Other successfully checked dates may advance.
         index = finalize_days(store, stream, records)

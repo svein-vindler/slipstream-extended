@@ -114,7 +114,15 @@ it.each([false, true])("reports expired source confirmation through request-ID s
     args = { request_id: job!.request_id };
   }
   const result = await status(args);
-  expect(result).toMatchObject({ terminal: true, data_ready: !useRequestId,
+  if (useRequestId) {
+    expect(result).toMatchObject({ terminal: false,
+      sync_status: { job_state: "unknown", job_start_confirmed: null, current_job_source_checked: null },
+      dispatch_status: { state: "unconfirmed", duplicate_guard_held: true, action_required: true } });
+    expect(result.message).toContain("maintainer inspection");
+    expect(githubCalls).toBe(0);
+    return;
+  }
+  expect(result).toMatchObject({ terminal: true, data_ready: true,
     freshness: { source_fresh: false, complete: true, source_freshness_reason: "ttl_expired" },
     sync_status: { source_checked: true, source_checked_at: checkedAt, current_job_source_checked: true,
       current_job_source_checked_at: checkedAt, stored_source_checked_at: checkedAt,

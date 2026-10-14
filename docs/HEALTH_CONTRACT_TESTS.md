@@ -68,6 +68,35 @@ These tests verify storage and reader compatibility in the local Workers
 runtime. They complement private installation validation; they do not exercise
 Garmin's live API, Cloudflare's edge OAuth flow or a production deployment.
 
+`worker/test-runtime/d1-output-contract.test.ts` verifies structural projection
+for `hrv_curve`, `sleep_detail`, `strength_session` and `endurance_session` through
+authenticated modern JSON and legacy SSE. Known fields are projected before
+both text and structured content are built. Unsupported stored object, row or
+known scalar types return the existing fixed tool error rather than fabricated
+zeroes, missing-data results or partial success. Optional legacy fields remain
+optional; this checks supported shapes, not source completeness. Existing
+storage/decode limits, sampling and request budgets are unchanged.
+
+These detail contracts preserve numeric strings without coercion, nulls, zero,
+units, source clocks, calendar provenance, dynamic sleep-score names and all
+strength metric names. Opaque nested `performance_metrics` extensions remain
+open for compatibility; already-stringified producer qualifiers remain strings.
+Separate tests explicitly preserve both deferred cases. This is not complete
+hardening of arbitrary extension leaves, history/index calculations, coach
+payloads or upstream producer normalization. It adds no partial-status protocol.
+
+The existing training-context fixture builder also emits strength dimension rows
+from the actual Python normalizer. The native tests load those bytes as raw JSON
+to preserve literal data keys such as `__proto__`, check both dimension maps and
+totals, and require typed leaf projection without changing object prototypes.
+
+The suite checks both output channels, concurrent valid/invalid HRV requests,
+summary-cache isolation, unchanged fixture bytes, no request writes and no
+non-JWKS external requests. Its JSON-report metadata records synthetic R2 call
+counts, fixture body bytes, response bytes and request time for comparable
+base/candidate resource cases. These are local measurements, not edge CPU,
+heap, provider latency, billed usage or a guarantee of free operation.
+
 `worker/test-runtime/tool-catalog.test.ts` fingerprints the complete authenticated
 tool catalog with coach writes enabled and disabled. Its pre-refactor snapshots
 cover tool order, descriptions, input/output schemas and safety annotations,
@@ -87,3 +116,25 @@ return old cached data. Additional cases cover ordered object aliases,
 missing objects, exact stored/decoded size boundaries, gzip decoding and invalid
 JSON/compressed objects. These checks preserve the reader's existing errors and
 limits when moving storage logic between modules.
+
+## Verified HRV absence and retry checkpoints
+
+HRV imports accept the existing readings aliases and recognized summary fields.
+A confirmed empty response requires an explicit empty readings list and a
+matching calendar declaration. Unknown envelopes, malformed/partial readings or
+conflicting dates are rejected before canonical writes. Summary-only values
+remain readable; `available` continues to describe detailed readings, while
+the index can report available summary data without a curve.
+
+Historical backfill records invalid responses as date failures under the
+existing three-attempt limit and explicit `--retry-failures` policy, rather
+than creating an unavailable object and marking the date complete. Auth,
+transport, policy and storage-budget handling are unchanged. Recent/targeted
+imports preserve good canonical bytes and successful checks; invalid responses
+are not confirmed successful Garmin checks.
+
+Existing historical objects and unavailable markers are not reclassified or
+automatically fetched again. Earlier unknown-schema responses may therefore
+still have legacy unavailable markers. Any historical inspection/revalidation
+requires separate authorization; this fix performs no migration or backfill.
+Synthetic caller/checkpoint regressions are in `tests/test_hrv_contracts.py`.

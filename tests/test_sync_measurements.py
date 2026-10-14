@@ -128,7 +128,8 @@ def test_pending_night_persists_small_redacted_diagnostics_on_existing_budget(mo
         return store
 
     report = refresh.run(refresh.RefreshRequest(mode="night", wake_date=DAY, run_id="222"),
-                         store_factory=factory, login=lambda: NightGarmin(sleep={}, hrv={}))
+                         store_factory=factory, login=lambda: NightGarmin(sleep={"dailySleepDTO": {"calendarDate": DAY, "sleepTimeSeconds": 0}},
+                        hrv={"hrvSummary": {"calendarDate": DAY}, "hrvReadings": []}))
     assert len(stores) == 1
     assert report["status"] == "partial"
     assert report["source_checks"][0]["checked"] is True
@@ -159,6 +160,29 @@ def test_diagnostic_publication_obeys_existing_write_budget(monkeypatch):
     with pytest.raises(R2BudgetError):
         refresh.run(refresh.RefreshRequest(mode="night", wake_date=DAY, run_id="223"),
                     store_factory=lambda: R2Store(client=client, bucket="synthetic", max_writes_per_run=2),
-                    login=lambda: NightGarmin(sleep={}, hrv={}))
+                    login=lambda: NightGarmin(sleep={"dailySleepDTO": {"calendarDate": DAY, "sleepTimeSeconds": 0}},
+                        hrv={"hrvSummary": {"calendarDate": DAY}, "hrvReadings": []}))
     assert "refresh/diagnostics/v1/223.json" not in client.objects
     assert json.loads(client.objects["refresh/reports/223.json"]["Body"])["status"] == "pending"
+
+
+@pytest.mark.parametrize("raw", [{}, {"unknown_synthetic_schema": True}])
+def test_unverified_hrv_is_not_a_successful_empty_source_check(monkeypatch, raw):
+    from test_fresh_data import DAY, NightGarmin
+
+    from scripts.benchmark_health_reuse import HealthClient
+
+    class Clock(date):
+        @classmethod
+        def today(cls):
+            return cls.fromisoformat(DAY)
+    monkeypatch.setattr("pipeline.freshness.date", Clock)
+    client = HealthClient()
+    report = refresh.run(refresh.RefreshRequest(mode="night", wake_date=DAY, run_id="224"),
+        store_factory=lambda: R2Store(client=client, bucket="synthetic", max_writes_per_run=2),
+        login=lambda: NightGarmin(sleep={}, hrv=raw))
+    assert report["source_checks"][0]["checked"] is False
+    assert report["source_checks"][0]["outcome"] != "not_ready"
+    assert f"refresh/checks/v1/night/{DAY}.json" not in client.objects
+    assert json.loads(client.objects["refresh/reports/224.json"]["Body"])["hrv_status"] == "invalid_response"
+    assert "refresh/diagnostics/v1/224.json" in client.objects

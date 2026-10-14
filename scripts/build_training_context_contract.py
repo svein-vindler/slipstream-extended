@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from garmin_fit_sdk import Encoder  # noqa: E402
 
+from pipeline.granular import normalize_strength_session  # noqa: E402
 from pipeline.granular_export import export_activity  # noqa: E402
 from pipeline.sources.garmin import fetch  # noqa: E402
 from pipeline.writer import write_dataset  # noqa: E402
@@ -85,7 +86,19 @@ def build():
             if key.endswith(".json") or key.endswith(".csv")}
 
 
+def strength_label_contract():
+    rows = []
+    for label, reps, weight in (("__proto__", 2, 1000), ("Synthetic normal", 0, 0), ("__proto__", 3, 2000)):
+        rows.append({"setType": "ACTIVE", "exercises": [{
+            "category": label, "name": label, "probability": None,
+        }], "repetitionCount": reps, "weight": weight, "duration": 0})
+    return normalize_strength_session("123", {"exerciseSets": rows})
+
+
 if __name__ == "__main__":
     target = Path(sys.argv[1])
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(build(), sort_keys=True), encoding="utf-8")
+    target.with_name("strength-label-contract.json").write_text(
+        json.dumps(strength_label_contract()), encoding="utf-8",
+    )

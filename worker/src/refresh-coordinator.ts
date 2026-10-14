@@ -1,3 +1,5 @@
+import { DispatchOperations, type DispatchDescriptor, type DispatchIdentity, type DispatchClaim, type DispatchOperation } from "./dispatch-operations";
+import type { DispatchPostOutcome } from "./github";
 import { DurableObject } from "cloudflare:workers";
 
 export interface RefreshLease {
@@ -23,6 +25,7 @@ export type FreshJob = {
 }
 
 export class RefreshCoordinator extends DurableObject<Env> {
+  private readonly dispatch: DispatchOperations;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.storage.sql.exec(`
@@ -48,6 +51,38 @@ export class RefreshCoordinator extends DurableObject<Env> {
         polls INTEGER NOT NULL DEFAULT 0
       );
     `);
+    this.dispatch = new DispatchOperations(ctx.storage);
+  }
+
+  dispatchOperation(id: string) { return this.dispatch.get(id); }
+  adoptFreshDispatch(id: string) {
+    return this.ctx.storage.transactionSync(() => this.dispatch.adoptFresh(id));
+  }
+  dispatchForRun(id: number) { return this.dispatch.forRun(id); }
+  activeDispatch(ownerKey: string) { return this.dispatch.active(ownerKey); }
+  blockingDispatch(mode: DispatchDescriptor["mode"], ownerKey: string) {
+    return this.ctx.storage.transactionSync(() => this.dispatch.blocking(mode, ownerKey));
+  }
+  beginGeneralDispatch(token: string, descriptor: DispatchDescriptor, nowMs: number) {
+    return this.ctx.storage.transactionSync(() => this.dispatch.beginGeneral(token, descriptor, nowMs));
+  }
+  takeDispatchRead(identity: DispatchIdentity, claim: DispatchClaim, expectedRevision: number,
+    kind: "run" | "receipt" | "report" | "diagnostics", _nowMs: number) {
+    return this.ctx.storage.transactionSync(() => this.dispatch.take(identity, claim, expectedRevision, kind));
+  }
+  mergeDispatchPost(identity: DispatchIdentity, outcome: DispatchPostOutcome, nowMs: number) {
+    return this.ctx.storage.transactionSync(() => this.dispatch.mergePost(identity, outcome, nowMs));
+  }
+  claimDispatchRead(identity: DispatchIdentity, intent: DispatchClaim["intent"], actorKey: string, nowMs: number) {
+    return this.ctx.storage.transactionSync(() => this.dispatch.claim(identity, intent, actorKey, nowMs,
+      (key, now, ttl) => this.reserve(key, now, ttl).acquired));
+  }
+  recordDispatchReceipt(identity: DispatchIdentity, claim: DispatchClaim, expectedRevision: number, receipt: unknown, nowMs: number) {
+    return this.ctx.storage.transactionSync(() => this.dispatch.receipt(identity, claim, expectedRevision, receipt, nowMs,
+      (key, now, ttl) => this.reserve(key, now,ttl).acquired));
+  }
+  finishDispatchRead(identity: DispatchIdentity, claim: DispatchClaim, expectedRevision: number, evidence: unknown, nowMs: number) {
+    return this.ctx.storage.transactionSync(() => this.dispatch.finish(identity, claim, expectedRevision, evidence, nowMs));
   }
 
   freshJob(requestId: string): FreshJob | null {
@@ -69,13 +104,16 @@ export class RefreshCoordinator extends DurableObject<Env> {
     ).toArray()[0] ?? null;
   }
 
-  beginFresh(scope: string, kind: "activity" | "night", request: string, nowMs: number, repairOnly = false):
-    { job?: FreshJob; acquired: boolean; reason?: string; retryAfterMs?: number } {
+  beginFresh(scope: string, kind: "activity" | "night", request: string, nowMs: number, repairOnly = false, descriptor?: DispatchDescriptor):
+    { job?: FreshJob; operation?: DispatchOperation; acquired: boolean; reason?: string; retryAfterMs?: number } {
+    return this.ctx.storage.transactionSync(() => {
     if (!scope || request.length > 1024 || !["activity", "night"].includes(kind)) {
       throw new Error("Invalid fresh request");
     }
     const active = this.activeFreshJob(scope, nowMs);
     if (active) return { acquired: false, job: active, reason: "shared_job" };
+    const blocked = this.dispatch.blocking(kind, "targeted:" + scope);
+    if (blocked) return { acquired: false, operation: blocked, reason: "dispatch_overlap" };
     const lease = this.reserveBudgeted(`sync-latest-${kind}${repairOnly ? '-repair' : ''}`, `sync-latest-${kind}`,
       nowMs, repairOnly ? 60_000 : 5 * 60_000, 12);
     if (!lease.acquired || !lease.token) return lease;
@@ -89,7 +127,10 @@ export class RefreshCoordinator extends DurableObject<Env> {
        VALUES (?, ?, ?, ?, 'active', ?)`,
       lease.token, scope, kind, request, nowMs + 2 * 60 * 60_000,
     );
+    if (descriptor) this.dispatch.create({ operation_id: lease.token, owner_key: "targeted:" + scope,
+      owner_token: lease.token }, descriptor, repairOnly ? "targeted_repair" : kind === "night" ? "targeted_night" : "targeted_activity");
     return { acquired: true, job: this.freshJob(lease.token)! };
+    });
   }
 
   bindFreshRun(requestId: string, runId: number): void {

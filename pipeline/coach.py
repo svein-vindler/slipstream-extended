@@ -14,7 +14,7 @@ from datetime import date
 from typing import Any
 
 COACH_SCHEMA_VERSION = 1
-ANALYZER_VERSION = "1.0.0"
+ANALYZER_VERSION = "1.0.1"
 
 
 def _number(value: Any) -> float | None:
@@ -204,10 +204,19 @@ def _section_summaries(structure: dict[str, Any], summary: dict[str, Any]):
             continue
         elapsed = sum(_number(row.get("elapsed_seconds")) or 0 for row in selected)
         distance = sum(_number(row.get("distance_m")) or 0 for row in selected)
-        weighted_hr = sum(
-            (_number(row.get("average_heart_rate_bpm")) or 0)
-            * (_number(row.get("elapsed_seconds")) or 0)
-            for row in selected
+        durations = [_number(row.get("elapsed_seconds")) for row in selected]
+        observed = [
+            (hr, seconds)
+            for row, seconds in zip(selected, durations, strict=True)
+            if seconds is not None and seconds > 0
+            and (hr := _number(row.get("average_heart_rate_bpm"))) is not None
+        ]
+        covered = sum(seconds for _, seconds in observed)
+        weighted_hr = sum(hr * seconds for hr, seconds in observed)
+        coverage = (
+            "unknown" if any(seconds is None or seconds < 0 for seconds in durations)
+            else "none" if not covered
+            else "complete" if covered == elapsed else "partial"
         )
         output.append({
             "section": section,
@@ -215,8 +224,11 @@ def _section_summaries(structure: dict[str, Any], summary: dict[str, Any]):
             "laps": len(selected),
             "elapsed_seconds": round(elapsed, 3),
             "distance_m": round(distance, 3),
-            "average_heart_rate_bpm": round(weighted_hr / elapsed, 2)
-            if elapsed > 0 and weighted_hr > 0 else None,
+            "average_heart_rate_bpm": round(weighted_hr / covered, 2) if covered else None,
+            "heart_rate_coverage": {
+                "basis": "lap_elapsed", "covered_seconds": round(covered, 3),
+                "contributing_laps": len(observed), "status": coverage,
+            },
         })
     return output
 

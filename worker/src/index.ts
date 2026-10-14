@@ -1,3 +1,6 @@
+import { DispatchReader } from "./dispatch-reader";
+import { dispatchStatus } from "./dispatch-status";
+import type { DispatchOperation, DispatchClaim, DispatchDescriptor } from "./dispatch-operations";
 /**
  * Slipstream - remote MCP connector (Cloudflare Worker).
  *
@@ -39,10 +42,11 @@ import { exactDate, dateRange, PRIVATE_READ_TOOL_ANNOTATIONS } from "./tool-cont
 import {
   RefreshConfig, RefreshRun, dispatchRefresh,
   latestRefreshRun, pollRefreshRun,
+  GitHubWorkflowRunsEnvelopeError, WORKFLOW_RUNS_UNVERIFIED,
   refreshDecision, refreshProgress,
 } from "./github";
 import { RefreshCoordinator } from "./refresh-coordinator";
-import { FreshDataService, requestIdSchema } from "./fresh-data";
+import { FreshDataService, requestIdSchema, record } from "./fresh-data";
 import {
   PayloadTooLargeError, limitRequestBody,
   secureResponse,
@@ -51,7 +55,7 @@ import { outputSchemas, structuredToolResult } from "./mcp-output";
 import { authenticateMcpRequest } from "./mcp-auth";
 import { nightContext, validatedHealthTimezone } from "./night-context";
 import { activityReady, refreshReportMessage, refreshReportSchema } from "./refresh-report";
-import { latency, syncStatus, latestNightReportSchema, pipelineDiagnosticsSchema, activityRepairReportSchema } from "./sync-status";
+import { latency, syncStatus, latestNightReportSchema, pipelineDiagnosticsSchema, activityRepairReportSchema, type PipelineDiagnostics } from "./sync-status";
 import {
   LatestActivityReport, latestActivityReportSchema,
 } from "./latest-activity-report";
@@ -131,7 +135,7 @@ class FitnessService {
   }
 
   private freshData(): FreshDataService {
-    return new FreshDataService(this.env, this, this.refreshConfig());
+    return new FreshDataService(this.env, this, this.refreshConfig(), undefined, undefined, undefined, this.actorKey);
   }
 
   async getActivities(): Promise<Activity[]> {
@@ -158,19 +162,81 @@ class FitnessService {
     return this.storage.getR2Json(keys, limits);
   }
 
-  private async completedRefreshDetails(run: RefreshRun | null): Promise<RefreshDetails> {
+  private retainedTargetedStatus(operation: DispatchOperation): Record<string, unknown> {
+    const ended = operation.dispatch_state === "verified_terminal";
+    const rejected = operation.dispatch_state === "post_rejected";
+    const status = syncStatus({ kind: operation.origin === "targeted_night" ? "night" : "activity" });
+    if (ended) {
+      status.job_state = operation.last_observation?.conclusion === "success" ? "completed" : "failed";
+      status.job_conclusion = operation.last_observation?.conclusion ?? null;
+      status.job_start_confirmed = true;
+    } else {
+      status.job_state = rejected ? "not_started" : "unknown";
+      status.job_start_confirmed = rejected ? false : null;
+    }
+    status.polling_state = ended ? "complete" : "stopped"; status.next_action = "none";
+    return { accepted: false, available: true, request_id: operation.operation_id,
+      terminal: ended || rejected, data_ready: false, activity_ready: null, should_continue_polling: false,
+      sync_status: status, latency: latency(null), dispatch_status: dispatchStatus(operation),
+      message: "The targeted request detail is unavailable. Persisted job history remains, but current package readiness is unverified. Use stored-data read tools to inspect existing data." };
+  }
+
+  private async ownedGeneralStatus(operation: DispatchOperation, intent: DispatchClaim["intent"],
+    accepted: boolean, forStatus = false): Promise<Record<string, unknown>> {
+    const observed = intent === "shared" ? { operation, run: null, report: {}, pipeline: null, fresh: false }
+      : await new DispatchReader(this.env, this.refreshConfig(), async keys =>
+        record((await this.getR2Json(keys, { stored: 64 * 1024, decoded: 64 * 1024 }))?.data))
+        .observe(operation, intent, this.actorKey);
+    const rejected = observed.operation.dispatch_state === "post_rejected";
+    if (observed.fresh && observed.run && observed.run.status !== "completed") {
+      const status = syncStatus({ kind: "general", run: observed.run });
+      status.polling_state = "stopped"; status.next_action = "check_later";
+      return { accepted, ...(forStatus ? { available: true, request_id: operation.operation_id } : {}),
+        run: observed.run, terminal: false, data_ready: false, activity_ready: null, should_continue_polling: false,
+        retry_after_seconds: 25, sync_status: status, latency: latency(observed.run),
+        dispatch_status: dispatchStatus(observed.operation),
+        message: "The correlated workflow is queued or running. A later explicit status check may use the same ID; source checks and package readiness are unverified." };
+    }
+    if (observed.fresh && observed.run) {
+      const details = await this.completedRefreshDetails(observed.run, { report: observed.report, pipeline: observed.pipeline });
+      return { accepted, ...(forStatus ? { available: true, request_id: operation.operation_id } : {}),
+        run: observed.run, ...refreshControl(observed.run), ...details,
+        dispatch_status: dispatchStatus(observed.operation) };
+    }
+    const ended = observed.operation.dispatch_state === "verified_terminal";
+    const success = ended && observed.operation.last_observation?.conclusion === "success";
+    const status = syncStatus({ kind: "general", reason: rejected ? "dispatch_rejected" : undefined });
+    if (ended) {
+      status.job_state = success ? "completed" : "failed";
+      status.job_conclusion = observed.operation.last_observation?.conclusion ?? null;
+      status.job_start_confirmed = true; status.polling_state = "complete";
+    } else if (!rejected) {
+      status.job_state = "unknown"; status.job_start_confirmed = null;
+      status.polling_state = "stopped"; status.next_action = "none";
+    }
+    return { accepted: rejected ? false : accepted,
+      ...(forStatus ? { available: true, request_id: operation.operation_id } : {}),
+      terminal: ended || rejected, data_ready: success, should_continue_polling: false,
+      sync_status: status, latency: latency(null), dispatch_status: dispatchStatus(observed.operation),
+      message: ended ? "The verified general job has ended. Workflow success does not verify a specific complete fresh package."
+        : rejected ? "GitHub rejected this dispatch. Check workflow inputs and access before retrying after the cooldown."
+        : "Dispatch verification is incomplete. Preserve the correlation for maintainer inspection; do not start another sync to test it." };
+  }
+
+  private async completedRefreshDetails(run: RefreshRun | null,
+    metadata?: { report: Record<string, unknown>; pipeline: PipelineDiagnostics | null }): Promise<RefreshDetails> {
     const empty = { message: "", activity_ready: null,
       sync_status: syncStatus({ kind: "unknown", run, polling: run?.status !== "completed" }), latency: latency(run) };
     if (!run || run.status !== "completed") return empty;
     try {
-      const stored = await this.getR2Json(
+      const stored = metadata ? { data: metadata.report } : await this.getR2Json(
         [`refresh/reports/${run.id}.json`],
         { stored: 64 * 1024, decoded: 64 * 1024 },
       );
-      const measured = pipelineDiagnosticsSchema.safeParse((await this.getR2Json(
+      const measured = metadata ? null : pipelineDiagnosticsSchema.safeParse((await this.getR2Json(
         [`refresh/diagnostics/v1/${run.id}.json`], { stored: 64 * 1024, decoded: 64 * 1024 },
       ))?.data);
-      const pipeline = measured.success ? measured.data : null;
+      const pipeline = metadata ? metadata.pipeline : measured?.success ? measured.data : null;
       const night = latestNightReportSchema.safeParse(stored?.data);
       if (night.success) {
         return { ...await this.freshData().completedDetails(run,
@@ -435,90 +501,62 @@ class FitnessService {
       },
     }, async (args) => {
       const coordinator = this.env.REFRESH_COORDINATOR.getByName("global");
+      const held = await coordinator.activeDispatch("general-refresh") ?? await coordinator.blockingDispatch("general", "general-refresh");
+      if (held) return this.text(await this.ownedGeneralStatus(held, "shared", false));
       const lease = await coordinator.reserve("refresh-today", Date.now(), REFRESH_LEASE_TTL_MS);
-      if (!lease.acquired || !lease.token) {
-        return this.text({
-          accepted: false,
-          reason: "request_in_progress",
-          message: "Another refresh request is already being checked or dispatched.",
-          retry_after_seconds: Math.max(1, Math.ceil((lease.retryAfterMs ?? 1000) / 1000)),
-          ...refreshControl(null),
-        });
-      }
+      if (!lease.acquired || !lease.token) return this.text({
+        accepted: false, reason: "request_in_progress",
+        message: "Another refresh request is already being checked or dispatched.",
+        retry_after_seconds: Math.max(1, Math.ceil((lease.retryAfterMs ?? 1000) / 1000)),
+        terminal: false, data_ready: false, should_continue_polling: false });
+      let operation: DispatchOperation | null = null;
+      let owned = false;
       try {
         const config = this.refreshConfig();
         const latest = await latestRefreshRun(config);
-        const cooldownMinutes = args.new_activity_expected
-          ? Math.min(5, config.cooldownMinutes)
-          : config.cooldownMinutes;
+        const cooldownMinutes = args.new_activity_expected ? Math.min(5, config.cooldownMinutes) : config.cooldownMinutes;
         const latestDetails = await this.completedRefreshDetails(latest);
         const decision = latestDetails.latest_activity || latestDetails.latest_night || latestDetails.sync_status.kind === "night"
-          ? { dispatch: true as const }
-          : refreshDecision(latest, Date.now(), cooldownMinutes);
+          ? { dispatch: true as const } : refreshDecision(latest, Date.now(), cooldownMinutes);
         if (!decision.dispatch) {
           await coordinator.release("refresh-today", lease.token);
-          const run = decision.reason === "already_running"
-            ? await pollRefreshRun(config, {
-              runId: decision.run.id,
-              maxPolls: REFRESH_POLL_ATTEMPTS,
-              intervalMs: REFRESH_POLL_INTERVAL_MS,
-            })
-            : decision.run;
-          clearSummaryCachesWhenReady(run);
-          const control = refreshControl(run);
-          const details = await this.completedRefreshDetails(run);
-          const message = control.should_continue_polling
-            ? "A Garmin refresh is still queued or running. Call refresh_status now in this same turn; do not ask the user to send another prompt."
-            : control.data_ready
-              ? decision.reason === "recent_success"
-                ? `No new refresh was started because a successful run began within the last ${cooldownMinutes} minutes. ${details.message}`
-                : details.message
-              : `The existing Garmin refresh completed with conclusion ${run?.conclusion ?? "unknown"}; updated data is not ready.`;
-          return this.text({
-            accepted: false,
-            reason: decision.reason,
-            run,
-            ...control,
-            ...details,
-            message,
-          });
+          if (decision.reason === "already_running") {
+            const status = syncStatus({ kind: "unknown" });
+            status.job_state = "unknown"; status.job_start_confirmed = null;
+            status.polling_state = "stopped"; status.next_action = "none";
+            return this.text({ accepted: false, reason: decision.reason, terminal: false,
+              data_ready: false, should_continue_polling: false, sync_status: status, latency: latency(null),
+              message: "An existing workflow may overlap this request, but its mode and coverage are unverified. Inspect it before starting another sync." });
+          }
+          return this.text({ accepted: false, reason: decision.reason, run: decision.run,
+            ...refreshControl(decision.run), ...latestDetails,
+            message: "No new refresh was started during the existing successful-run cooldown. " + latestDetails.message });
         }
-        const dispatched = await dispatchRefresh(config);
-        const run = await pollRefreshRun(config, {
-          runId: dispatched?.id,
-          excludeRunId: dispatched ? undefined : latest?.id,
-          maxPolls: REFRESH_POLL_ATTEMPTS,
-          intervalMs: REFRESH_POLL_INTERVAL_MS,
+        const descriptor: DispatchDescriptor = { repository: config.repository, workflow: config.workflow,
+          ref: config.ref, mode: "general", scope: null, date: null, activity_id: null,
+          new_expected: args.new_activity_expected ?? false, repair_only: false, include_granular: true,
+          components: ["summary", "health", "body", "activity_files", "coach_input"] };
+        operation = await coordinator.beginGeneralDispatch(lease.token, descriptor, Date.now());
+        if (!operation) return this.text({ accepted: false, terminal: false, data_ready: false, should_continue_polling: false,
+          message: "Refresh admission expired before dispatch. No job was started by this request." });
+        if (operation.operation_id !== lease.token) return this.text(await this.ownedGeneralStatus(operation, "shared", false));
+        owned = true;
+        const outcome = await dispatchRefresh(config, fetch, {
+          requestId: operation.operation_id, newActivityExpected: args.new_activity_expected ?? false,
         });
-        clearSummaryCachesWhenReady(run);
-        const control = refreshControl(run);
-        const details = await this.completedRefreshDetails(run);
-        // Keep the short lease until expiry so GitHub has time to expose the new run.
-        return this.text({
-          accepted: true,
-          run,
-          ...control,
-          ...details,
-          message: control.terminal ? details.message || `The job ended with ${run?.conclusion ?? "unknown"}.`
-            : "The Garmin refresh was accepted and is queued or running. Follow refresh_status while should_continue_polling is true.",
-        });
+        operation = await coordinator.mergeDispatchPost(operation, outcome, Date.now()) ?? operation;
+        return this.text(await this.ownedGeneralStatus(operation, "initial", operation.dispatch_state !== "post_rejected"));
       } catch (error) {
+        if (owned && operation) return this.text(await this.ownedGeneralStatus(operation, "shared", true));
         await coordinator.release("refresh-today", lease.token);
-        console.error(JSON.stringify({
-          message: "Could not request Garmin refresh",
-          error: errorCategory(error),
-        }));
-        return {
-          ...this.text({
-            accepted: false,
-            message: "Could not request the Garmin refresh. Check workflow configuration, access and service availability.",
-            terminal: true,
-            data_ready: false,
-            should_continue_polling: false,
-            sync_status: syncStatus({ kind: "general", reason: "configuration_error" }), latency: latency(null),
-          }),
-          isError: true,
-        };
+        console.error(JSON.stringify({ message: "Could not request Garmin refresh", error: errorCategory(error) }));
+        const unverifiedDiscovery = error instanceof GitHubWorkflowRunsEnvelopeError;
+        return { ...this.text({ accepted: false,
+          message: unverifiedDiscovery
+            ? WORKFLOW_RUNS_UNVERIFIED
+            : "Could not request the Garmin refresh. Check workflow configuration, access and service availability.",
+          terminal: true, data_ready: false, should_continue_polling: false,
+          sync_status: syncStatus({ kind: "general", reason: unverifiedDiscovery ? undefined : "configuration_error" }), latency: latency(null) }), isError: true };
       }
     });
 
@@ -539,8 +577,13 @@ class FitnessService {
       },
     }, async (args) => {
       const coordinator = this.env.REFRESH_COORDINATOR.getByName("global");
-      const freshJob = args.request_id ? await coordinator.freshJob(args.request_id)
-        : args.run_id ? await coordinator.freshJobForRun(args.run_id) : null;
+      const dispatch = args.request_id ? await coordinator.dispatchOperation(args.request_id)
+        : args.run_id ? await coordinator.dispatchForRun(args.run_id) : null;
+      if (dispatch?.origin === "general") return this.text(await this.ownedGeneralStatus(dispatch, "status", false, true));
+      const freshJob = dispatch ? await coordinator.freshJob(dispatch.operation_id)
+        : args.request_id ? await coordinator.freshJob(args.request_id)
+          : args.run_id ? await coordinator.freshJobForRun(args.run_id) : null;
+      if (dispatch && !freshJob) return this.text(this.retainedTargetedStatus(dispatch));
       if (args.request_id && !freshJob) {
         return this.text({ available: false, message: "The targeted correlation ID was not found.",
           terminal: true, data_ready: false, should_continue_polling: false,
@@ -568,11 +611,26 @@ class FitnessService {
         });
       }
       try {
-        const run = await pollRefreshRun(this.refreshConfig(), {
-          runId: args.run_id,
-          maxPolls: REFRESH_POLL_ATTEMPTS,
-          intervalMs: REFRESH_POLL_INTERVAL_MS,
-        });
+        const config = this.refreshConfig();
+        let run: RefreshRun | null = null;
+        if (args.run_id) {
+          run = await pollRefreshRun(config, {
+            runId: args.run_id, maxPolls: REFRESH_POLL_ATTEMPTS, intervalMs: REFRESH_POLL_INTERVAL_MS,
+          });
+        } else {
+          for (let poll = 0; poll < REFRESH_POLL_ATTEMPTS; poll++) {
+            run = await latestRefreshRun(config); // Discovery is not owned-job evidence.
+            const known = run ? await coordinator.dispatchForRun(run.id) : null;
+            if (known?.origin === "general")
+              return this.text(await this.ownedGeneralStatus(known, "status", false, true));
+            const knownJob = known ? await coordinator.freshJob(known.operation_id)
+              : run ? await coordinator.freshJobForRun(run.id) : null;
+            if (knownJob) return this.text(await this.freshData().status(knownJob));
+            if (known) return this.text(this.retainedTargetedStatus(known));
+            if (run?.status === "completed" || poll === REFRESH_POLL_ATTEMPTS - 1) break;
+            await new Promise(resolve => setTimeout(resolve, REFRESH_POLL_INTERVAL_MS));
+          }
+        }
         clearSummaryCachesWhenReady(run);
         const control = refreshControl(run);
         const details = await this.completedRefreshDetails(run);
@@ -589,14 +647,21 @@ class FitnessService {
           message: "Could not read Garmin refresh status",
           error: errorCategory(error),
         }));
+        const status = syncStatus({ kind: "unknown", reason: "status_error" });
+        if (error instanceof GitHubWorkflowRunsEnvelopeError) {
+          status.data_state = "unknown";
+          status.user_action_required = false;
+          status.next_action = "retry_later";
+        }
         return {
           ...this.text({
             available: false,
-            message: "Could not read Garmin refresh status. Check workflow configuration, access and service availability.",
+            message: error instanceof GitHubWorkflowRunsEnvelopeError ? WORKFLOW_RUNS_UNVERIFIED
+              : "Could not read Garmin refresh status. Check workflow configuration, access and service availability.",
             terminal: true,
             data_ready: false,
             should_continue_polling: false,
-            sync_status: syncStatus({ kind: "unknown", reason: "status_error" }), latency: latency(null),
+            sync_status: status, latency: latency(null),
           }),
           isError: true,
         };

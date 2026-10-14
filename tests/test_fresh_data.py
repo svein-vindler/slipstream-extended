@@ -67,18 +67,21 @@ def test_night_contacts_only_two_endpoints_and_preserves_local_clocks():
     assert "refresh/checks/v1/night/2026-09-30.json" in store.objects
 
 
-@pytest.mark.parametrize("sleep", [{}, {"dailySleepDTO": {"calendarDate": DAY, "sleepTimeSeconds": 0}}])
+@pytest.mark.parametrize("sleep", [{"dailySleepDTO": {"calendarDate": DAY, "sleepTimeSeconds": 0}}])
 def test_empty_night_is_a_successful_negative_check_without_overwriting_history(sleep):
     store = FakeStore()
     key = f"health/sleep/v1/2026/09/{DAY}.json"
     store.objects[key] = b"existing synthetic revision"
-    result = run(run_id="10", wake_date=DAY, store=store, garmin=NightGarmin(sleep=sleep, hrv={}))
+    result = run(run_id="10", wake_date=DAY, store=store, garmin=NightGarmin(sleep=sleep,
+        hrv={"hrvSummary": {"calendarDate": DAY}, "hrvReadings": []}))
     assert result["sleep_status"] == result["hrv_status"] == "garmin_not_ready"
     assert result["source_checked"] is True
     assert store.objects[key] == b"existing synthetic revision"
 
 
 @pytest.mark.parametrize("raw,status", [
+    ({}, "invalid_response"),
+    ({"calendarDate": "2026-09-29", "sleepTimeSeconds": 0}, "wrong_date"),
     ({"dailySleepDTO": {"calendarDate": "2026-09-29", "sleepTimeSeconds": 25200}}, "wrong_date"),
     (ValueError("provider failure"), "import_error"),
 ])

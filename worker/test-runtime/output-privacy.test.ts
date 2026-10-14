@@ -53,7 +53,7 @@ beforeEach(async () => {
       if (mode === "provider") throw providerError;
       if (mode === "context" && key === "summary/activities.csv") {
         const body = "Activity ID,Activity Date,Activity Name,Activity Type,Source\ngarmin-123,2041-02-03,Synthetic context workout,Run,garmin";
-        return { size: body.length, etag: "synthetic-context", arrayBuffer: async () => new TextEncoder().encode(body).buffer };
+        return { size: body.length, etag: "synthetic-context", body: new Response(body).body };
       }
       if (mode === "context") return null; // Synthetic index has no canonical clock yet.
       if (mode === "profile" || mode === "list" || mode.startsWith("targeted")) return null;
@@ -63,14 +63,15 @@ beforeEach(async () => {
           new_activity_count: 1, checked_activity_count: 1, remaining_candidate_count: 0,
           activities: [{ activity_id: "garmin-123", name: "Authorized synthetic workout", date: "2041-02-03",
             is_new: true, files_ready: false, file_status: "error", coach_status: "error", error: marker.slice(0, 300) }] });
-        return { size: body.length, arrayBuffer: async () => new TextEncoder().encode(body).buffer };
+        return { size: body.length, body: new Response(body).body };
       }
-      if (mode === "oversize") return { size: 100 * 1024 * 1024 };
+      if (mode === "oversize") return { size: 100 * 1024 * 1024, body: new Response("unread").body };
       if (mode === "json") {
         const body = '{"private":"' + marker + '"';
-        return { size: body.length, arrayBuffer: async () => new TextEncoder().encode(body).buffer };
+        return { size: body.length, body: new Response(body).body };
       }
-      if (mode === "body") return { size: 1, arrayBuffer: async () => { throw new Error(marker); } };
+      if (mode === "body") return { size: 1,
+        body: new ReadableStream({ start(controller) { controller.error(new Error(marker)); } }) };
       throw new Error(marker);
     },
   } as unknown as R2Bucket;

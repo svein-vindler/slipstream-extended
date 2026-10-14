@@ -198,7 +198,7 @@ def test_detail_stream_reports_are_not_changed_by_log_projection(monkeypatch, ca
 
 def test_coach_report_keeps_source_fingerprint_only_in_private_result(monkeypatch, capsys):
     from pipeline import coach_backfill
-    monkeypatch.setattr(coach_backfill, "_profiles", lambda *args: [])
+    monkeypatch.setattr(coach_backfill, "_profiles", lambda *args, **kwargs: [])
     store = MemoryStore({"summary/activities.csv": b"Activity ID,Activity Type\n"})
     result = coach_backfill.run(store=store)
     output = capsys.readouterr()

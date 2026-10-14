@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import re
 from datetime import date, datetime, timedelta, timezone
 
+from .dispatch_receipt import publish_matching, valid_request_id
 from .granular import json_bytes
 
 
@@ -24,11 +24,11 @@ def receipt(store, run_id: str, request_id: str | None, scope: str) -> None:
         raise ValueError("run_id must contain digits only")
     if request_id is None:
         return
-    if not re.fullmatch(r"[a-f0-9-]{36}", request_id):
+    if not valid_request_id(request_id):
         raise ValueError("Invalid request_id")
-    store.put(f"refresh/requests/{request_id}.json", json_bytes({
+    publish_matching(store, f"refresh/requests/{request_id}.json", json_bytes({
         "run_id": int(run_id), "scope": scope,
-    }), "application/json")
+    }))
 
 
 def publish(store, run_id: str, scope: str, report: dict, *, source_checked: bool = True) -> dict:

@@ -6,6 +6,7 @@ import csv
 import gzip
 import io
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -19,6 +20,8 @@ from .schema import activity_calendar_years, activity_local_date, to_utc
 PLAN_KEY = "backfill/coach-input/v1/plan.json"
 PROFILE_PREFIX = "coach/profiles/v1/"
 MAX_ACTIVITIES_PER_RUN = 50
+LEGACY_ANALYZER_VERSION = "1.0.0"
+BULK_REUSE_VERSION = 1
 
 
 def _decode(data: bytes) -> bytes:
@@ -65,9 +68,9 @@ def _float(value: Any) -> float | None:
         return None
 
 
-def _profiles(store) -> list[dict[str, Any]]:
+def _profiles(store, *, keys: set[str] | None = None) -> list[dict[str, Any]]:
     profiles = []
-    for key in sorted(store.list_keys(PROFILE_PREFIX)):
+    for key in sorted(store.list_keys(PROFILE_PREFIX) if keys is None else keys):
         try:
             profiles.append(_json(store, key))
         except (ValueError, json.JSONDecodeError, KeyError):
@@ -181,10 +184,11 @@ def _source_signature(
     *,
     context_key: str | None,
     manifest_revision: str | None,
+    analyzer_version: str | None = None,
 ) -> str:
-    """Identify the inputs that decide whether one coach analysis is stale."""
+    """Identify inputs without relabeling a retained historical engine."""
     value = {
-        "analyzer_version": ANALYZER_VERSION,
+        "analyzer_version": analyzer_version or ANALYZER_VERSION,
         "activity": activity,
         "profile": profile,
         "context_key": context_key,
@@ -196,20 +200,153 @@ def _source_signature(
 def _single_input_signature(
     activity: dict[str, Any], profile: dict[str, Any],
     required: list[str], revisions: dict[str, str], context_key: str | None,
+    *, analyzer_version: str | None = None,
 ) -> str | None:
     """Reuse only when every selected input has a revision, including context."""
     selected = [*required, *([context_key] if context_key else [])]
-    if any(not revisions.get(key) for key in selected):
+    if any(not isinstance(revisions.get(key), str) or not revisions[key] for key in selected):
         return None
     metadata = ({**activity, "moving_seconds": _float(activity["moving_seconds"])}
                 if "moving_seconds" in activity else activity)
     return sha256(json.dumps({
         "signature_version": 2,
-        "analyzer_version": ANALYZER_VERSION,
+        "analyzer_version": analyzer_version or ANALYZER_VERSION,
         "activity": metadata,
         "profile": profile,
         "revisions": {key: revisions[key] for key in selected},
     }, sort_keys=True, separators=(",", ":")).encode())
+
+
+def _bulk_cached_proof(proof, activity, profile, required, revisions, keys, context_key):
+    """Reuse only the exact input, canonical and selection revisions inspected before."""
+    if not isinstance(proof, dict) or not profile:
+        return False
+    engine = proof.get("analyzer_version")
+    if engine not in (LEGACY_ANALYZER_VERSION, ANALYZER_VERSION):
+        return False
+    key = proof.get("analysis_key")
+    canonical = f"activities/{activity['date'][:4]}/{activity['id']}/coach-input/v1/canonical/"
+    if (not isinstance(key, str) or not key.startswith(canonical)
+            or len(key[len(canonical):]) != 29 or not key.endswith(".json")
+            or any(c not in "0123456789abcdef" for c in key[len(canonical):-5])):
+        return False
+    pointer = f"activities/{activity['date'][:4]}/{activity['id']}/coach-input/v1/latest-ready.json"
+    signature = _single_input_signature(
+        activity, profile, required, revisions, context_key, analyzer_version=engine,
+    )
+    return bool(signature and signature == proof.get("input_signature")
+                and isinstance(key, str) and key in keys
+                and proof.get("canonical_revision") and revisions.get(key) == proof["canonical_revision"]
+                and proof.get("pointer_revision") and revisions.get(pointer) == proof["pointer_revision"])
+
+
+def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
+                          context_key, saved_pointer_revision, profiles):
+    """Bounded inspection: retain known engines, prove input change, or defer unknown."""
+    prefix = f"activities/{activity['date'][:4]}/{activity['id']}"
+    pointer_key = f"{prefix}/coach-input/v1/latest-ready.json"
+    if pointer_key not in keys:
+        return "unknown", None
+    try:
+        pointer = _json(store, pointer_key)
+        key = pointer.get("analysis_key")
+        canonical = f"{prefix}/coach-input/v1/canonical/"
+        if (not isinstance(key, str) or not key.startswith(canonical) or key not in keys
+                or len(key[len(canonical):]) != 29 or not key.endswith(".json")
+                or any(c not in "0123456789abcdef" for c in key[len(canonical):-5])):
+            return "unknown", None
+        candidate = _json(store, key)
+        engine = candidate.get("analyzer_version")
+        stored = pointer.get("input_signature")
+        if engine is None and pointer.get("analyzer_version") == ANALYZER_VERSION:
+            return "conflict", None
+        marked = type(pointer.get("selection_version")) is int and pointer["selection_version"] == 1
+        unmarked = "selection_version" not in pointer
+        valid_schema = type(pointer.get("schema_version")) is int and pointer["schema_version"] == 1
+        repair_marker = engine == ANALYZER_VERSION and (not valid_schema or not marked and not unmarked)
+        if not repair_marker and (not valid_schema or not marked and not unmarked):
+            return "unknown", None
+        if (engine not in (LEGACY_ANALYZER_VERSION, ANALYZER_VERSION)
+                or type(candidate.get("schema_version")) is not int or candidate["schema_version"] != 1
+                or candidate.get("analysis_id") != key[len(canonical):-5]
+                or str(candidate.get("activity_id")) != activity["id"]
+                ):
+            return "unknown", None
+        # Validate the C3 content identity, restoring its builder seed before hashing.
+        source, effective = candidate["source"], candidate["profile"]
+        context = candidate.get("user_context")
+        seed = {
+            "activity_id": candidate["activity_id"], "analyzer_version": engine,
+            "fit_sha256": source["fit_sha256"], "tcx_sha256": source["tcx_sha256"],
+            "profile_id": str(effective["profile_id"]),
+            "context_revision": str(context.get("context_id")) if context else None,
+        }
+        seed_id = sha256(json.dumps(seed, sort_keys=True, separators=(",", ":")).encode())[:24]
+        checked = {**candidate, "summary": dict(candidate["summary"]), "analysis_id": seed_id}
+        _identify_coach_input(checked)
+        if checked["analysis_id"] != candidate["analysis_id"]:
+            if engine == ANALYZER_VERSION:
+                return ("repair", None) if candidate["analysis_id"] == seed_id else ("conflict", None)
+            return "unknown", None
+        if repair_marker:
+            return "repair", None
+        if (not isinstance(stored, str) or len(stored) != 64
+                or any(c not in "0123456789abcdef" for c in stored)):
+            return "unknown", None
+        expected = _single_input_signature(
+            activity, profile, required, revisions, context_key, analyzer_version=engine,
+        )
+        if expected is None or not revisions.get(key) or not revisions.get(pointer_key):
+            return "unknown", None
+        if stored != expected:
+            # The previous C3 checkpoint attests an unchanged legacy pointer. New
+            # pointers also retain the context revision needed to verify old inputs.
+            trusted_previous = bool(saved_pointer_revision
+                                    and saved_pointer_revision == revisions[pointer_key])
+            old_context_key = pointer.get("input_context_key")
+            old_revisions = dict(pointer.get("source_revisions", {}))
+            if old_context_key:
+                allowed_prefixes = [
+                    f"activities/{year}/{activity['id']}/context/v1/"
+                    for year in activity_calendar_years(activity["date"])
+                ]
+                matched_prefix = next((item for item in allowed_prefixes
+                                       if isinstance(old_context_key, str)
+                                       and old_context_key.startswith(item)), None)
+                if (matched_prefix is None
+                        or not re.fullmatch(r"[A-Za-z0-9_-]+\.json", old_context_key[len(matched_prefix):])
+                        or old_context_key not in keys
+                        or not isinstance(pointer.get("input_context_revision"), str)
+                        or revisions.get(old_context_key) != pointer["input_context_revision"]):
+                    return "unknown", None
+                old_revisions[old_context_key] = pointer.get("input_context_revision")
+            old_activity = {"id": activity["id"], **candidate["activity"],
+                            "moving_seconds": candidate["summary"]["moving_seconds"]}
+            old_profiles = [select_profile([raw], candidate["activity"]["date"]) for raw in profiles]
+            old_signatures = {
+                _single_input_signature(
+                    old_activity, normalized, required, old_revisions, old_context_key,
+                    analyzer_version=engine,
+                ) for normalized in old_profiles if normalized
+                and {name: normalized.get(name) for name in (
+                    "profile_id", "name", "effective_from", "zones", "references")} == effective
+            } if not context or "input_context_key" in pointer else set()
+            return ("changed", None) if trusted_previous or stored in old_signatures else ("unknown", None)
+        if (candidate["activity"] != {"date": activity["date"], "name": activity["name"], "type": activity["type"]}
+                or candidate["summary"]["moving_seconds"] != _float(activity["moving_seconds"])
+                or effective != {name: profile.get(name) for name in (
+                    "profile_id", "name", "effective_from", "zones", "references")}
+                or pointer.get("profile_id") != effective["profile_id"]
+                or pointer.get("context_id") != (context.get("context_id") if context else None)
+                or pointer.get("source_revisions") != {key: revisions[key] for key in required}):
+            return "unknown", None
+        return "retained", {
+            "analyzer_version": engine, "input_signature": expected, "analysis_key": key,
+            "canonical_revision": revisions[key], "pointer_revision": revisions[pointer_key],
+            "selection_kind": "unmarked" if unmarked else "marked",
+        }
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return "unknown", None
 
 
 def _identify_coach_input(coach: dict[str, Any]) -> None:
@@ -247,6 +384,7 @@ def _publish_current_analysis(
     coach: dict[str, Any], revisions: dict[str, str], keys: set[str],
     previous_pointer: dict[str, Any] | None = None,
     input_signature: str | None = None,
+    context_key: str | None = None,
 ) -> str | None:
     """Commit current selection after immutable content, before bulk progress."""
     pointer_key = f"{prefix}/coach-input/v1/latest-ready.json"
@@ -260,6 +398,9 @@ def _publish_current_analysis(
         "source_revisions": {source: revisions[source] for source in required if revisions.get(source)},
         "profile_id": profile["profile_id"],
         "context_id": coach.get("user_context", {}).get("context_id") if coach.get("user_context") else None,
+        "analyzer_version": coach["analyzer_version"],
+        "input_context_key": context_key,
+        "input_context_revision": revisions.get(context_key) if context_key else None,
     }
     signature = input_signature
     if signature is not None:
@@ -386,7 +527,7 @@ def run_one(*, activity: dict[str, Any], store: R2Store, force: bool = False) ->
     _publish_current_analysis(
         store, prefix=prefix, key=key, profile=profile, coach=coach,
         revisions=revisions, keys=keys, previous_pointer=previous_pointer,
-        input_signature=signature,
+        input_signature=signature, context_key=context_key,
     )
     print(json.dumps({"event": "targeted_coach_input", "analysis_reused": False}))
     return {"processed_sources": {activity_id: coach["analysis_id"]},
@@ -403,7 +544,10 @@ def run(
         raise ValueError(f"max_activities must be between 1 and {MAX_ACTIVITIES_PER_RUN}")
     store = store or R2Store()
     summary_bytes = store.get("summary/activities.csv")
-    profiles = _profiles(store)
+    # One complete invocation-local keyset feeds both profile loading and the
+    # fingerprint, including keys whose bodies cannot be parsed as profiles.
+    profile_keys = store.list_keys(PROFILE_PREFIX)
+    profiles = _profiles(store, keys=profile_keys)
     clocks: dict[str, dict[str, Any]] = {}
     activities = _activities(summary_bytes, clocks=clocks)
     if hasattr(store, "list_object_revisions"):
@@ -419,7 +563,8 @@ def run(
     fingerprint_parts = [
         f"analyzer:{ANALYZER_VERSION}",
         sha256(summary_bytes),
-        *sorted(store.list_keys(PROFILE_PREFIX)),
+        sha256(json.dumps(profiles, sort_keys=True, separators=(",", ":")).encode()),
+        *sorted(profile_keys),
         *sorted(
             key
             for key in all_keys
@@ -434,6 +579,12 @@ def run(
             )
         ),
     ]
+    fingerprint_parts.extend(
+        f"input:{key}:{object_revisions.get(key)}"
+        for key in sorted(all_keys) if any(marker in key for marker in (
+            "/activity.v1.json", "/activity.endurance.v1.json", "/activity.tcx", "/context/v1/",
+        ))
+    )
     # Activity refreshes replace canonical objects under the same keys. Their
     # small manifests make those replacements visible without downloading the
     # FIT, TCX and normalized JSON for every previously processed activity.
@@ -484,7 +635,19 @@ def run(
             _selection_current(activity, object_revisions, all_keys, selections, legacy_selections)
             for activity in activities if activity["id"] in processed
         )
-        if (selections_current and len(clock_revisions) == len(saved_clocks)
+        proofs = previous.get("bulk_reuse_proofs", {})
+        proofs = proofs if isinstance(proofs, dict) else {}
+        proofs_current = all(
+            _bulk_cached_proof(
+                proofs.get(activity["id"]), activity, select_profile(profiles, activity["date"]),
+                [f"activities/{activity['date'][:4]}/{activity['id']}/{name}" for name in (
+                    "activity.v1.json", "activity.endurance.v1.json", "activity.tcx")],
+                object_revisions, all_keys, _activity_context_key(all_keys, activity),
+            ) for activity in activities if activity["id"] in processed
+        )
+        if (previous.get("bulk_reuse_version") == BULK_REUSE_VERSION and proofs_current
+                and not previous.get("deferred_legacy_activity_count")
+                and selections_current and len(clock_revisions) == len(saved_clocks)
                 and previous.get("source_fingerprint") == source_fingerprint and previous.get("status") in {
             "complete",
             "complete_with_blocked",
@@ -512,10 +675,16 @@ def run(
         if activity_id in running_ids
     } if isinstance(saved_legacy, dict) else {}
 
+    saved_proofs = previous.get("bulk_reuse_proofs", {})
+    reuse_proofs = dict(saved_proofs) if isinstance(saved_proofs, dict) else {}
     pending = []
     blocked = []
     already_complete = 0
-    for activity in activities:
+    reuse_inspections = 0
+    deferred_legacy = 0
+    selection_adoptions = 0
+    ordered = sorted(activities, key=lambda activity: activity["id"] not in priority_activity_ids) if priority_activity_ids else activities
+    for activity in ordered:
         profile = select_profile(profiles, activity["date"])
         legacy_clock = not clocks[activity["id"]]["local"] and activity["id"] not in clock_revisions
         if not profile and (not legacy_clock or not profiles):
@@ -540,19 +709,112 @@ def run(
             processed_sources.pop(activity["id"], None)
             continue
         context_key = _activity_context_key(all_keys, activity)
+        required = [fit_key, endurance_key, tcx_key]
+        cached_proof = reuse_proofs.get(activity["id"])
+        cached_engine = cached_proof.get("analyzer_version") if isinstance(cached_proof, dict) else None
+        cached_source_matches = cached_engine and processed_sources.get(activity["id"]) == _source_signature(
+            activity, profile, context_key=context_key,
+            manifest_revision=manifest_revisions.get(activity["id"]), analyzer_version=cached_engine,
+        )
+        if (cached_source_matches and not legacy_clock and activity["id"] not in invalidated_clocks
+                and _bulk_cached_proof(cached_proof, activity, profile, required,
+                                       object_revisions, all_keys, context_key)):
+            already_complete += 1
+            continue
+        has_prior = activity["id"] in processed_sources or any(
+            key.startswith(prefix + "/coach-input/v1/") for key in all_keys)
+        if has_prior:
+            if reuse_inspections + len(pending) >= max_activities:
+                deferred_legacy += 1
+                blocked.append({"activity_id": activity["id"], "reason": "historical_analysis_unverified"})
+                continue
+            reuse_inspections += 1
+        if legacy_clock and has_prior:
+            resolved = _resolve_legacy_calendar(store, activity, clocks[activity["id"]]["utc"], all_keys)
+            if resolved:
+                day, fit_key, _, date_source = resolved
+                activity = {**activity, "date": day}
+                prefix = fit_key.rsplit("/", 1)[0]
+                endurance_key = fit_key.replace("activity.v1.json", "activity.endurance.v1.json")
+                tcx_key = fit_key.replace("activity.v1.json", "activity.tcx")
+                profile = select_profile(profiles, day)
+                if not profile or any(key not in all_keys for key in (fit_key, endurance_key, tcx_key)):
+                    deferred_legacy += 1
+                    blocked.append({"activity_id": activity["id"], "reason": "historical_analysis_unverified"})
+                    continue
+                context_key = _activity_context_key(all_keys, activity)
+                clock_revisions[activity["id"]] = {
+                    "date": day, "source": date_source, "summary_utc": clocks[activity["id"]]["utc"],
+                    "source_key": fit_key, "source_revision": object_revisions.get(fit_key),
+                    "candidate_revisions": {
+                        key: object_revisions.get(key) for year in activity_calendar_years(clocks[activity["id"]]["utc"][:10])
+                        if (key := f"activities/{year}/{activity['id']}/activity.v1.json") in all_keys
+                    },
+                }
+                if date_source == "garmin_local":
+                    clock_revisions[activity["id"]]["calendar_contract_version"] = 1
+                legacy_clock = False
+                invalidated_clocks.discard(activity["id"])
         signature = _source_signature(
             activity,
             profile or {},
             context_key=context_key,
             manifest_revision=manifest_revisions.get(activity["id"]),
         )
-        selection_current = _selection_current(
-            activity, object_revisions, all_keys, selection_revisions, legacy_selection_revisions,
-        )
-        if (processed_sources.get(activity["id"]) == signature and selection_current
-                and activity["id"] not in invalidated_clocks):
-            already_complete += 1
-            continue
+
+        required = [fit_key, endurance_key, tcx_key]
+        pointer_key = f"{prefix}/coach-input/v1/latest-ready.json"
+        has_history = (activity["id"] in processed_sources or pointer_key in all_keys
+                       or any(key.startswith(prefix + "/coach-input/v1/canonical/") for key in all_keys))
+        if has_history:
+            if legacy_clock or activity["id"] in invalidated_clocks:
+                outcome, proof = "unknown", None
+            else:
+                outcome, proof = _bulk_selection_proof(
+                    store, activity, profile, required, object_revisions, all_keys, context_key,
+                    selection_revisions.get(activity["id"]), profiles,
+                )
+            if outcome == "conflict":
+                raise ValueError("Coach analysis identity conflict")
+            if outcome == "repair":
+                outcome = "changed"
+            if outcome == "retained" and activity["id"] in processed_sources:
+                previous_signature = processed_sources[activity["id"]]
+                actual_signature = _source_signature(
+                    activity, profile, context_key=context_key,
+                    manifest_revision=manifest_revisions.get(activity["id"]),
+                    analyzer_version=proof["analyzer_version"],
+                )
+                legacy_signature = _source_signature(
+                    activity, profile, context_key=context_key,
+                    manifest_revision=manifest_revisions.get(activity["id"]),
+                    analyzer_version=LEGACY_ANALYZER_VERSION,
+                )
+                if previous_signature not in (actual_signature, legacy_signature):
+                    outcome = "changed"
+            if outcome == "retained":
+                reuse_proofs[activity["id"]] = proof
+                if proof["selection_kind"] == "unmarked":
+                    legacy_selection_revisions[activity["id"]] = proof["pointer_revision"]
+                    selection_revisions.pop(activity["id"], None)
+                    selection_adoptions += 1
+                else:
+                    selection_revisions[activity["id"]] = proof["pointer_revision"]
+                processed_sources[activity["id"]] = _source_signature(
+                    activity, profile, context_key=context_key,
+                    manifest_revision=manifest_revisions.get(activity["id"]),
+                    analyzer_version=proof["analyzer_version"],
+                )
+                already_complete += 1
+                continue
+            if outcome == "unknown":
+                deferred_legacy += 1
+                reuse_proofs.pop(activity["id"], None)
+                blocked.append({"activity_id": activity["id"], "reason": "historical_analysis_unverified"})
+                continue
+            # A verified change consumes this activity's generation slot, not a
+            # second inspection slot; retained/unknown inspections remain charged.
+            reuse_inspections -= 1
         pending.append(
             {
                 "activity": activity,
@@ -573,12 +835,13 @@ def run(
 
     completed = []
     skipped = []
-    inspected = 0
+    inspected = selection_adoptions
     clock_blocked = 0
     # One canonical attempt + one current-selection attempt per activity, and
     # one final plan PUT. Do not spend that checkpoint reservation on analysis.
     capacity = getattr(store, "remaining_write_attempts", None)
-    batch_limit = min(max_activities, max(0, (capacity - 1) // 2)) if capacity is not None else max_activities
+    available = max(0, max_activities - reuse_inspections)
+    batch_limit = min(available, max(0, (capacity - 1) // 2)) if capacity is not None else available
     for item in pending[:batch_limit]:
         activity = item["activity"]
         decoded_fit = None
@@ -652,15 +915,26 @@ def run(
         )
         _identify_coach_input(coach)
         key = f"{item['prefix']}/coach-input/v1/canonical/{coach['analysis_id']}.json"
+        existed = key in all_keys
         _publish_coach_input(store, key, coach, all_keys)
+        canonical_revision = object_revisions.get(key) if existed else getattr(store, "last_write_revision", None)
         required = [item["fit_key"], item["endurance_key"], item["tcx_key"]]
         selection_revision = _publish_current_analysis(
             store, prefix=item["prefix"], key=key, profile=item["profile"],
             coach=coach, revisions=object_revisions, keys=all_keys,
+            context_key=item["context_key"],
             input_signature=_single_input_signature(
                 activity, item["profile"], required, object_revisions, item["context_key"],
             ),
         )
+        reuse_proofs[activity["id"]] = {
+            "analyzer_version": ANALYZER_VERSION,
+            "input_signature": _single_input_signature(
+                activity, item["profile"], required, object_revisions, item["context_key"],
+            ),
+            "analysis_key": key, "canonical_revision": canonical_revision,
+            "pointer_revision": selection_revision,
+        }
         selection_revisions[activity["id"]] = selection_revision
         legacy_selection_revisions.pop(activity["id"], None)
         processed_sources[activity["id"]] = item["source_signature"]
@@ -676,7 +950,10 @@ def run(
     # spinning. Pending work is now derived from per-activity source revisions,
     # so later runs do not reread artifacts that were already analyzed.
     processed_this_run = len(completed) + len(skipped) + inspected + clock_blocked
-    remaining = max(0, len(pending) - processed_this_run)
+    # Selection adoptions were never pending generation items. They consume the
+    # inspection allowance, but cannot complete unrelated pending activities.
+    pending_processed = processed_this_run - selection_adoptions
+    remaining = max(0, len(pending) - pending_processed)
     status = (
         "complete_with_blocked"
         if remaining == 0 and blocked
@@ -692,6 +969,9 @@ def run(
         "status": status,
         "updated_at": now,
         "source_fingerprint": source_fingerprint,
+        "bulk_reuse_version": BULK_REUSE_VERSION,
+        "bulk_reuse_proofs": reuse_proofs,
+        "deferred_legacy_activity_count": deferred_legacy,
         "processed_sources": processed_sources,
         "selection_revisions": selection_revisions,
         "legacy_selection_revisions": legacy_selection_revisions,
@@ -711,7 +991,10 @@ def run(
     }
     if status in {"complete", "complete_with_blocked"}:
         plan["completed_at"] = now
-    store.put(PLAN_KEY, json.dumps(plan, separators=(",", ":")).encode(), "application/json")
+    # An engine-only transition/unknown legacy is not a new historical write job.
+    # Persist verified reuse metadata with the next real bounded checkpoint only.
+    if not previous or pending or completed or skipped or inspected or clock_blocked:
+        store.put(PLAN_KEY, json.dumps(plan, separators=(",", ":")).encode(), "application/json")
     log_report("coach_backfill", plan)
     return plan
 

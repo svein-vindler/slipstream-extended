@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any
 
-from .granular import gzip_json, json_bytes, normalize_hrv, sha256
+from .granular import HrvResponseError, gzip_json, json_bytes, normalize_hrv, sha256
 from .health_detail import normalize_body_composition, normalize_sleep_detail
 from .health_history_index import _number, _timestamp_seconds, sync_dates
 
@@ -114,13 +114,17 @@ def normalize_day(stream: str, day: str, raw: Any) -> dict[str, Any]:
         if raw.get("calendarDate") is not None and str(raw["calendarDate"])[:10] != day:
             raise HealthNotReady("wrong_date")
         return _body_day(day, raw)
-    dto = raw.get("dailySleepDTO" if stream == "sleep" else "hrvSummary", {})
-    if isinstance(dto, dict) and dto.get("calendarDate") and dto["calendarDate"] != day:
+    dto = raw.get("dailySleepDTO", raw) if stream == "sleep" else raw.get("hrvSummary", {})
+    if raw.get("calendarDate") is not None and raw["calendarDate"] != day:
+        raise HealthNotReady("wrong_date")
+    if isinstance(dto, dict) and dto.get("calendarDate") is not None and dto["calendarDate"] != day:
         raise HealthNotReady("wrong_date")
     try:
         payload = normalize_sleep_detail(day, raw) if stream == "sleep" else normalize_hrv(day, raw)
+    except HrvResponseError as exc:
+        raise HealthNotReady(exc.status) from exc
     except ValueError as exc:
-        raise HealthNotReady() from exc
+        raise HealthNotReady("invalid_response") from exc
     if stream == "sleep":
         duration = _number(payload["summary"].get("sleep_seconds"))
         start = _timestamp_seconds(payload.get("sleep_start_gmt"))
@@ -142,6 +146,18 @@ def normalize_day(stream: str, day: str, raw: Any) -> dict[str, Any]:
             for item in readings
         )
     if not usable:
+        dated = raw.get("calendarDate") == day or isinstance(dto, dict) and dto.get("calendarDate") == day
+        if stream == "sleep":
+            # An explicit dated zero or a structurally valid unconfirmed window
+            # is pending. Unknown/incomplete payloads are not verified absence.
+            pending = dated and (duration == 0 or duration is not None and duration > 0
+                                 and start is not None and end is not None and end > start
+                                 and valid_stage and payload.get("confirmed") is False)
+        else:
+            # normalize_hrv already validated the known empty/summary-only shape.
+            pending = dated
+        if not pending:
+            raise HealthNotReady("invalid_response")
         raise HealthNotReady()
     return payload
 

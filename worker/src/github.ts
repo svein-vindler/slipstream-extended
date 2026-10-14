@@ -83,10 +83,24 @@ function headers(config: RefreshConfig): HeadersInit {
   };
 }
 
+export type DispatchPostOutcome =
+  | { kind: "ack_candidate"; run_id: number }
+  | { kind: "post_rejected"; method: "POST"; phase: "dispatch"; status: number }
+  | { kind: "unconfirmed"; reason: "transport" | "deadline" | "empty_ack" | "invalid_ack" | "other_http" };
+
 export class GitHubRequestError extends Error {
   constructor(readonly status: number, readonly method: string, message: string) {
     super(message);
     this.name = "GitHubRequestError";
+  }
+}
+
+export const WORKFLOW_RUNS_UNVERIFIED = "GitHub workflow-run discovery could not be verified.";
+
+export class GitHubWorkflowRunsEnvelopeError extends Error {
+  constructor() {
+    super(WORKFLOW_RUNS_UNVERIFIED);
+    this.name = "GitHubWorkflowRunsEnvelopeError";
   }
 }
 
@@ -175,7 +189,8 @@ export async function latestRefreshRun(
     fetcher,
   ));
   const runs = payload?.workflow_runs;
-  return Array.isArray(runs) && runs.length ? normalizeRefreshRun(runs[0]) : null;
+  if (!Array.isArray(runs)) throw new GitHubWorkflowRunsEnvelopeError();
+  return runs.length ? normalizeRefreshRun(runs[0]) : null;
 }
 
 export async function getRefreshRun(
@@ -194,6 +209,26 @@ export async function getRefreshRun(
   );
   validateRefreshRunSource(config, payload);
   return normalizeRefreshRun(payload);
+}
+
+export type DispatchRunSource = { repository: string; workflow: string; ref: string; source_sha: string };
+
+export async function getDispatchRun(config: RefreshConfig, runId: number, fetcher: Fetcher = fetch):
+  Promise<{ run: RefreshRun; source: DispatchRunSource | null }> {
+  if (!Number.isSafeInteger(runId) || runId <= 0) throw new Error("Invalid dispatch run ID.");
+  const payload = asObject(await githubJson(config, repositoryPath(config) + "/actions/runs/" + runId,
+    { method: "GET" }, fetcher));
+  if (payload?.id !== runId) throw new Error("Dispatch run identity could not be verified.");
+  validateRefreshRunSource(config, payload);
+  const run = normalizeRefreshRun(payload);
+  const branch = config.ref.startsWith("refs/heads/") ? config.ref.slice(11) : config.ref;
+  const sha = payload?.head_sha;
+  const matches = asObject(payload?.repository)?.full_name === config.repository
+    && asObject(payload?.head_repository)?.full_name === config.repository
+    && payload?.event === "workflow_dispatch" && payload.head_branch === branch
+    && typeof sha === "string" && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha);
+  return { run, source: matches ? { repository: config.repository, workflow: config.workflow,
+    ref: config.ref, source_sha: sha as string } : null };
 }
 
 export async function pollRefreshRun(
@@ -220,8 +255,20 @@ export async function pollRefreshRun(
 export async function dispatchRefresh(
   config: RefreshConfig,
   fetcher: Fetcher = fetch,
-): Promise<RefreshRun | null> {
-  return dispatchWithInputs(config, { include_granular: true }, fetcher);
+  correlation?: { requestId: string; newActivityExpected: boolean },
+): Promise<DispatchPostOutcome> {
+  if (correlation) {
+    validateRequestId(correlation.requestId);
+    if (typeof correlation.newActivityExpected !== "boolean") throw new Error("Invalid activity intent.");
+  }
+  return dispatchWithInputs(config, { include_granular: true,
+    ...(correlation ? { sync_request_id: correlation.requestId, latest_new_activity_expected: correlation.newActivityExpected } : {}),
+  }, fetcher);
+}
+
+function validateRequestId(value: string): void {
+  if (typeof value !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value))
+    throw new Error("Invalid request correlation ID.");
 }
 
 export async function dispatchLatestActivity(
@@ -229,7 +276,8 @@ export async function dispatchLatestActivity(
   options: { activityId?: string; newActivityExpected: boolean; expectedDate?: string;
     requestId?: string; repairOnly?: boolean },
   fetcher: Fetcher = fetch,
-): Promise<RefreshRun | null> {
+): Promise<DispatchPostOutcome> {
+  if (options.requestId !== undefined) validateRequestId(options.requestId);
   if (options.activityId && !/^\d{1,20}$/.test(options.activityId)) {
     throw new Error("Activity ID must be a numeric Garmin ID.");
   }
@@ -249,38 +297,41 @@ export async function dispatchLatestActivity(
 export async function dispatchLatestNight(
   config: RefreshConfig, wakeDate: string, requestId: string,
   fetcher: Fetcher = fetch,
-): Promise<RefreshRun | null> {
+): Promise<DispatchPostOutcome> {
+  validateRequestId(requestId);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(wakeDate)) throw new Error("Invalid wake-date");
   return dispatchWithInputs(config, { latest_night_only: true,
-    latest_wake_date: wakeDate, sync_request_id: requestId }, fetcher);
+    latest_wake_date: wakeDate, sync_request_id: requestId, latest_new_activity_expected: false }, fetcher);
 }
 
 async function dispatchWithInputs(
   config: RefreshConfig,
   inputs: Record<string, boolean | string>,
   fetcher: Fetcher,
-): Promise<RefreshRun | null> {
-  const payload = await githubJson(
-    config,
-    `${workflowPath(config)}/dispatches`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        ref: config.ref,
-        inputs,
-        return_run_details: true,
-      }),
-    },
-    fetcher,
-  );
-  // With return_run_details GitHub returns a compact receipt rather than the
-  // complete workflow-run object. Resolve it through the run endpoint so the
-  // configured-workflow validation still applies before the ID is exposed.
-  if (payload === null) return null;
+): Promise<DispatchPostOutcome> {
+  const path = workflowPath(config); // Validate configuration before dispatch.
+  let response: Response;
+  try {
+    response = await fetcher("https://api.github.com" + path + "/dispatches", {
+      method: "POST", headers: headers(config),
+      body: JSON.stringify({ ref: config.ref, inputs, return_run_details: true }),
+    });
+  } catch {
+    // Only an observed response can prove a direct rejection, never an exception.
+    return { kind: "unconfirmed", reason: "transport" };
+  }
+  if (!response.ok) {
+    return [400, 401, 403, 404, 422, 429].includes(response.status)
+      ? { kind: "post_rejected", method: "POST", phase: "dispatch", status: response.status }
+      : { kind: "unconfirmed", reason: "other_http" };
+  }
+  if (response.status === 204) return { kind: "unconfirmed", reason: "empty_ack" };
+  let payload: unknown;
+  try { payload = await response.json(); }
+  catch { return { kind: "unconfirmed", reason: "invalid_ack" }; }
   const receipt = asObject(payload);
   const runId = receipt?.workflow_run_id;
-  if (!Number.isSafeInteger(runId) || (runId as number) <= 0) {
-    throw new Error("GitHub returned an invalid workflow-dispatch response.");
-  }
-  return getRefreshRun(config, runId as number, fetcher);
+  return Number.isSafeInteger(runId) && (runId as number) > 0
+    ? { kind: "ack_candidate", run_id: runId as number }
+    : { kind: "unconfirmed", reason: "invalid_ack" };
 }

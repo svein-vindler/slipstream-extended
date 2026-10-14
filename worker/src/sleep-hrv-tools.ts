@@ -11,6 +11,7 @@ import { nightContext, validatedHealthTimezone } from "./night-context";
 import { structuredToolResult, outputSchemas } from "./mcp-output";
 import { R2Storage, HISTORY_INDEX_R2_LIMITS } from "./r2-storage";
 import { exactDate, PRIVATE_READ_TOOL_ANNOTATIONS } from "./tool-contracts";
+import { hrvDetailSourceSchema, sleepDetailSourceSchema } from "./detail-projection";
 
 /** Read-only night tools; each request owns its reader and environment. */
 export class SleepHrvTools {
@@ -179,14 +180,14 @@ export class SleepHrvTools {
       annotations: PRIVATE_READ_TOOL_ANNOTATIONS,
     }, async (args) => {
       const stored = await this.getR2Json(hrvObjectKeys(args.date));
-      if (!stored || !stored.data || typeof stored.data !== "object" || Array.isArray(stored.data)) {
+      if (!stored) {
         return this.text({
           available: false,
           date: args.date,
           message: "No detailed HRV curve is stored for this date yet.",
         });
       }
-      const payload = stored.data as Record<string, unknown>;
+      const payload = hrvDetailSourceSchema.parse(stored.data);
       if (payload.available === false) {
         return this.text({
           available: false,
@@ -194,11 +195,9 @@ export class SleepHrvTools {
           message: "Garmin has no detailed HRV readings for this date.",
         });
       }
-      const readings = Array.isArray(payload.readings) ? payload.readings.flatMap((value) => {
-        if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-        const row = value as Record<string, unknown>;
-        return [{ timestamp: row.timestamp ?? null, hrv_ms: row.hrv_ms ?? null }];
-      }) : [];
+      const readings = (payload.readings ?? []).map(row => ({
+        timestamp: row.timestamp ?? null, hrv_ms: row.hrv_ms ?? null,
+      }));
       return this.text({
         available: true,
         date: payload.date ?? args.date,
@@ -317,24 +316,17 @@ export class SleepHrvTools {
       },
     }, async (args) => {
       const stored = await this.getR2Json(sleepObjectKeys(args.date));
-      if (!stored || !stored.data || typeof stored.data !== "object" || Array.isArray(stored.data)) {
+      if (!stored) {
         return this.text({
           available: false,
           date: args.date,
           message: "No detailed sleep record is stored for this date yet.",
         });
       }
-      const payload = stored.data as Record<string, unknown>;
+      const payload = sleepDetailSourceSchema.parse(stored.data);
       const summary = payload.summary;
       const scoreBreakdown = payload.score_breakdown;
-      const stages = Array.isArray(payload.stages) ? payload.stages : [];
-      if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
-        return this.text({
-          available: false,
-          date: args.date,
-          message: "The stored sleep record has an unsupported schema.",
-        });
-      }
+      const stages = payload.stages ?? [];
       return this.text({
         available: true,
         date: typeof payload.date === "string" ? payload.date : args.date,
@@ -344,10 +336,9 @@ export class SleepHrvTools {
           payload.sleep_start_garmin_local, payload.sleep_end_garmin_local),
         sleep_start_gmt: payload.sleep_start_gmt ?? null,
         sleep_end_gmt: payload.sleep_end_gmt ?? null,
-        confirmed: typeof payload.confirmed === "boolean" ? payload.confirmed : null,
+        confirmed: payload.confirmed ?? null,
         summary,
-        score_breakdown: scoreBreakdown && typeof scoreBreakdown === "object"
-          && !Array.isArray(scoreBreakdown) ? scoreBreakdown : {},
+        score_breakdown: scoreBreakdown ?? {},
         stage_count: stages.length,
         stages,
       });
