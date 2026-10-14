@@ -50,7 +50,7 @@ def pipeline(monkeypatch, tmp_path):
                 store.get("synthetic/summary")
             return {"status": "complete"}
 
-        monkeypatch.setattr(refresh.summary_restore, "restore_summaries", lambda *args: None)
+        monkeypatch.setattr(refresh.summary_restore, "restore_with_base", lambda *args, **kwargs: SimpleNamespace(base=None))
         monkeypatch.setattr(refresh.refresh_summaries, "run", summary)
         monkeypatch.setattr(refresh.recent_health, "run", writer("synthetic/health"))
         monkeypatch.setattr(refresh.recent_body, "run", writer("synthetic/body"))

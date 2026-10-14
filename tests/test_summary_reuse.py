@@ -1,12 +1,12 @@
 """Real R2Store behavior through a counted, synthetic S3 client."""
-import json
 from datetime import datetime, timezone
 
 import pytest
 from botocore.exceptions import ClientError
 
 from pipeline import summary_export
-from pipeline.r2_store import R2BudgetError, R2Store
+from pipeline.r2_store import R2BudgetError, R2ReadBoundaryError, R2Store
+from pipeline.summary_publication import SummaryUnverified
 from scripts.benchmark_summary_reuse import SummaryClient
 
 
@@ -33,10 +33,10 @@ def test_repeat_preserves_manifest_time_and_skips_all_writes_and_inventory(sourc
     second = summary_export.run(source, store=store(client))
     assert second == first
     assert before == {key: value["Body"] for key, value in client.objects.items()}
-    assert client.counts == {"get": 1, "head": 5, "list": 0, "put": 0, "upload_bytes": 0}
+    assert {k: client.counts[k] for k in ("get", "head", "list", "put", "upload_bytes")} == {"get": 7, "head": 0, "list": 0, "put": 0, "upload_bytes": 0}
 
 
-def test_changed_source_replaces_only_its_current_snapshot_and_manifest(source):
+def test_changed_source_seals_a_new_pair_and_changes_only_affected_current_copy(source):
     client = SummaryClient()
     before = summary_export.run(source, store=store(client))
     health = client.objects["summary/health_daily.csv"].copy()
@@ -44,26 +44,27 @@ def test_changed_source_replaces_only_its_current_snapshot_and_manifest(source):
         handle.write("garmin-2,Changed synthetic run\n")
     reset(client)
     after = summary_export.run(source, store=store(client))
-    assert client.counts["put"] == 3
+    assert client.counts["put"] == 5
     assert client.objects["summary/health_daily.csv"] == health
     assert before["files"][0]["sha256"] != after["files"][0]["sha256"]
 
 
-def test_new_day_retains_prior_snapshot_and_writes_only_two_snapshots_and_manifest(source, monkeypatch):
+def test_new_day_retains_prior_generation_and_writes_only_archive_and_commit(source, monkeypatch):
     client = SummaryClient()
-    original = summary_export.build_summary_exports
-
     def at(day):
-        monkeypatch.setattr(summary_export, "build_summary_exports", lambda directory: original(
-            directory, generated_at=datetime(2026, 9, day, tzinfo=timezone.utc)))
-
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 9, day, tzinfo=timezone.utc)
+        monkeypatch.setattr(summary_export, "datetime", Clock)
     at(29)
-    summary_export.run(source, store=store(client))
-    old_snapshot = {key: value.copy() for key, value in client.objects.items() if "/snapshots/" in key}
+    first = summary_export.run(source, store=store(client))
+    old_snapshot = {key: value.copy() for key, value in client.objects.items() if "/generations/" in key}
     at(30)
     reset(client)
-    summary_export.run(source, store=store(client))
-    assert client.counts["put"] == 3
+    second = summary_export.run(source, store=store(client))
+    assert first["snapshot_date"] == "2026-09-29" and second["snapshot_date"] == "2026-09-30"
+    assert client.counts["put"] == 4
     assert all(client.objects[key] == value for key, value in old_snapshot.items())
 
 
@@ -74,9 +75,13 @@ def test_missing_object_is_repaired_even_when_manifest_claims_unchanged(source, 
     key = manifest["files"][0]["snapshot_key"] if missing == "snapshot" else missing
     del client.objects[key]
     reset(client)
-    summary_export.run(source, store=store(client))
-    assert client.counts["put"] == 1
-    assert key in client.objects
+    if missing == "summary/activities.csv":
+        summary_export.run(source, store=store(client))
+        assert client.counts["put"] == 1 and key in client.objects
+    else:
+        with pytest.raises(SummaryUnverified):
+            summary_export.run(source, store=store(client))
+        assert client.counts["put"] == 0 and key not in client.objects
 
 
 def test_failed_partial_export_keeps_manifest_and_retry_skips_completed_writes(source, monkeypatch):
@@ -92,7 +97,7 @@ def test_failed_partial_export_keeps_manifest_and_retry_skips_completed_writes(s
         calls.append(kwargs["Key"])
         if len(calls) == 2:
             raise RuntimeError("synthetic interruption")
-        original(**kwargs)
+        return original(**kwargs)
 
     monkeypatch.setattr(client, "put_object", fail_second)
     with pytest.raises(RuntimeError, match="synthetic interruption"):
@@ -101,11 +106,11 @@ def test_failed_partial_export_keeps_manifest_and_retry_skips_completed_writes(s
     monkeypatch.setattr(client, "put_object", original)
     reset(client)
     summary_export.run(source, store=store(client))
-    assert client.counts["put"] == 2
+    assert client.counts["put"] == 4
 
 
 @pytest.mark.parametrize("code", ["AccessDenied", "SlowDown", "NoSuchBucket"])
-@pytest.mark.parametrize("operation", ["get_object", "head_object"])
+@pytest.mark.parametrize("operation", ["get_object", "list_objects_v2"])
 def test_storage_failures_are_not_treated_as_missing_and_do_not_write(source, monkeypatch, code, operation):
     client = SummaryClient()
 
@@ -118,27 +123,46 @@ def test_storage_failures_are_not_treated_as_missing_and_do_not_write(source, mo
     assert client.counts["put"] == 0
 
 
-@pytest.mark.parametrize("field,value", [
-    ("ContentType", "text/plain"), ("ContentEncoding", None),
-    ("ContentLength", 999), ("ETag", '"multipart-2"'), ("ETag", '"unknown"'),
-    ("ETag", None),
-    ("ServerSideEncryption", "unknown"),
-])
-def test_metadata_and_unknown_revisions_write_conservatively(source, monkeypatch, field, value):
+@pytest.mark.parametrize("field,value", [("ContentType", "text/plain"), ("ContentEncoding", None)])
+def test_current_serving_metadata_is_repaired_conditionally(source, monkeypatch, field, value):
     client = SummaryClient()
     summary_export.run(source, store=store(client))
-    original = client.head_object
-
-    def different(**kwargs):
-        previous = original(**kwargs)
-        if kwargs["Key"] == "summary/activities.csv":
-            previous[field] = value
-        return previous
-
-    monkeypatch.setattr(client, "head_object", different)
+    client.objects["summary/activities.csv"][field] = value
     reset(client)
     summary_export.run(source, store=store(client))
     assert client.counts["put"] == 1
+    assert client.objects["summary/activities.csv"]["ContentType"] == "text/csv; charset=utf-8"
+    assert client.objects["summary/activities.csv"]["ContentEncoding"] == "gzip"
+
+
+@pytest.mark.parametrize("revision", [None, 'W/"weak"', "unquoted"])
+def test_missing_or_invalid_current_revision_cannot_authorize_metadata_replacement(source, monkeypatch, revision):
+    client = SummaryClient()
+    summary_export.run(source, store=store(client))
+    original = client.get_object
+    def different(**kwargs):
+        result = original(**kwargs)
+        if kwargs["Key"] == "summary/activities.csv":
+            result.update(ETag=revision, ContentType="text/plain")
+        return result
+    monkeypatch.setattr(client, "get_object", different)
+    reset(client)
+    with pytest.raises(SummaryUnverified):
+        summary_export.run(source, store=store(client))
+    assert client.counts["put"] == 0
+
+
+def test_inconsistent_get_body_length_cannot_authorize_mutation(source, monkeypatch):
+    client = SummaryClient()
+    summary_export.run(source, store=store(client))
+    original = client.get_object
+    def different(**kwargs):
+        return {**original(**kwargs), "ContentLength": 999999}
+    monkeypatch.setattr(client, "get_object", different)
+    reset(client)
+    with pytest.raises(R2ReadBoundaryError):
+        summary_export.run(source, store=store(client))
+    assert client.counts["put"] == 0
 
 
 def test_changed_write_still_obeys_budget_but_unchanged_does_not_consume_it(source):
@@ -155,11 +179,12 @@ def test_changed_write_still_obeys_budget_but_unchanged_does_not_consume_it(sour
 
 
 @pytest.mark.parametrize("content", [b"bad json", b"[]", b'{"schema_version":1}'])
-def test_invalid_manifest_is_rebuilt_after_valid_files(source, content):
+def test_invalid_manifest_is_not_rebuilt_or_treated_as_absence(source, content):
     client = SummaryClient()
     summary_export.run(source, store=store(client))
     client.objects["summary/manifest.json"]["Body"] = content
     reset(client)
-    result = summary_export.run(source, store=store(client))
-    assert client.counts["put"] == 1
-    assert json.loads(client.objects["summary/manifest.json"]["Body"]) == result
+    with pytest.raises(SummaryUnverified):
+        summary_export.run(source, store=store(client))
+    assert client.counts["put"] == 0
+    assert client.objects["summary/manifest.json"]["Body"] == content

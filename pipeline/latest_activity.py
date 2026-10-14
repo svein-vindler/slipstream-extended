@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .activity_backfill import is_job_stopping_error, is_supported_activity
 from .activity_refresh import refresh_activity
@@ -18,7 +19,8 @@ from .output_privacy import SafeArgumentParser, safe_cli
 from .r2_store import R2BudgetError, R2Store
 from .schema import Activity, activity_local_date
 from .sources import garmin as garmin_source
-from .summary_export import run as export_summaries
+from .summary_export import publish_derived as export_summaries
+from .summary_publication import prepare_normal_base
 from .writer import write_dataset
 
 MAX_LOOKBACK_DAYS = 7
@@ -73,6 +75,8 @@ def run(
     repair_only: bool = False,
     store: R2Store | None = None,
     garmin=None,
+    base=None,
+    flow_id=None,
 ) -> dict[str, Any]:
     if not run_id.isdigit():
         raise ValueError("run_id must contain digits only")
@@ -118,6 +122,8 @@ def run(
                   "status": "coach_pending" if blocked else "ready",
                   "coach_status": blocked[0]["reason"] if blocked else "ready"}
         return publish(store, run_id, scope, report, source_checked=False)
+    flow_id = flow_id or uuid4().hex
+    base = prepare_normal_base(data_dir, store=store, flow_id=flow_id, base=base)
     garmin = garmin or garmin_source._login()
     summary_path = Path(data_dir) / "activities.csv"
     previous_ids = {
@@ -205,7 +211,7 @@ def run(
         write_dataset(fetched, data_dir, preserve_existing=True)
         selected_summary = next(row for row in _rows(summary_path)
                                 if row["Activity ID"] == report["activity_id"])
-        export_summaries(data_dir, store=store)
+        export_summaries(data_dir, store=store, base=base, flow_id=flow_id)
         report["summary_updated"] = True
 
         try:

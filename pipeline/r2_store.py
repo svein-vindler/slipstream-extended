@@ -36,6 +36,30 @@ class R2ReadBoundaryError(ValueError):
         super().__init__("Bounded storage read rejected")
 
 
+def _opaque_revision(value) -> str | None:
+    if (isinstance(value, str) and 2 < len(value) <= 1024
+            and value.startswith('"') and value.endswith('"')
+            and all(32 <= ord(char) < 127 for char in value)
+            and '"' not in value[1:-1]):
+        return value
+    return None
+
+
+@dataclass(frozen=True)
+class R2ObjectSnapshot:
+    """Stored bytes and opaque revision from one SDK response."""
+    data: bytes
+    revision: str | None
+    content_type: str | None = None
+    encoding: str | None = None
+
+
+@dataclass(frozen=True)
+class R2WriteReceipt:
+    accepted: bool
+    revision: str | None
+
+
 @dataclass
 class _BucketBudget:
     """Conservative accounting owned by one serial refresh, never persisted."""
@@ -229,6 +253,32 @@ class R2Store:
             response = self.client.get_object(Bucket=self.bucket, Key=key)
             return response["Body"].read()
 
+    def get_snapshot(self, key: str, *, max_bytes: int | None = None) -> R2ObjectSnapshot:
+        """Capture bytes/ETag together; bounds are optional for existing CSV sizes."""
+        if max_bytes is not None and (type(max_bytes) is not int or max_bytes <= 0):
+            raise ValueError("Invalid storage read limit")
+        self.operations["get"] += 1
+        with timed(self.timings_ms, "get"):
+            response = self.client.get_object(Bucket=self.bucket, Key=key)
+            body = response["Body"]
+            try:
+                length = response.get("ContentLength")
+                if length is not None and (type(length) is not int or length < 0):
+                    raise R2ReadBoundaryError("schema_unverified")
+                if max_bytes is not None and length is not None and length > max_bytes:
+                    raise R2ReadBoundaryError("oversize")
+                data = body.read() if max_bytes is None else body.read(max_bytes + 1)
+                if not isinstance(data, bytes):
+                    raise R2ReadBoundaryError("schema_unverified")
+                if max_bytes is not None and len(data) > max_bytes:
+                    raise R2ReadBoundaryError("oversize")
+                if length is not None and len(data) != length:
+                    raise R2ReadBoundaryError("schema_unverified")
+                return R2ObjectSnapshot(data, _opaque_revision(response.get("ETag")),
+                                        response.get("ContentType"), response.get("ContentEncoding"))
+            finally:
+                body.close()
+
     def get_bounded(self, key: str, max_bytes: int) -> bytes:
         """One counted GET; identity bytes only, limit before parsing, always close.
 
@@ -300,10 +350,43 @@ class R2Store:
         """
         return self._put(key, data, content_type, encoding=encoding, if_absent=True)
 
+    def list_prefix_bounded(self, prefix: str, *, max_keys: int) -> list[str]:
+        """One explicitly bounded namespace check, never an inventory fallback."""
+        if type(max_keys) is not int or not 1 <= max_keys <= 1000:
+            raise ValueError("Invalid storage listing limit")
+        self.operations["list_pages"] += 1
+        with timed(self.timings_ms, "list"):
+            result = self.client.list_objects_v2(Bucket=self.bucket, Prefix=prefix, MaxKeys=max_keys)
+        entries = result.get("Contents", [])
+        if (not isinstance(entries, list) or len(entries) > max_keys
+                or result.get("IsTruncated") is not False
+                or any(not isinstance(item, dict) or not isinstance(item.get("Key"), str)
+                       or not item["Key"].startswith(prefix) for item in entries)):
+            raise R2ReadBoundaryError("schema_unverified")
+        self.operations["listed_objects"] += len(entries)
+        return [item["Key"] for item in entries]
+
+    def create_with_receipt(
+        self, key: str, data: bytes, content_type: str, *, encoding: str | None = None,
+    ) -> R2WriteReceipt:
+        return self._put(key, data, content_type, encoding=encoding,
+                         if_absent=True, return_receipt=True)
+
+    def put_if_revision(
+        self, key: str, data: bytes, content_type: str, *, revision: str,
+        encoding: str | None = None,
+    ) -> R2WriteReceipt:
+        """Conditional replace; returns the actual SDK acknowledgement revision."""
+        if _opaque_revision(revision) is None:
+            raise ValueError("Invalid conditional revision")
+        return self._put(key, data, content_type, encoding=encoding,
+                         if_match=revision, return_receipt=True)
+
     def _put(
         self, key: str, data: bytes, content_type: str, *,
         encoding: str | None = None, if_absent: bool = False,
-    ) -> bool:
+        if_match: str | None = None, return_receipt: bool = False,
+    ) -> bool | R2WriteReceipt:
         self._check_write_budget(data)
         # Reserve before transmission: a timeout may follow a committed PUT.
         # Neither a later stage nor a caught retry can reclaim that capacity.
@@ -322,6 +405,8 @@ class R2Store:
         self.operations["put"] += 1
         if if_absent:
             args["IfNoneMatch"] = "*"
+        if if_match is not None:
+            args["IfMatch"] = if_match
         try:
             with timed(self.timings_ms, "put"):
                 self.last_write_revision = None
@@ -329,9 +414,9 @@ class R2Store:
                 etag = response.get("ETag") if isinstance(response, dict) else None
                 self.last_write_revision = etag.strip('"') if isinstance(etag, str) and etag else None
         except ClientError as exc:
-            if if_absent and str(exc.response.get("Error", {}).get("Code")) in {
+            if (if_absent or if_match is not None) and str(exc.response.get("Error", {}).get("Code")) in {
                 "PreconditionFailed", "412",
             }:
-                return False
+                return R2WriteReceipt(False, None) if return_receipt else False
             raise
-        return True
+        return R2WriteReceipt(True, _opaque_revision(etag)) if return_receipt else True

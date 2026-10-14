@@ -30,19 +30,39 @@ class SummaryClient:
             raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
         stored = self.objects[Key]
         return {"ETag": '"' + hashlib.md5(stored["Body"], usedforsecurity=False).hexdigest() + '"',
-                "ContentLength": len(stored["Body"]), "ContentType": stored["ContentType"],
+                "ContentLength": len(stored["Body"]), "ContentType": stored.get("ContentType"),
                 "ContentEncoding": stored.get("ContentEncoding")}
 
     def get_object(self, *, Bucket, Key):
         self.counts["get"] += 1
         if Key not in self.objects:
             raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
-        return {"Body": io.BytesIO(self.objects[Key]["Body"])}
+        stored = self.objects[Key]
+        self.counts["download_bytes"] = self.counts.get("download_bytes", 0) + len(stored["Body"])
+        return {"Body": io.BytesIO(stored["Body"]), "ETag": self._etag(stored["Body"]),
+                "ContentLength": len(stored["Body"]), "ContentType": stored.get("ContentType"),
+                "ContentEncoding": stored.get("ContentEncoding")}
 
     def put_object(self, **kwargs):
         self.counts["put"] += 1
         self.counts["upload_bytes"] += len(kwargs["Body"])
+        previous = self.objects.get(kwargs["Key"])
+        if (kwargs.get("IfNoneMatch") == "*" and previous is not None
+                or kwargs.get("IfMatch") is not None and
+                (previous is None or kwargs["IfMatch"] != self._etag(previous["Body"]))):
+            raise ClientError({"Error": {"Code": "PreconditionFailed"}}, "PutObject")
         self.objects[kwargs["Key"]] = kwargs.copy()
+        return {"ETag": self._etag(kwargs["Body"])}
+
+    @staticmethod
+    def _etag(raw):
+        # Synthetic service revision: application never computes its CAS token.
+        return '"' + hashlib.md5(raw, usedforsecurity=False).hexdigest() + '"'
+
+    def list_objects_v2(self, *, Bucket, Prefix, MaxKeys):
+        self.counts["list"] += 1
+        keys = sorted(key for key in self.objects if key.startswith(Prefix))
+        return {"Contents": [{"Key": key} for key in keys[:MaxKeys]], "IsTruncated": len(keys) > MaxKeys}
 
     def get_paginator(self, name):
         assert name == "list_objects_v2"

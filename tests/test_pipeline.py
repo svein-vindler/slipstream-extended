@@ -951,12 +951,15 @@ def test_restore_summaries_validates_and_restores_both_files(tmp_path):
     )
     remote = {item["key"]: item["data"] for item in objects}
 
-    class FakeStore:
-        def get(self, key):
-            return remote[key]
+    from pipeline.r2_store import R2Store
+    from scripts.benchmark_summary_reuse import SummaryClient
+    client = SummaryClient()
+    for key, raw in remote.items():
+        client.put_object(Key=key, Body=raw, ContentType="application/octet-stream")
+    storage = R2Store(client=client, bucket="synthetic")
 
     destination = tmp_path / "restored"
-    result = restore_summaries(str(destination), FakeStore())
+    result = restore_summaries(str(destination), storage)
 
     assert (destination / "activities.csv").read_bytes() == activities
     assert (destination / "health_daily.csv").read_bytes() == health
@@ -994,15 +997,18 @@ def test_restore_rejects_checksum_mismatch_before_replacing_files(tmp_path):
         ),
     }
 
-    class FakeStore:
-        def get(self, key):
-            return remote[key]
+    from pipeline.r2_store import R2Store
+    from scripts.benchmark_summary_reuse import SummaryClient
+    client = SummaryClient()
+    for key, raw in remote.items():
+        client.put_object(Key=key, Body=raw, ContentType="application/octet-stream")
+    storage = R2Store(client=client, bucket="synthetic")
 
     try:
-        restore_summaries(str(destination), FakeStore())
+        restore_summaries(str(destination), storage)
         raise AssertionError("Expected checksum validation to fail")
     except ValueError as exc:
-        assert "checksum mismatch" in str(exc)
+        assert "cannot be verified" in str(exc)
 
     assert (destination / "activities.csv").read_bytes() == existing
 

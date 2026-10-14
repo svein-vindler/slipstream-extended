@@ -5,6 +5,7 @@ import json
 from datetime import date
 
 import pytest
+from test_latest_activity import FakeStore
 
 from pipeline import latest_activity
 from pipeline.coach_backfill import run_one
@@ -51,7 +52,8 @@ def import_latest(root, store, source, run_id):
 def test_latest_keeps_merged_moving_in_csv_and_immutable_canonical(tmp_path, moving, expected):
     write_dataset(fetch(client=Provider(distance=5000, movingDuration=1800, duration=1900)), str(tmp_path))
     (tmp_path / "health_daily.csv").write_text("Date,Source\n", encoding="utf-8")
-    store = CountingStore()
+    store = FakeStore(tmp_path)
+    store.objects.update(CountingStore().objects)
     store.objects["activities/2026/1/activity.fit"] = b"synthetic-fit"
     run_one(activity={"id": "1", "date": "2026-09-30", "name": "Synthetic run",
                       "type": "running", "moving_seconds": 1800}, store=store)
@@ -74,7 +76,8 @@ def test_latest_keeps_merged_moving_in_csv_and_immutable_canonical(tmp_path, mov
 
 def test_new_latest_activity_uses_elapsed_fallback_in_csv_and_canonical(tmp_path):
     (tmp_path / "health_daily.csv").write_text("Date,Source\n", encoding="utf-8")
-    store = CountingStore()
+    store = FakeStore(tmp_path)
+    store.objects.update(CountingStore().objects)
     store.objects["activities/2026/1/activity.fit"] = b"synthetic-fit"
     source = Provider(duration=2000)
     assert import_latest(tmp_path, store, source, "125")["status"] == "ready"

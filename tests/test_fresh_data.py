@@ -111,7 +111,7 @@ def test_ambiguous_activities_are_reported_before_downloading(monkeypatch, tmp_p
     monkeypatch.setattr("pipeline.latest_activity.garmin_source.fetch",
                         lambda **kwargs: [_activity("1", 9), _activity("2", 10)])
     result = activity_run(run_id="13", expected_date="2026-09-29",
-                          store=FakeStore(), garmin=garmin, data_dir=str(tmp_path))
+                          store=FakeStore(tmp_path), garmin=garmin, data_dir=str(tmp_path))
     assert result["status"] == "ambiguous_activity"
     assert result["candidate_ids"] == ["garmin-1", "garmin-2"]
     assert garmin.checked == []
@@ -121,7 +121,7 @@ def test_unknown_local_date_is_never_inferred_from_utc(monkeypatch, tmp_path):
     activity = _activity("1", 9)
     activity.local_start_date = None
     monkeypatch.setattr("pipeline.latest_activity.garmin_source.fetch", lambda **kwargs: [activity])
-    result = activity_run(run_id="14", store=FakeStore(), garmin=FakeGarmin(), data_dir=str(tmp_path))
+    result = activity_run(run_id="14", store=FakeStore(tmp_path), garmin=FakeGarmin(), data_dir=str(tmp_path))
     assert result["status"] == "activity_date_unknown" and result["files_ready"] is False
 
 
@@ -130,7 +130,7 @@ def test_wrong_detail_id_cannot_be_published_as_selected_activity(monkeypatch, t
     monkeypatch.setattr("pipeline.latest_activity.garmin_source.fetch", lambda **kwargs: [_activity("1", 9)])
     garmin = FakeGarmin()
     garmin.get_activity = lambda activity_id: {"activityId": "2"}
-    result = activity_run(run_id="15", store=FakeStore(), garmin=garmin, data_dir=str(tmp_path))
+    result = activity_run(run_id="15", store=FakeStore(tmp_path), garmin=garmin, data_dir=str(tmp_path))
     assert result["status"] == "files_unavailable" and result["source_checked"] is False
 
 

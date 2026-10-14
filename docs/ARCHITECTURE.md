@@ -35,10 +35,14 @@ shared modes, local execution and sanitized per-stage measurements.
 - `summary_restore.py` restores the current activity and health summaries from
   R2 and verifies their SHA-256 checksums before a refresh.
 - The writers merge new rows into those local working files.
-- `summary_export.py` uploads the merged summaries and a dated recovery snapshot
-  to R2. Generated datasets are not committed to Git.
+- `summary_publication.py` owns verified paired restore, captured normal baseline
+  proofs, immutable dated generations and conditional manifest commits.
+- `summary_export.py` exposes explicit full-pair export and proof-bound normal
+  publication. Generated datasets are not committed to Git. See
+  [summary recovery](SUMMARY_RECOVERY.md) for compatibility and rollout limits.
 
-The current R2 summaries are the source of truth. Their CSV columns are stable and self-describing
+The committed R2 manifest selects the source pair for Python restore/publication.
+Compatibility current CSVs remain available to existing consumers. Their CSV columns are stable and self-describing
 (`Activity Date`, `Activity Type`, `Distance`, `Moving Time`, `Average Heart
 Rate`, …), all in metric, times in seconds, dates in UTC.
 

@@ -172,6 +172,8 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
               "scheduled": request.scheduled, "status": "complete", "stages": [],
               "started_at": datetime.now(timezone.utc).isoformat(), "source_checks": []}
     last_store = publication_store = None
+    base = None
+    flow_id = report["correlation_id"]
 
     def source_checks(result):
         if not isinstance(result, dict):
@@ -261,14 +263,15 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
 
     try:
         if request.mode != "night" and not request.repair_only:
-            stage("restore_summaries", lambda store: summary_restore.restore_summaries(str(data), store))
+            base = stage("restore_summaries", lambda store: summary_restore.restore_with_base(
+                str(data), store, flow_id=flow_id)).base
         if request.mode == "activity":
             stage("latest_activity", lambda store: latest_activity.run(
                 run_id=request.run_id, data_dir=str(data), lookback_days=7,
                 request_id=request.request_id, repair_only=request.repair_only,
                 requested_activity_id=request.activity_id, expected_date=request.expected_date,
                 new_activity_expected=request.new_activity_expected,
-                store=store, garmin=None if request.repair_only else provider.get()))
+                store=store, garmin=None if request.repair_only else provider.get(), base=base, flow_id=flow_id))
         elif request.mode == "night":
             stage("latest_night", lambda store: latest_night.run(
                 run_id=request.run_id, wake_date=request.wake_date,
@@ -285,10 +288,10 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
                     stage("historical_health", lambda _, start=start, end=end: fetch.run(
                         skip_activities=True, data_dir=str(data), health_start=date.fromisoformat(start),
                         health_end=date.fromisoformat(end), client=provider.get()), storage=False)
-                stage("export_summaries", lambda store: summary_export.run(str(data), store=store))
+                stage("export_summaries", lambda store: summary_export.publish_derived(str(data), store=store, base=base, flow_id=flow_id))
             else:
                 stage("refresh_summaries", lambda store: refresh_summaries.run(
-                    str(data), store=store, client=provider.get()))
+                    str(data), store=store, client=provider.get(), base=base, flow_id=flow_id))
             stage("recent_health", lambda store: recent_health.run(days=3, store=store, garmin=provider.get()))
             stage("recent_body", lambda store: recent_body.run(
                 max_days=3, health_csv=(data / "health_daily.csv").read_bytes(), store=store, garmin=provider.get()))

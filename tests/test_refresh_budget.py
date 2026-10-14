@@ -139,7 +139,7 @@ def test_orchestrator_shares_inventory_through_read_only_final_stage_and_diagnos
     def indexes(*, store):
         stores.append(store)
         return {"status": "complete"}
-    monkeypatch.setattr(refresh.summary_restore, "restore_summaries", lambda *args: None)
+    monkeypatch.setattr(refresh.summary_restore, "restore_with_base", lambda *args, **kwargs: SimpleNamespace(base=None))
     for module in (refresh.refresh_summaries, refresh.recent_health, refresh.recent_body):
         monkeypatch.setattr(module, "run", write)
     monkeypatch.setattr(refresh.health_index_reconcile, "run", indexes)
