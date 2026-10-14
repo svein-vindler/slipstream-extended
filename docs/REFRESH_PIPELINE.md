@@ -43,7 +43,7 @@ replace a known sport with `Other`. Elapsed-time fallback can fill a new activit
 moving time, but cannot replace an existing valid moving time. Average speed is
 recomputed when its merged distance or moving time changes; zero moving time
 leaves speed unknown. Obviously invalid old numeric fields are not carried into
-the refreshed row. Unfetched historical rows and the CSV schema stay unchanged.
+the refreshed row. Unfetched historical observations stay unchanged.
 
 The summary receipt records a successful source-window check and the merged CSV
 hash. It does not assert that every metric was returned again: retained values
@@ -53,6 +53,51 @@ or migration. A later valid response can update each metric normally.
 Targeted Coach Input takes moving time from the merged summary for the selected
 source/activity ID, so an omitted moving field cannot become a new elapsed-time
 estimate in an immutable analysis while the CSV retains the measured value.
+
+## Activity calendar context
+
+`Activity Date` remains the UTC start instant. The additive final CSV column
+`Activity Local Date` carries Garmin's validated local calendar day; the original
+columns keep their names and positions. Partial responses retain a valid known
+local day. Invalid clocks and impossible dates do not establish local context.
+The provider's calendar is used directly, including travel and DST, without
+converting it through the configured health/home timezone.
+
+For an unpinned newly expected activity, the existing request default still uses
+today's configured `HEALTH_TIMEZONE` day as the requested search scope. This does
+not establish the activity's Garmin-local date or discover the device timezone.
+During travel, supply the explicit Garmin-local `expected_date`; an `activity_id`
+can identify a stored activity without inferring its date from the home timezone.
+
+The local day selects activity namespaces, summary date filters/month/year
+groups, context placement and effective coach profiles. Existing rows without
+local context remain readable. Summary-only tools use the UTC day and expose
+optional `date_source: utc_fallback`; they never download FIT per historical row.
+Single-activity readers can confirm legacy context from bounded stored canonical
+objects in the UTC year and, only at a year boundary, one adjacent year. Identity,
+UTC clock and namespace must agree before the local date is claimed.
+
+Bulk coach resolves legacy dates only for its selected pending batch. Its plan
+records `activity_clock_revisions`, including `garmin_local` or `utc_fallback`
+and the summary/canonical revisions; unchanged work reuses that association.
+The supported canonical contract is numeric schema version 1 (excluding booleans)
+and source `garmin-fit`, matching the reader. An unsupported declared contract
+stops before a local claim or any new coach/pointer/plan write. Older exports
+without a declared contract can retain the CSV UTC fallback in the same year;
+they cannot establish a local date or a new cross-year association.
+Local cache claims also carry `calendar_contract_version: 1` from that successful
+validation. Unmarked local claims are checked again only when selected for the
+existing pending batch; they cannot bypass the canonical source/schema gate.
+Old completed analyses are not swept or regenerated merely to populate dates.
+Historical analyses lacking a confirmed local association remain immutable;
+ordinary reads identify their summary date as a fallback rather than a newly
+verified Garmin calendar. Date-only summary context can guide sparse detail
+responses without fabricating a local start time.
+
+Old context notes under a UTC-year namespace remain visible through bounded
+adjacent-year context reads. The newest append-only timestamp basename wins;
+an ambiguous timestamp across years is rejected. No objects are moved or deleted.
+Summary generation/snapshot archive dates and receipt timestamps remain UTC.
 
 ## Local use
 

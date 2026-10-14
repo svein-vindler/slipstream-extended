@@ -10,7 +10,7 @@ import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from ..schema import Activity, activity_metric, activity_text, canonical_sport
+from ..schema import Activity, activity_local_date, activity_metric, activity_text, canonical_sport
 from .garmin_readonly import ReadOnlyGarmin
 
 
@@ -83,6 +83,7 @@ def fetch(
         power = activity_metric(r.get("avgPower"))
         if power is None:
             power = activity_metric(r.get("averagePower"))
+        local_date = activity_local_date(r.get("startTimeLocal"))
         out.append(Activity(
             source="garmin",
             source_id=str(aid),
@@ -100,14 +101,10 @@ def fetch(
             avg_watts=power,
             calories=activity_metric(r.get("calories")),
             track_file=_download_track(g, aid, data_dir) if download_tracks else None,
-            local_start_date=(
-                str(r.get("startTimeLocal"))[:10]
-                if isinstance(r.get("startTimeLocal"), str)
-                and len(r["startTimeLocal"]) >= 10 else None
-            ),
+            local_start_date=local_date,
             local_start_time=(
                 r.get("startTimeLocal")
-                if isinstance(r.get("startTimeLocal"), str) else None
+                if local_date is not None else None
             ),
         ))
     return out

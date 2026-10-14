@@ -1,6 +1,7 @@
 /** Read-only projection from already decoded FIT JSON, never raw FIT or DTOs. */
 import { z } from "zod";
 import { type Activity, rawGarminActivityId } from "./lib";
+import { localCalendarDay } from "./activity-clock";
 
 function effectSchema(field: "total_training_effect" | "total_anaerobic_training_effect") {
   return z.discriminatedUnion("status", [
@@ -83,7 +84,8 @@ export function trainingContext(activity: Activity, decoded: unknown,
   const sourceStart = utcTime(identity.start_time_gmt, true);
   if (!sourceStart || !activity.date || Date.parse(sourceStart) !== activity.date.getTime()) return fail("time_mismatch");
   result.local_start_time = clock(identity.start_time_local);
-  result.local_date = result.local_start_time?.slice(0, 10) ?? null;
+  result.local_date = localCalendarDay(identity.start_time_local) ?? null;
+  if (activity.localDate && result.local_date !== activity.localDate) return fail("time_mismatch");
   if (typeof payload.source_fit_sha256 === "string" && /^[a-f0-9]{64}$/.test(payload.source_fit_sha256)) {
     result.source_fit_sha256 = payload.source_fit_sha256;
   }

@@ -34,6 +34,13 @@ const TOOL_NAMES = [
 ] as const;
 
 describe("MCP structured outputs", () => {
+  it("advertises optional activity calendar provenance without changing required fields", () => {
+    const summary = (z.toJSONSchema(outputSchemas.list_activities).properties!.activities as {
+      items: { properties: Record<string, { enum?: string[] }>; required: string[] }
+    }).items;
+    expect(summary.properties.date_source.enum).toEqual(["garmin_local", "utc_fallback", "unknown"]);
+    expect(summary.required).not.toContain("date_source");
+  });
   it("defines a JSON object output schema for every tool", () => {
     expect(Object.keys(outputSchemas).sort()).toEqual([...TOOL_NAMES].sort());
     for (const name of TOOL_NAMES) {

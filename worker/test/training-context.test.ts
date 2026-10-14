@@ -15,6 +15,11 @@ function fixture() {
 }
 
 describe("allowlisted FIT Training Effect projection", () => {
+  it("does not associate a different canonical local day with a known summary calendar", () => {
+    const context = trainingContext({ ...activity, localDate: "2026-10-07" }, fixture());
+    expect(context.association).toBe("time_mismatch");
+    expect(context.aerobic.value).toBeNull();
+  });
   it("preserves already-scaled values, zero, ID and Garmin-local date", () => {
     const payload = fixture();
     const before = structuredClone(payload);

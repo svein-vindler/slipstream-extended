@@ -1,4 +1,5 @@
 import { readCurrentCoachInput } from "./coach-selection";
+import { activityCalendarYears, localCalendarDay, supportedActivityCalendarContract } from "./activity-clock";
 /** R2-first, explicitly authorized recent activity/night retrieval. */
 import { z } from "zod";
 import { Activity, hrvObjectKeys, rawGarminActivityId, sleepObjectKeys } from "./lib";
@@ -174,10 +175,16 @@ export class FreshDataService {
     return listed.objects;
   }
 
-  private async latestJson(prefix: string): Promise<Json> {
-    const objects = await this.list(prefix);
+  private async latestActivityContext(id: string, day: string): Promise<Json> {
+    const objects = [];
+    for (const year of activityCalendarYears(day)) {
+      objects.push(...await this.list(`activities/${year}/${id}/context/v1/`));
+    }
     // Context keys are append-only timestamp keys, as used by the Python builder.
-    objects.sort((a, b) => b.key.localeCompare(a.key));
+    objects.sort((a, b) => b.key.split("/").at(-1)!.localeCompare(a.key.split("/").at(-1)!));
+    if (objects.length > 1 && objects[0].key.split("/").at(-1) === objects[1].key.split("/").at(-1)) {
+      throw new Error("Activity context timestamp is ambiguous across calendar years.");
+    }
     return objects.length ? this.json([objects[0].key]) : {};
   }
 
@@ -294,7 +301,11 @@ export class FreshDataService {
         const activity = record(decoded.activity);
         const local = typeof activity.start_time_local === "string" ? activity.start_time_local : "";
         if (String(activity.id) !== id) continue;
-        if (!local || !datePattern.test(local.slice(0, 10))) {
+        if (!supportedActivityCalendarContract(decoded)) {
+          result.status = "activity_date_unknown"; continue;
+        }
+        const localDay = localCalendarDay(local);
+        if (!localDay || localDay.slice(0, 4) !== year) {
           result.status = "activity_date_unknown"; continue;
         }
         if (request.date && local.slice(0, 10) !== request.date) continue;
@@ -333,7 +344,7 @@ export class FreshDataService {
     if (strength && !Object.keys(record(decoded.normalized_strength_session)).length) {
       result.missing_components.push("strength_analysis");
     }
-    const context = await this.latestJson(`${prefix}/context/v1/`);
+    const context = await this.latestActivityContext(id, selected.local.slice(0, 10));
     if (running) this.diagnostics.profile_reads++;
     const profile = running ? (await this.reader.getCoachProfiles()).profiles
       .filter((p) => typeof p.effective_from === "string" && p.effective_from <= selected.local.slice(0, 10)

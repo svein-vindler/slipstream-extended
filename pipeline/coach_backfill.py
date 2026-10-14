@@ -14,6 +14,7 @@ from .granular import gzip_json, sha256
 from .measurements import measured_component
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2Store
+from .schema import activity_calendar_years, activity_local_date, to_utc
 
 PLAN_KEY = "backfill/coach-input/v1/plan.json"
 PROFILE_PREFIX = "coach/profiles/v1/"
@@ -31,7 +32,7 @@ def _json(store, key: str) -> dict[str, Any]:
     return value
 
 
-def _activities(data: bytes) -> list[dict[str, Any]]:
+def _activities(data: bytes, *, clocks: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     text = _decode(data).decode("utf-8-sig")
     rows = []
     for row in csv.DictReader(io.StringIO(text)):
@@ -44,9 +45,12 @@ def _activities(data: bytes) -> list[dict[str, Any]]:
         if not raw_id.isdigit() or "run" not in activity_type.lower():
             continue
         raw_date = str(row.get("Activity Date") or "")
+        local = activity_local_date(row.get("Activity Local Date"))
+        if clocks is not None:
+            clocks[raw_id] = {"local": local, "utc": raw_date}
         rows.append({
             "id": raw_id,
-            "date": raw_date[:10],
+            "date": local or raw_date[:10],
             "name": row.get("Activity Name"),
             "type": activity_type,
             "moving_seconds": _float(row.get("Moving Time")),
@@ -82,6 +86,75 @@ def _latest_context_keys(all_keys: set[str]) -> dict[str, str]:
         if key > latest.get(prefix, ""):
             latest[prefix] = key
     return latest
+
+
+def _activity_context_key(keys: set[str], activity: dict[str, Any]) -> str | None:
+    prefixes = [f"activities/{year}/{activity['id']}/context/v1/"
+                for year in activity_calendar_years(activity["date"])]
+    candidates = [key for key in keys if any(key.startswith(prefix) and "/" not in key[len(prefix):]
+                                           for prefix in prefixes) and key.endswith(".json")]
+    # Compare append-only timestamp basenames, not namespace years.
+    candidates.sort(key=lambda key: key.rsplit("/", 1)[-1], reverse=True)
+    if len(candidates) > 1 and candidates[0].rsplit("/", 1)[-1] == candidates[1].rsplit("/", 1)[-1]:
+        raise ValueError("Activity context timestamp is ambiguous across calendar years")
+    return candidates[0] if candidates else None
+
+
+def _resolve_legacy_calendar(store, activity, utc_clock, keys):
+    """Read at most two known canonical year candidates for one pending row."""
+    fallback = None
+    selected = None
+    for year in activity_calendar_years(activity["date"]):
+        key = f"activities/{year}/{activity['id']}/activity.v1.json"
+        if key not in keys:
+            continue
+        decoded = _json(store, key)
+        version, source_kind = decoded.get("schema_version"), decoded.get("source")
+        supported_version = type(version) in (int, float) and version == 1
+        if ((version is not None and not supported_version)
+                or (source_kind is not None and source_kind != "garmin-fit")):
+            raise ValueError("Canonical activity calendar schema or source is unsupported")
+        source = decoded.get("activity", {})
+        local = activity_local_date(source.get("start_time_local")) if isinstance(source, dict) else None
+        if (not isinstance(source, dict) or source.get("id") is not None and str(source["id"]) != activity["id"]
+                or local and str(source.get("id")) != activity["id"]):
+            raise ValueError("Canonical activity calendar does not match its identity")
+        if not local:
+            if year == activity["date"][:4]:
+                fallback = (activity["date"], key, decoded, "utc_fallback")
+            continue
+        if not supported_version or source_kind != "garmin-fit":
+            # A legacy object without a declared contract cannot establish local
+            # authority. Keep only the CSV UTC fallback in its original year.
+            if year == activity["date"][:4]:
+                fallback = (activity["date"], key, decoded, "utc_fallback")
+                continue
+            raise ValueError("Canonical activity calendar schema or source is unverified")
+        if local[:4] != year:
+            raise ValueError("Canonical activity calendar does not match its namespace")
+        canonical_utc = source.get("start_time_gmt")
+        if canonical_utc in (None, ""):
+            # Older decoded exports can have only a local clock. Do not claim
+            # association with the summary's UTC instant; keep a visible fallback.
+            if year == activity["date"][:4]:
+                fallback = (activity["date"], key, decoded, "utc_fallback")
+                continue
+            raise ValueError("Canonical activity UTC clock is unknown")
+        if not activity_local_date(canonical_utc):
+            raise ValueError("Canonical activity UTC clock is invalid")
+        try:
+            expected = datetime.fromisoformat(utc_clock.replace("Z", "+00:00"))
+            actual = datetime.fromisoformat(canonical_utc.replace("Z", "+00:00"))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("Canonical activity UTC clock is unknown") from exc
+        if (to_utc(actual) != to_utc(expected)
+                or abs((datetime.fromisoformat(local).date() - expected.date()).days) > 1):
+            raise ValueError("Canonical activity calendar does not match its UTC clock")
+        candidate = (local, key, decoded, "garmin_local")
+        if selected is not None:
+            raise ValueError("Canonical activity calendar is ambiguous across years")
+        selected = candidate
+    return selected or fallback
 
 
 def _manifest_revisions(
@@ -257,7 +330,14 @@ def run_one(*, activity: dict[str, Any], store: R2Store, force: bool = False) ->
         return {"processed_sources": {}, "blocked_activities": [
             {"activity_id": activity_id, "reason": blocked},
         ]}
-    context_key = _latest_context_keys(keys).get(prefix)
+    for year in activity_calendar_years(activity["date"]):
+        if year == activity["date"][:4]:
+            continue
+        alias = f"activities/{year}/{activity_id}/context/v1/"
+        extra = store.list_object_revisions(alias) if hasattr(store, "list_object_revisions") else {}
+        revisions.update(extra)
+        keys.update(extra if extra else store.list_keys(alias))
+    context_key = _activity_context_key(keys, activity)
     pointer_key = f"{prefix}/coach-input/v1/latest-ready.json"
     previous_pointer = _json(store, pointer_key) if pointer_key in keys else {}
     # Fingerprint the caller's metadata before an R2-only repair restores a known
@@ -324,7 +404,8 @@ def run(
     store = store or R2Store()
     summary_bytes = store.get("summary/activities.csv")
     profiles = _profiles(store)
-    activities = _activities(summary_bytes)
+    clocks: dict[str, dict[str, Any]] = {}
+    activities = _activities(summary_bytes, clocks=clocks)
     if hasattr(store, "list_object_revisions"):
         object_revisions = store.list_object_revisions("activities/")
         all_keys = set(object_revisions)
@@ -332,7 +413,6 @@ def run(
         object_revisions = {}
         all_keys = store.list_keys("activities/")
     running_ids = {activity["id"] for activity in activities}
-    context_keys = _latest_context_keys(all_keys)
     manifest_revisions = _manifest_revisions(
         store, all_keys, object_revisions, running_ids
     )
@@ -365,6 +445,35 @@ def run(
     previous: dict[str, Any] = {}
     if PLAN_KEY in store.list_keys("backfill/coach-input/v1/"):
         previous = _json(store, PLAN_KEY)
+    saved_clocks = previous.get("activity_clock_revisions", {})
+    saved_clocks = saved_clocks if isinstance(saved_clocks, dict) else {}
+    clock_revisions = {}
+    for activity in activities:
+        cached = saved_clocks.get(activity["id"])
+        if not isinstance(cached, dict) or clocks[activity["id"]]["local"]:
+            continue
+        source_key = cached.get("source_key")
+        day = activity_local_date(cached.get("date"))
+        expected = {f"activities/{year}/{activity['id']}/activity.v1.json"
+                    for year in activity_calendar_years(activity["date"])}
+        if (day and cached.get("summary_utc") == clocks[activity["id"]]["utc"]
+                and source_key in expected and cached.get("source_revision")
+                and cached["source_revision"] == object_revisions.get(source_key)
+                and day[:4] == source_key.split("/")[1]
+                and cached.get("source") in {"garmin_local", "utc_fallback"}
+                and (cached["source"] != "garmin_local"
+                     or type(cached.get("calendar_contract_version")) is int and cached["calendar_contract_version"] == 1)
+                and abs((datetime.fromisoformat(day).date() - datetime.fromisoformat(activity["date"]).date()).days) <= 1
+                and (cached["source"] != "utc_fallback" or day == activity["date"])
+                and cached.get("candidate_revisions") == {
+                    key: object_revisions.get(key) for key in expected if key in all_keys
+                }):
+            activity["date"] = day
+            clock_revisions[activity["id"]] = cached
+    invalidated_clocks = {activity_id for activity_id in saved_clocks
+                          if activity_id in clocks and not clocks[activity_id]["local"]
+                          and activity_id not in clock_revisions}
+    if previous:
         selections = previous.get("selection_revisions", {})
         selections = selections if isinstance(selections, dict) else {}
         legacy_selections = previous.get("legacy_selection_revisions", {})
@@ -375,11 +484,12 @@ def run(
             _selection_current(activity, object_revisions, all_keys, selections, legacy_selections)
             for activity in activities if activity["id"] in processed
         )
-        if selections_current and previous.get("source_fingerprint") == source_fingerprint and previous.get("status") in {
+        if (selections_current and len(clock_revisions) == len(saved_clocks)
+                and previous.get("source_fingerprint") == source_fingerprint and previous.get("status") in {
             "complete",
             "complete_with_blocked",
             "waiting_for_profile",
-        }:
+        }):
             return previous
     processed_sources = previous.get("processed_sources")
     if not isinstance(processed_sources, dict):
@@ -407,32 +517,40 @@ def run(
     already_complete = 0
     for activity in activities:
         profile = select_profile(profiles, activity["date"])
-        if not profile:
+        legacy_clock = not clocks[activity["id"]]["local"] and activity["id"] not in clock_revisions
+        if not profile and (not legacy_clock or not profiles):
             blocked.append({"activity_id": activity["id"], "reason": "no_effective_profile"})
             processed_sources.pop(activity["id"], None)
             continue
         prefix = f"activities/{activity['date'][:4]}/{activity['id']}"
+        if legacy_clock and f"{prefix}/activity.v1.json" not in all_keys:
+            prefix = next((f"activities/{year}/{activity['id']}" for year in activity_calendar_years(activity["date"])
+                           if f"activities/{year}/{activity['id']}/activity.v1.json" in all_keys), prefix)
         fit_key = f"{prefix}/activity.v1.json"
         endurance_key = f"{prefix}/activity.endurance.v1.json"
         tcx_key = f"{prefix}/activity.tcx"
         missing = [key for key in (fit_key, endurance_key, tcx_key) if key not in all_keys]
-        if missing:
+        if missing and not (legacy_clock and any(
+            f"activities/{year}/{activity['id']}/activity.v1.json" in all_keys
+            for year in activity_calendar_years(activity["date"])
+        )):
             blocked.append(
                 {"activity_id": activity["id"], "reason": "missing_artifacts", "keys": missing}
             )
             processed_sources.pop(activity["id"], None)
             continue
-        context_key = context_keys.get(prefix)
+        context_key = _activity_context_key(all_keys, activity)
         signature = _source_signature(
             activity,
-            profile,
+            profile or {},
             context_key=context_key,
             manifest_revision=manifest_revisions.get(activity["id"]),
         )
         selection_current = _selection_current(
             activity, object_revisions, all_keys, selection_revisions, legacy_selection_revisions,
         )
-        if processed_sources.get(activity["id"]) == signature and selection_current:
+        if (processed_sources.get(activity["id"]) == signature and selection_current
+                and activity["id"] not in invalidated_clocks):
             already_complete += 1
             continue
         pending.append(
@@ -446,6 +564,7 @@ def run(
                 "context_key": context_key,
                 "source_signature": signature,
                 "inspect_selection": processed_sources.get(activity["id"]) == signature,
+                "resolve_clock": legacy_clock,
             }
         )
 
@@ -455,12 +574,55 @@ def run(
     completed = []
     skipped = []
     inspected = 0
+    clock_blocked = 0
     # One canonical attempt + one current-selection attempt per activity, and
     # one final plan PUT. Do not spend that checkpoint reservation on analysis.
     capacity = getattr(store, "remaining_write_attempts", None)
     batch_limit = min(max_activities, max(0, (capacity - 1) // 2)) if capacity is not None else max_activities
     for item in pending[:batch_limit]:
         activity = item["activity"]
+        decoded_fit = None
+        if item["resolve_clock"]:
+            resolved = _resolve_legacy_calendar(store, activity, clocks[activity["id"]]["utc"], all_keys)
+            if not resolved:
+                blocked.append({"activity_id": activity["id"], "reason": "activity_date_unknown"})
+                processed_sources.pop(activity["id"], None)
+                clock_blocked += 1
+                continue
+            day, fit_key, decoded_fit, date_source = resolved
+            activity = {**activity, "date": day}
+            item.update(activity=activity, prefix=fit_key.rsplit("/", 1)[0], fit_key=fit_key,
+                        endurance_key=fit_key.replace("activity.v1.json", "activity.endurance.v1.json"),
+                        tcx_key=fit_key.replace("activity.v1.json", "activity.tcx"))
+            missing = [item[field] for field in ("fit_key", "endurance_key", "tcx_key") if item[field] not in all_keys]
+            if missing:
+                blocked.append({"activity_id": activity["id"], "reason": "missing_artifacts", "keys": missing})
+                processed_sources.pop(activity["id"], None)
+                clock_blocked += 1
+                continue
+            item["profile"] = select_profile(profiles, activity["date"])
+            if not item["profile"]:
+                blocked.append({"activity_id": activity["id"], "reason": "no_effective_profile"})
+                processed_sources.pop(activity["id"], None)
+                clock_blocked += 1
+                continue
+            item["context_key"] = _activity_context_key(all_keys, activity)
+            item["source_signature"] = _source_signature(
+                activity, item["profile"], context_key=item["context_key"],
+                manifest_revision=manifest_revisions.get(activity["id"]),
+            )
+            clock_revisions[activity["id"]] = {
+                "date": activity["date"], "source": date_source,
+                "summary_utc": clocks[activity["id"]]["utc"], "source_key": item["fit_key"],
+                "source_revision": object_revisions.get(item["fit_key"]),
+                "candidate_revisions": {
+                    key: object_revisions.get(key)
+                    for year in activity_calendar_years(clocks[activity["id"]]["utc"][:10])
+                    if (key := f"activities/{year}/{activity['id']}/activity.v1.json") in all_keys
+                },
+            }
+            if date_source == "garmin_local":
+                clock_revisions[activity["id"]]["calendar_contract_version"] = 1
         if item["inspect_selection"]:
             pointer_key = f"{item['prefix']}/coach-input/v1/latest-ready.json"
             if pointer_key in all_keys:
@@ -477,7 +639,7 @@ def run(
                 "reason": str(endurance.get("reason") or "endurance_data_unavailable"),
             })
             continue
-        decoded_fit = _json(store, item["fit_key"])
+        decoded_fit = decoded_fit if decoded_fit is not None else _json(store, item["fit_key"])
         tcx = store.get(item["tcx_key"])
         context = _json(store, item["context_key"]) if item["context_key"] else None
         coach = build_coach_input(
@@ -513,7 +675,7 @@ def run(
     # Missing source artifacts remain visible but do not keep this R2-only job
     # spinning. Pending work is now derived from per-activity source revisions,
     # so later runs do not reread artifacts that were already analyzed.
-    processed_this_run = len(completed) + len(skipped) + inspected
+    processed_this_run = len(completed) + len(skipped) + inspected + clock_blocked
     remaining = max(0, len(pending) - processed_this_run)
     status = (
         "complete_with_blocked"
@@ -533,6 +695,7 @@ def run(
         "processed_sources": processed_sources,
         "selection_revisions": selection_revisions,
         "legacy_selection_revisions": legacy_selection_revisions,
+        "activity_clock_revisions": clock_revisions,
         "selection_inspections_this_run": inspected,
         "processed_source_count": len(processed_sources),
         "running_activities": len(activities),

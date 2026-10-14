@@ -16,6 +16,7 @@ from .granular import activity_prefix, activity_type, gzip_json
 from .granular_export import activity_artifact_keys
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2BudgetError, R2Store
+from .schema import activity_local_date
 from .sources.garmin import _login
 
 MAX_ACTIVITIES = 10
@@ -55,7 +56,8 @@ def _baseline(path: Path) -> set[str]:
 
 def _recent(row: dict[str, str], today: date) -> bool:
     try:
-        activity_day = date.fromisoformat(row.get("Activity Date", "")[:10])
+        activity_day = date.fromisoformat(activity_local_date(row.get("Activity Local Date"))
+                                         or row.get("Activity Date", "")[:10])
     except ValueError:
         return False
     return today - timedelta(days=RECENT_DAYS - 1) <= activity_day <= today
@@ -63,7 +65,7 @@ def _recent(row: dict[str, str], today: date) -> bool:
 
 def _missing_artifacts(row: dict[str, str], keys: set[str]) -> bool:
     activity_id = row["Activity ID"].removeprefix("garmin-")
-    year = row.get("Activity Date", "")[:4]
+    year = (activity_local_date(row.get("Activity Local Date")) or row.get("Activity Date", ""))[:4]
     if not year.isdigit():
         return False
     prefix = f"activities/{year}/{activity_id}"
@@ -100,11 +102,19 @@ def _complete_activity_details(
         {"activityType": summary_type}
     ):
         complete["activityType"] = {"typeKey": summary_type}
-    if not (complete.get("startTimeLocal") or complete.get("startTimeGMT")):
+    if not activity_local_date(complete.get("startTimeGMT")):
         summary_date = row.get("Activity Date", "").strip()
         if summary_date:
             # activities.csv stores UTC, not the device's local time.
             complete["startTimeGMT"] = summary_date
+    local = activity_local_date(complete.get("startTimeLocal"))
+    known_local = activity_local_date(row.get("Activity Local Date"))
+    if local and known_local and local != known_local:
+        raise ValueError("Garmin activity details disagree with the saved local calendar date")
+    if not local and known_local:
+        # A date-only source value preserves calendar association without
+        # fabricating an observed local start clock.
+        complete["startTimeLocal"] = known_local
     if not complete.get("activityName"):
         complete["activityName"] = row.get("Activity Name", "")
     return complete
@@ -112,16 +122,14 @@ def _complete_activity_details(
 
 def _coach_metadata(activity: dict[str, Any], row: dict[str, str], store) -> dict[str, Any] | None:
     """Use Garmin-local dates, including a canonical fallback, never CSV UTC."""
-    local = activity.get("startTimeLocal")
-    if not local:
+    day = activity_local_date(activity.get("startTimeLocal")) or activity_local_date(row.get("Activity Local Date"))
+    if not day:
         canonical = _json(store, f"{activity_prefix(activity)}/activity.v1.json")
         canonical_activity = canonical.get("activity", {})
         if str(canonical_activity.get("id")) != str(activity["activityId"]):
             return None
-        local = canonical_activity.get("start_time_local")
-    try:
-        day = date.fromisoformat(str(local)[:10]).isoformat()
-    except ValueError:
+        day = activity_local_date(canonical_activity.get("start_time_local"))
+    if not day:
         return None
     moving = _float(row.get("Moving Time"))
     if moving is not None and moving.is_integer():
@@ -170,7 +178,8 @@ def run(
         activity_id = row["Activity ID"].removeprefix("garmin-")
         result: dict[str, Any] = {
             "activity_id": row["Activity ID"],
-            "date": row.get("Activity Date", "")[:10],
+            "date": activity_local_date(row.get("Activity Local Date")) or row.get("Activity Date", "")[:10],
+            "date_source": "garmin_local" if activity_local_date(row.get("Activity Local Date")) else "utc_fallback",
             "name": row.get("Activity Name", ""),
             "is_new": row["Activity ID"] not in previous_ids,
             "files_ready": False,
@@ -202,7 +211,7 @@ def run(
                             metadata = canonical.get("activity", {})
                             if (isinstance(metadata, dict)
                                     and str(metadata.get("id")) == activity_id
-                                    and not metadata.get("start_time_local")):
+                                    and not activity_local_date(metadata.get("start_time_local"))):
                                 metadata["start_time_local"] = activity["startTimeLocal"]
                                 store.put(canonical_key, gzip_json(canonical), "application/json", encoding="gzip")
                         metadata = _coach_metadata(activity, row, store)

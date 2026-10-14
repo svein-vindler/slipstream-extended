@@ -6,6 +6,7 @@
 export interface Activity {
   id: string;
   date: Date | null;
+  localDate?: string;
   name: string;
   type: string;
   distanceKm?: number;
@@ -72,6 +73,18 @@ export function parseDate(s: string): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
+/** The source calendar is independent of the UTC instant and home timezone. */
+export function activityCalendarDay(a: Activity): string | null {
+  return validCalendarDay(a.localDate) ?? (a.date ? a.date.toISOString().slice(0, 10) : null);
+}
+
+export function validCalendarDay(value: unknown): string | undefined {
+  if (typeof value !== "string" || !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(value)) return undefined;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
+    && value.slice(0, 4) !== "0000" ? value : undefined;
+}
+
 export function parseCsv(text: string): Activity[] {
   const lines = text.split(/\r?\n/).filter((l) => l.length > 0);
   if (lines.length < 2) return [];
@@ -80,7 +93,7 @@ export function parseCsv(text: string): Activity[] {
   const iId = ix("Activity ID"), iDate = ix("Activity Date"), iName = ix("Activity Name"),
     iType = ix("Activity Type"), iDist = ix("Distance"), iMov = ix("Moving Time"),
     iEl = ix("Elapsed Time"), iMax = ix("Max Heart Rate"), iAvg = ix("Average Heart Rate"),
-    iElev = ix("Elevation Gain"), iCal = ix("Calories"), iSrc = ix("Source");
+    iElev = ix("Elevation Gain"), iCal = ix("Calories"), iSrc = ix("Source"), iLocal = ix("Activity Local Date");
   const acts: Activity[] = [];
   for (let r = 1; r < lines.length; r++) {
     const c = parseCsvLine(lines[r]);
@@ -95,6 +108,7 @@ export function parseCsv(text: string): Activity[] {
       type: c[iType] ?? "", distanceKm: num(iDist), movingS: num(iMov), elapsedS: num(iEl),
       maxHr: num(iMax), avgHr: num(iAvg), elevGain: num(iElev), calories: num(iCal),
       source: c[iSrc] ?? "garmin",
+      localDate: validCalendarDay(c[iLocal]),
     });
   }
   return acts;
@@ -233,8 +247,8 @@ export function filterActs(acts: Activity[], o: {
     out = out.filter((a) => a.type.toLowerCase() === sport);
   }
   if (o.name_contains) { const q = o.name_contains.toLowerCase(); out = out.filter((a) => a.name.toLowerCase().includes(q)); }
-  if (o.start_date) { const t = new Date(o.start_date + "T00:00:00Z").getTime(); out = out.filter((a) => a.date && a.date.getTime() >= t); }
-  if (o.end_date) { const t = new Date(o.end_date + "T23:59:59Z").getTime(); out = out.filter((a) => a.date && a.date.getTime() <= t); }
+  if (o.start_date) out = out.filter((a) => { const day = activityCalendarDay(a); return day != null && day >= o.start_date!; });
+  if (o.end_date) out = out.filter((a) => { const day = activityCalendarDay(a); return day != null && day <= o.end_date!; });
   return out;
 }
 
@@ -263,7 +277,8 @@ export function toSummary(a: Activity) {
   const pace = a.distanceKm && a.movingS && a.distanceKm > 0
     ? fmtDuration(a.movingS / a.distanceKm) + "/km" : undefined;
   return {
-    id: a.id, date: a.date ? a.date.toISOString().slice(0, 10) : null, name: a.name,
+    id: a.id, date: activityCalendarDay(a), name: a.name,
+    date_source: validCalendarDay(a.localDate) ? "garmin_local" : a.date ? "utc_fallback" : "unknown",
     type: a.type, distance_km: a.distanceKm ?? null, moving_time: fmtDuration(a.movingS) ?? null,
     pace: pace ?? null, avg_hr: a.avgHr ?? null, elevation_gain_m: a.elevGain ?? null,
   };
@@ -271,10 +286,10 @@ export function toSummary(a: Activity) {
 
 export function bucketKey(a: Activity, by: string): string | null {
   if (by === "sport") return a.type || "Unknown";
-  if (!a.date) return null;
-  const y = a.date.getUTCFullYear(), m = a.date.getUTCMonth() + 1;
-  if (by === "year") return `${y}`;
-  if (by === "month") return `${y}-${String(m).padStart(2, "0")}`;
+  const day = activityCalendarDay(a);
+  if (!day) return null;
+  if (by === "year") return day.slice(0, 4);
+  if (by === "month") return day.slice(0, 7);
   return null;
 }
 
@@ -302,27 +317,31 @@ export function bodyCompositionObjectKeys(date: string): string[] {
 }
 
 export function activityJsonObjectKeys(activity: Activity): string[] {
-  if (!activity.date) return [];
+  const day = activityCalendarDay(activity);
+  if (!day) return [];
   const id = rawGarminActivityId(activity.id);
-  const prefix = `activities/${activity.date.getUTCFullYear()}/${id}/activity.v1`;
+  const prefix = `activities/${day.slice(0, 4)}/${id}/activity.v1`;
   return [`${prefix}.json`, `${prefix}.json.gz`];
 }
 
 export function activityEnduranceObjectKeys(activity: Activity): string[] {
-  if (!activity.date) return [];
+  const day = activityCalendarDay(activity);
+  if (!day) return [];
   const id = rawGarminActivityId(activity.id);
-  const prefix = `activities/${activity.date.getUTCFullYear()}/${id}/activity.endurance.v1`;
+  const prefix = `activities/${day.slice(0, 4)}/${id}/activity.endurance.v1`;
   return [`${prefix}.json`, `${prefix}.json.gz`];
 }
 
 export function coachInputPrefix(activity: Activity): string {
-  if (!activity.date) return "";
+  const day = activityCalendarDay(activity);
+  if (!day) return "";
   const id = rawGarminActivityId(activity.id);
-  return `activities/${activity.date.getUTCFullYear()}/${id}/coach-input/v1/canonical/`;
+  return `activities/${day.slice(0, 4)}/${id}/coach-input/v1/canonical/`;
 }
 
 export function activityContextPrefix(activity: Activity): string {
-  if (!activity.date) return "";
+  const day = activityCalendarDay(activity);
+  if (!day) return "";
   const id = rawGarminActivityId(activity.id);
-  return `activities/${activity.date.getUTCFullYear()}/${id}/context/v1/`;
+  return `activities/${day.slice(0, 4)}/${id}/context/v1/`;
 }

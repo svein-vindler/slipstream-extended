@@ -93,7 +93,7 @@ it("serves Python-exported Training Effect through actual authenticated MCP with
       aerobic: { status: "available", value: 3.4 }, anaerobic: { status: "available", value: 0 } } });
   expect(output.session.activity.id).toBe("42");
   expect(operations).toEqual({ get: 3, head: 1, list: 0, put: 0, delete: 0 });
-  expect(reads).toEqual(["summary/activities.csv", "activities/2026/42/activity.endurance.v1.json", fitKey]);
+  expect(reads).toEqual(["summary/activities.csv", fitKey, "activities/2026/42/activity.endurance.v1.json"]);
   expect(JSON.stringify(output.training_context)).not.toMatch(/messages|training_load_peak|trainingEffect|position/);
 });
 

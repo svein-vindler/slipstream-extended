@@ -17,6 +17,8 @@ from datetime import date, datetime
 from typing import Any
 from xml.etree import ElementTree
 
+from .schema import activity_local_date
+
 SCHEMA_VERSION = 1
 ENDURANCE_WORDS = (
     "run", "cycl", "bike", "walk", "hike", "swim", "cardio", "row",
@@ -155,8 +157,8 @@ def select_activity_sample(
 
 def activity_prefix(activity: dict[str, Any]) -> str:
     activity_id = str(activity.get("activityId"))
-    timestamp = str(activity.get("startTimeLocal") or activity.get("startTimeGMT") or "unknown")
-    year = timestamp[:4] if len(timestamp) >= 4 and timestamp[:4].isdigit() else "unknown"
+    day = activity_local_date(activity.get("startTimeLocal")) or activity_local_date(activity.get("startTimeGMT"))
+    year = day[:4] if day else "unknown"
     return f"activities/{year}/{activity_id}"
 
 

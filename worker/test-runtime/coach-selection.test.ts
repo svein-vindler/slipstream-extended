@@ -320,7 +320,8 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
           if (chronology === "ordered") {
             expect(result.analysis.analysis_id).toBe(fixtures.bulk[1].expected_id);
             expect(result.analysis.summary.moving_seconds).toBe(1900);
-            expect(result.message).toBe("Coach input is available.");
+            expect(result.activity.date_source).toBe("utc_fallback");
+            expect(result.message).toBe("Coach input is available. The indexed date uses a UTC fallback; its historical local-calendar association is unconfirmed.");
           } else {
             expect(result.analysis).toBeUndefined();
             expect(result.message).toBe("The current coach input could not be verified. Retry this read later; if it persists, ask the maintainer to check stored analysis compatibility.");
