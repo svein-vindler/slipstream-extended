@@ -1,4 +1,5 @@
 import { readCurrentCoachInput } from "./coach-selection";
+import { resolveActivityClock } from "./activity-clock";
 import { ApplicationToolError, applicationToolResult } from "./application-errors";
 import { McpServer } from "@modelcontextprotocol/server";
 import { errorCategory } from "./output-privacy";
@@ -7,7 +8,7 @@ import { z } from "zod";
 import {
   Activity, filterActs, activityFilterWarning, summarize, toSummary, bucketKey,
   rawGarminActivityId, activityJsonObjectKeys, activityEnduranceObjectKeys,
-  coachInputPrefix, activityContextPrefix,
+  coachInputPrefix, activityContextPrefix, activityCalendarDay,
 } from "./lib";
 import { structuredToolResult, outputSchemas } from "./mcp-output";
 import { R2Storage, COACH_CONFIG_R2_LIMITS } from "./r2-storage";
@@ -137,13 +138,13 @@ export class ActivityCoachTools {
       annotations: PRIVATE_READ_TOOL_ANNOTATIONS,
     }, async () => {
       const a = await this.getActivities();
-      const dates = a.map((x) => x.date).filter((d): d is Date => !!d).map((d) => d.getTime());
+      const dates = a.map(activityCalendarDay).filter((day): day is string => day != null).sort();
       const srcs: Record<string, number> = {};
       a.forEach((x) => { srcs[x.source] = (srcs[x.source] ?? 0) + 1; });
       return this.text({
         connected: true, count: a.length,
-        earliest: dates.length ? new Date(Math.min(...dates)).toISOString().slice(0, 10) : null,
-        latest: dates.length ? new Date(Math.max(...dates)).toISOString().slice(0, 10) : null,
+        earliest: dates[0] ?? null,
+        latest: dates.at(-1) ?? null,
         by_source: srcs, storage: this.storage.activityStorage,
       });
     });
@@ -257,17 +258,19 @@ export class ActivityCoachTools {
       annotations: PRIVATE_READ_TOOL_ANNOTATIONS,
     }, async (args) => {
       const requested = rawGarminActivityId(args.activity_id);
-      const activity = (await this.getActivities()).find(
+      const indexed = (await this.getActivities()).find(
         (item) => rawGarminActivityId(item.id) === requested,
       );
-      if (!activity) {
+      if (!indexed) {
         return this.text({
           available: false,
           activity_id: args.activity_id,
           message: "The activity ID was not found in the Slipstream activity index.",
         });
       }
-      const stored = await this.getR2Json(activityJsonObjectKeys(activity));
+      const resolved = await resolveActivityClock(indexed, keys => this.getR2Json(keys));
+      const activity = resolved.activity;
+      const stored = indexed.localDate ? await this.getR2Json(activityJsonObjectKeys(activity)) : resolved.stored;
       if (!stored || !stored.data || typeof stored.data !== "object" || Array.isArray(stored.data)) {
         return this.text({
           available: false,
@@ -305,15 +308,25 @@ export class ActivityCoachTools {
       },
     }, async (args) => {
       const requested = rawGarminActivityId(args.activity_id);
-      const activity = (await this.getActivities()).find(
+      const indexed = (await this.getActivities()).find(
         (item) => rawGarminActivityId(item.id) === requested,
       );
-      if (!activity) {
+      if (!indexed) {
         return this.text({
           available: false,
           activity_id: args.activity_id,
           message: "The activity ID was not found in the Slipstream activity index.",
         });
+      }
+      let activity = indexed;
+      let context;
+      try {
+        const resolved = await resolveActivityClock(indexed, keys => this.getR2Json(keys));
+        activity = resolved.activity;
+        const fit = indexed.localDate ? await this.getR2Json(activityJsonObjectKeys(activity)) : resolved.stored;
+        context = trainingContext(activity, fit?.data);
+      } catch {
+        context = trainingContext(activity, null, "source_unreadable");
       }
       const stored = await this.getR2Json(activityEnduranceObjectKeys(activity));
       if (!stored || !stored.data || typeof stored.data !== "object" || Array.isArray(stored.data)) {
@@ -322,14 +335,6 @@ export class ActivityCoachTools {
           activity: toSummary(activity),
           message: "No normalized TCX analysis is stored for this activity yet. Run the activity backfill or recent granular export.",
         });
-      }
-      let context;
-      try {
-        const fit = await this.getR2Json(activityJsonObjectKeys(activity));
-        context = trainingContext(activity, fit?.data);
-      } catch {
-        // Optional source failure is not absence or a reason to refresh Garmin.
-        context = trainingContext(activity, null, "source_unreadable");
       }
       return this.text({
         available: true,
@@ -455,14 +460,17 @@ export class ActivityCoachTools {
         idempotentHint: false, openWorldHint: false },
     }, async (args, mcpContext) => applicationToolResult(server, mcpContext, async () => {
       const requested = rawGarminActivityId(args.activity_id);
-      const activity = (await this.getActivities()).find(
+      const indexed = (await this.getActivities()).find(
         (item) => rawGarminActivityId(item.id) === requested,
       );
-      if (!activity || !activity.date) throw new Error("The activity ID was not found.");
+      if (!indexed || !indexed.date) throw new Error("The activity ID was not found.");
+      const { activity } = await resolveActivityClock(indexed, keys => this.getR2Json(keys));
       const createdAt = new Date().toISOString();
       const core = {
         schema_version: 1,
         activity_id: requested,
+        activity_date: activityCalendarDay(activity),
+        date_source: activity.localDate ? "garmin_local" : "utc_fallback",
         rpe: args.rpe ?? null,
         conditions: args.conditions ?? null,
         note: args.note ?? null,
@@ -492,15 +500,16 @@ export class ActivityCoachTools {
         idempotentHint: true, openWorldHint: false },
     }, async (args) => {
       const requested = rawGarminActivityId(args.activity_id);
-      const activity = (await this.getActivities()).find(
+      const indexed = (await this.getActivities()).find(
         (item) => rawGarminActivityId(item.id) === requested,
       );
-      if (!activity) return this.text({ available: false, activity_id: args.activity_id,
+      if (!indexed) return this.text({ available: false, activity_id: args.activity_id,
         message: "The activity ID was not found in the Slipstream activity index." });
+      const { activity } = await resolveActivityClock(indexed, keys => this.getR2Json(keys));
       const prefix = coachInputPrefix(activity);
       const selection = await readCurrentCoachInput({
         canonicalPrefix: prefix, activityId: requested,
-        // The summary clock is UTC; historical analysis dates may be Garmin-local.
+        ...(activity.localDate ? { date: activity.localDate } : {}),
         read: (keys, limits) => this.storage.getR2JsonWithMetadata(keys, limits),
         versions: async () => {
           const listed = await this.env.SLIPSTREAM_DATA.list({ prefix, limit: 1000 });
@@ -515,7 +524,8 @@ export class ActivityCoachTools {
             : "The current coach input could not be verified. Retry this read later; if it persists, ask the maintainer to check stored analysis compatibility." });
       }
       return this.text({ available: true, activity: toSummary(activity),
-        analysis: selection.analysis, message: "Coach input is available." });
+        analysis: selection.analysis, message: activity.localDate ? "Coach input is available."
+          : "Coach input is available. The indexed date uses a UTC fallback; its historical local-calendar association is unconfirmed." });
     });
 
   }

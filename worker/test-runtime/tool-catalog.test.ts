@@ -84,7 +84,7 @@ it.each([false, true])("preserves the complete tool contracts with writes=%s", a
 
 it.each([false, true])("preserves the previous contracts apart from optional confirmation outputs with writes=%s", async writes => {
   const additions = new Set(["job_start_confirmed", "current_job_source_checked",
-    "current_job_source_checked_at", "stored_source_checked_at", "source_freshness_reason"]);
+    "current_job_source_checked_at", "stored_source_checked_at", "source_freshness_reason", "date_source"]);
   function previousSchema(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(previousSchema);
     if (!value || typeof value !== "object") return value;

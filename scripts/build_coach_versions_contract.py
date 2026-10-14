@@ -91,7 +91,7 @@ def build_contract():
     for mode in ("bulk", "targeted", "mixed"):
         client = MemoryS3()
         client.objects[f"{PREFIX}/activity.v1.json"] = json.dumps({
-            "schema_version": 1, "source_fit_sha256": "synthetic-fit", "messages": {},
+            "schema_version": 1, "source": "garmin-fit", "source_fit_sha256": "synthetic-fit", "messages": {},
             "activity": {"id": "1", "type": "running", "start_time_local": "2026-09-30T10:00:00"},
         }).encode()
         client.objects[f"{PREFIX}/activity.fit"] = b"synthetic FIT marker"

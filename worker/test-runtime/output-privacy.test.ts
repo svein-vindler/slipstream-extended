@@ -55,6 +55,7 @@ beforeEach(async () => {
         const body = "Activity ID,Activity Date,Activity Name,Activity Type,Source\ngarmin-123,2041-02-03,Synthetic context workout,Run,garmin";
         return { size: body.length, etag: "synthetic-context", arrayBuffer: async () => new TextEncoder().encode(body).buffer };
       }
+      if (mode === "context") return null; // Synthetic index has no canonical clock yet.
       if (mode === "profile" || mode === "list" || mode.startsWith("targeted")) return null;
       if (mode === "report") {
         if (!key.startsWith("refresh/reports/")) return null;

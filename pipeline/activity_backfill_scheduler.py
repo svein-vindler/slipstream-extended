@@ -20,6 +20,7 @@ from .activity_pagination import MAX_CHECKPOINT_BYTES, load_cursor, range_status
 from .granular import json_bytes
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2Store
+from .schema import activity_local_date
 from .sources.activity_page import MetadataBudget
 from .sources.garmin import _login
 from .summary_restore import decode_summary
@@ -32,7 +33,7 @@ def history_bounds(activities_csv: bytes) -> tuple[date, date]:
     rows = csv.DictReader(io.StringIO(raw.decode("utf-8")))
     dates = []
     for row in rows:
-        value = str(row.get("Activity Date") or "")[:10]
+        value = activity_local_date(row.get("Activity Local Date")) or str(row.get("Activity Date") or "")[:10]
         try:
             dates.append(date.fromisoformat(value))
         except ValueError:

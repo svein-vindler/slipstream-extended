@@ -15,6 +15,7 @@ const openObject = z.record(z.string(), z.unknown());
 const activitySummary = z.object({
   id: z.string(),
   date: nullableString,
+  date_source: z.enum(["garmin_local", "utc_fallback", "unknown"]).optional(),
   name: z.string(),
   type: z.string(),
   distance_km: nullableNumber,

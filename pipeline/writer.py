@@ -5,13 +5,13 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from .schema import Activity, activity_metric, activity_text
+from .schema import Activity, activity_local_date, activity_metric, activity_text
 
 _HEADERS = [
     "Activity ID", "Activity Date", "Activity Name", "Activity Type", "Raw Sport",
     "Distance", "Filename", "Moving Time", "Elapsed Time", "Max Heart Rate",
     "Average Heart Rate", "Elevation Gain", "Average Speed", "Average Watts",
-    "Calories", "Source",
+    "Calories", "Source", "Activity Local Date",
 ]
 
 
@@ -48,6 +48,7 @@ def _row(a: Activity) -> list:
         _num(a.avg_watts, 1),
         _num(a.calories, 0),
         a.source,
+        activity_local_date(a.local_start_date) or "",
     ]
 
 
@@ -89,6 +90,7 @@ def write_dataset(
         activity_id = str(row[0])
         if activity_id in merged:
             old = list(merged[activity_id])
+            old[16] = activity_local_date(old[16]) or ""
             for index in (5, 7, 8, 9, 10, 11, 12, 13, 14):
                 if _stored_metric(old[index]) is None:
                     old[index] = ""

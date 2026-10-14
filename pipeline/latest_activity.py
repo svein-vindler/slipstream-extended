@@ -16,7 +16,7 @@ from .granular_export import activity_artifact_keys
 from .manual_activity_refresh import _complete_activity_details, _rows
 from .output_privacy import SafeArgumentParser, safe_cli
 from .r2_store import R2BudgetError, R2Store
-from .schema import Activity
+from .schema import Activity, activity_local_date
 from .sources import garmin as garmin_source
 from .summary_export import run as export_summaries
 from .writer import write_dataset
@@ -30,6 +30,7 @@ def _garmin_row(activity: Activity) -> dict[str, str]:
         "Activity Date": activity.start.strftime("%Y-%m-%d %H:%M:%S") if activity.start else "",
         "Activity Name": activity.name or "",
         "Activity Type": activity.raw_sport or activity.sport or "",
+        "Activity Local Date": activity.local_start_date or "",
     }
 
 
@@ -101,8 +102,8 @@ def run(
         prefix = f"activities/{expected_date[:4]}/{requested_activity_id}"
         decoded = _json(store, f"{prefix}/activity.v1.json")
         canonical = decoded.get("activity", {})
-        local = str(canonical.get("start_time_local") or "")
-        if str(canonical.get("id")) != requested_activity_id or local[:10] != expected_date:
+        local = activity_local_date(canonical.get("start_time_local"))
+        if str(canonical.get("id")) != requested_activity_id or local != expected_date:
             raise ValueError("Canonical activity does not match requested ID and local date")
         activity = {
             "id": requested_activity_id, "date": expected_date,
@@ -214,10 +215,10 @@ def run(
             if details.get("activityId") is not None and str(details["activityId"]) != activity_id:
                 raise ValueError("Garmin returned details for a different activity")
             details = _complete_activity_details(details, _garmin_row(selected))
-            if details.get("startTimeLocal") and str(details["startTimeLocal"])[:10] != selected.local_start_date:
+            if activity_local_date(details.get("startTimeLocal")) != selected.local_start_date:
                 raise ValueError("Garmin details disagree with selected local date")
-            if not details.get("startTimeLocal"):
-                details["startTimeLocal"] = selected.local_start_time or f"{selected.local_start_date} 00:00:00"
+            if details.get("startTimeLocal") == selected.local_start_date:
+                details["startTimeLocal"] = selected.local_start_time or selected.local_start_date
             refreshed = refresh_activity(
                 details,
                 garmin=garmin,
@@ -230,7 +231,7 @@ def run(
             if refreshed["status"] in {"baseline", "unchanged"}:
                 decoded = _json(store, f"{prefix}/activity.v1.json")
                 metadata = decoded.get("activity", {})
-                if isinstance(metadata, dict) and not metadata.get("start_time_local"):
+                if isinstance(metadata, dict) and not activity_local_date(metadata.get("start_time_local")):
                     metadata["start_time_local"] = details["startTimeLocal"]
                     store.put(f"{prefix}/activity.v1.json", gzip_json(decoded),
                               "application/json", encoding="gzip")

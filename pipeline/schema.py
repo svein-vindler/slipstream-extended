@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from math import isfinite
 
 # Map Garmin's many sport keys onto a tidy family for display/filtering.
@@ -54,6 +55,41 @@ def activity_metric(value) -> float | None:
 
 def activity_text(value) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
+
+
+_LOCAL_CLOCK = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[ T](?P<hour>[0-9]{2}):(?P<minute>[0-9]{2})"
+    r"(?::(?P<second>[0-9]{2})(?:\.[0-9]{1,9})?)?(?:Z|[+-](?P<zone_hour>[0-9]{2}):(?P<zone_minute>[0-9]{2}))?)?"
+)
+
+
+def activity_local_date(value) -> str | None:
+    """Validate the provider's local calendar, without converting it to UTC."""
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    match = _LOCAL_CLOCK.fullmatch(value)
+    if not match or any(int(match[field] or 0) > ceiling for field, ceiling in (
+        ("hour", 23), ("minute", 59), ("second", 59), ("zone_hour", 23), ("zone_minute", 59),
+    )):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        return None
+
+
+def activity_calendar_years(day: str) -> list[str]:
+    """UTC/local clocks can differ by one calendar day, including travel."""
+    parsed = date.fromisoformat(day)
+    years = []
+    for offset in (0, 1, -1):
+        try:
+            year = f"{(parsed + timedelta(days=offset)).year:04d}"
+        except OverflowError:
+            continue
+        if year not in years:
+            years.append(year)
+    return years
 
 
 @dataclass

@@ -54,7 +54,7 @@ async function check(request = REQUEST, age = 30_000, extra = {}) {
 }
 async function activity(id = "1", localDate = DAY) {
   const prefix = `activities/2026/${id}`;
-  await put(`${prefix}/activity.v1.json`, { schema_version: 1, source_fit_sha256: "synthetic-fit-hash",
+  await put(`${prefix}/activity.v1.json`, { schema_version: 1, source: "garmin-fit", source_fit_sha256: "synthetic-fit-hash",
     activity: { id, type: "running", name: "Synthetic run", start_time_local: `${localDate} 10:00:00`,
       start_time_gmt: `${localDate} 08:00:00` }, decode_errors: [] });
   await put(`${prefix}/activity.fit`, "synthetic marker");
