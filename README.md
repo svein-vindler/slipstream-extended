@@ -148,6 +148,12 @@ new/recent running activities. Unchanged activity files and ready analyses are
 reused; unchanged summaries and same-day snapshots skip uploads. Recent source
 data is still checked so late changes can be reconciled.
 
+Summary publication now seals immutable activity/health pairs before committing
+a conditional manifest. Cold Python refreshes can recover that committed pair
+after an interrupted upload; existing current-CSV consumers retain their
+compatibility interface. See [summary recovery](docs/SUMMARY_RECOVERY.md) for
+legacy fallback, retry limits, storage cost and rollout boundaries.
+
 Recent sleep and HRV also reuse unchanged canonical files and monthly indexes,
 updating only affected months. Successful source-check times are recorded
 separately; empty or incomplete Garmin responses preserve earlier usable data.

@@ -351,9 +351,9 @@ def test_refresh_gates_and_reuses_last_budget_after_critical_work(monkeypatch, t
                 (tmp_path / "health_daily.csv").write_bytes(b"Date\n")
             if name == "body":
                 store.timings_ms["get"] = 5
-            return {}
+            return SimpleNamespace(base=object()) if name == "restore" else {}
         return run
-    for module, method, name in ((refresh.summary_restore, "restore_summaries", "restore"),
+    for module, method, name in ((refresh.summary_restore, "restore_with_base", "restore"),
         (refresh.refresh_summaries, "run", "summary"), (refresh.recent_health, "run", "health"),
         (refresh.recent_body, "run", "body"), (refresh.latest_activity, "run", "activity"),
         (refresh.latest_night, "run", "night")):
@@ -375,7 +375,7 @@ def test_refresh_gates_and_reuses_last_budget_after_critical_work(monkeypatch, t
         refresh.run(refresh.RefreshRequest(mode=mode, wake_date=datetime.now().date().isoformat()), **options)
         assert "training" not in order
     monkeypatch.setattr(refresh.fetch, "run", ordinary("history"))
-    monkeypatch.setattr(refresh.summary_export, "run", ordinary("export"))
+    monkeypatch.setattr(refresh.summary_export, "publish_derived", ordinary("export"))
     order.clear()
     refresh.run(refresh.RefreshRequest(health_start="2026-10-01", health_end="2026-10-02"), **options)
     assert "training" not in order

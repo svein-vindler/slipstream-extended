@@ -6,6 +6,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from botocore.exceptions import ClientError
 
@@ -14,8 +15,9 @@ from .health_writer import write_health_dataset
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2Store, missing_object
 from .sources import garmin, garmin_health
-from .summary_export import run as export_summaries
-from .summary_restore import decode_summary, restore_summaries
+from .summary_export import publish_derived as export_summaries
+from .summary_publication import prepare_normal_base
+from .summary_restore import decode_summary
 from .writer import write_dataset
 
 POLICY = {"activities": {"recent": 7, "wide": 30}, "health": {"recent": 3, "wide": 14}}
@@ -80,33 +82,6 @@ def select_windows(store, data_dir, now, *, force_reconcile=False, required_wide
     return windows
 
 
-def _restore_missing(store, data_dir):
-    missing = {stream for stream, filename in [("activities", "activities.csv"), ("health", "health_daily.csv")]
-               if not (Path(data_dir) / filename).is_file()}
-    if not missing:
-        return missing
-    try:
-        store.get("summary/manifest.json")
-    except (KeyError, ClientError) as exc:
-        if isinstance(exc, ClientError) and not missing_object(exc):
-            raise
-        # Bootstrap is safe only when no existing current summaries would be
-        # overwritten. An interrupted/legacy installation needs explicit repair.
-        for key in ("summary/activities.csv", "summary/health_daily.csv"):
-            try:
-                store.get(key)
-            except KeyError:
-                continue
-            except ClientError as missing_exc:
-                if not missing_object(missing_exc):
-                    raise
-                continue
-            raise ValueError("Existing R2 summaries require a valid manifest before refresh") from exc
-    else:
-        restore_summaries(data_dir, store)
-    return missing
-
-
 def _valid_activity(activity):
     return (activity.start is not None and isinstance(activity.source_id, str)
             and activity.source_id.isascii() and activity.source_id.isdigit()
@@ -141,14 +116,17 @@ def provider_diagnostics(client):
 
 
 def run(data_dir="data", *, store=None, client=None, now=None, force_reconcile=False,
-        request_pause=0.15):
+        request_pause=0.15, base=None, flow_id=None):
     started = time.perf_counter()
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         raise ValueError("Summary refresh clock must include a timezone")
     now = now.astimezone(timezone.utc)
     store = store or R2Store()
-    missing = _restore_missing(store, data_dir)
+    missing = {stream for stream, filename in [("activities", "activities.csv"), ("health", "health_daily.csv")]
+               if not (Path(data_dir) / filename).is_file()}
+    flow_id = flow_id or uuid4().hex
+    base = prepare_normal_base(data_dir, store=store, flow_id=flow_id, base=base, allow_direct_initial=True)
     windows = select_windows(store, data_dir, now, force_reconcile=force_reconcile, required_wide_scopes=missing)
     client = client or garmin._login()
     health_stats = {"sdk_calls": 0, "source_errors": 0, "invalid_dates": 0}
@@ -170,7 +148,7 @@ def run(data_dir="data", *, store=None, client=None, now=None, force_reconcile=F
     write_health_dataset(health, data_dir, preserve_existing=True)
     # Receipts are published only after both summaries, snapshots and manifest
     # have been successfully exported. Partial metrics retain old CSV values.
-    manifest = export_summaries(data_dir, store=store)
+    manifest = export_summaries(data_dir, store=store, base=base, flow_id=flow_id)
     hashes = {entry["name"]: entry["sha256"] for entry in manifest["files"]}
     ready = {"activities": activity_complete, "health": health_complete}
     checkpoints = 0

@@ -1,9 +1,13 @@
+from collections.abc import MutableMapping
 from datetime import date, datetime, timezone
 
 import pytest
 
 from pipeline.latest_activity import run
+from pipeline.r2_store import R2Store
 from pipeline.schema import Activity
+from pipeline.summary_export import run as full_export
+from scripts.benchmark_summary_reuse import SummaryClient
 
 
 @pytest.fixture(autouse=True)
@@ -15,24 +19,36 @@ def fixed_recent_window(monkeypatch):
     monkeypatch.setattr("pipeline.freshness.date", FixedDate)
 
 
-class FakeStore:
-    def __init__(self):
-        self.objects = {}
+class BodyView(MutableMapping):
+    def __init__(self, storage):
+        self.client = storage.client
+        self.storage = storage
+    def __getitem__(self, key):
+        return self.client.objects[key]["Body"]
+    def __setitem__(self, key, value):
+        self.storage.put(key, value, "application/json")
+    def __delitem__(self, key):
+        del self.client.objects[key]
+    def __iter__(self):
+        return iter(self.client.objects)
+    def __len__(self):
+        return len(self.client.objects)
 
-    def get(self, key):
-        return self.objects[key]
 
-    def list_keys(self, prefix=""):
-        return {key for key in self.objects if key.startswith(prefix)}
-
-    def put(self, key, data, content_type, *, encoding=None):
-        self.objects[key] = data
-
-    def put_if_absent(self, key, data, content_type, *, encoding=None):
-        if key in self.objects:
-            return False
-        self.put(key, data, content_type, encoding=encoding)
-        return True
+class FakeStore(R2Store):
+    def __init__(self, data_dir=None):
+        client = SummaryClient()
+        super().__init__(client=client, bucket="synthetic")
+        if data_dir is None:
+            self.objects = BodyView(self)
+            return
+        for name, header in [("activities.csv", b"Activity ID,Activity Name\n"),
+                             ("health_daily.csv", b"Date,Source\n")]:
+            path = data_dir / name
+            if not path.is_file():
+                path.write_bytes(header)
+        full_export(str(data_dir), store=self)
+        self.objects = BodyView(self)
 
 
 class FakeGarmin:
@@ -60,7 +76,7 @@ def _health_file(tmp_path):
 
 def test_latest_imports_only_newest_supported_activity_and_its_coach(monkeypatch, tmp_path):
     _health_file(tmp_path)
-    store = FakeStore()
+    store = FakeStore(tmp_path)
     garmin = FakeGarmin()
     fetched = [_activity("1", 9), _activity("2", 10),
                _activity("3", 11, "other", "other")]
@@ -98,14 +114,14 @@ def test_latest_imports_only_newest_supported_activity_and_its_coach(monkeypatch
 
 
 def test_latest_reports_no_recent_supported_activity(monkeypatch, tmp_path):
-    store = FakeStore()
+    store = FakeStore(tmp_path)
     monkeypatch.setattr("pipeline.latest_activity.garmin_source.fetch",
                         lambda **kwargs: [_activity("3", 11, "other", "other")])
     result = run(run_id="124", data_dir=str(tmp_path),
                  store=store, garmin=FakeGarmin())
     assert result["status"] == "no_recent_activity"
     assert result["activity_id"] is None
-    assert "summary/activities.csv" not in store.objects
+    assert result["summary_updated"] is False
 
 
 def test_latest_does_not_mistake_yesterdays_complete_run_for_new_one(monkeypatch, tmp_path):
@@ -114,7 +130,7 @@ def test_latest_does_not_mistake_yesterdays_complete_run_for_new_one(monkeypatch
         "garmin-2,2026-09-29 10:00:00,Old run,Run\n",
         encoding="utf-8",
     )
-    store = FakeStore()
+    store = FakeStore(tmp_path)
     for name in ("activity.fit", "activity.v1.json", "activity.tcx",
                  "activity.endurance.v1.json"):
         store.put(f"activities/2026/2/{name}", b"old", "application/octet-stream")
@@ -132,7 +148,7 @@ def test_latest_does_not_mistake_yesterdays_complete_run_for_new_one(monkeypatch
 
 
 def test_latest_expected_local_date_rejects_older_workout(monkeypatch, tmp_path):
-    store = FakeStore()
+    store = FakeStore(tmp_path)
     activity = _activity("2", 10)
     activity.local_start_date = "2026-09-28"
     monkeypatch.setattr("pipeline.latest_activity.garmin_source.fetch",
@@ -159,7 +175,7 @@ def test_latest_expected_local_date_accepts_same_night_across_utc_date(monkeypat
         return {"status": "refreshed"}
 
     monkeypatch.setattr("pipeline.latest_activity.refresh_activity", refresh)
-    store = FakeStore()
+    store = FakeStore(tmp_path)
 
     def coach(**kwargs):
         store.put("activities/2026/2/coach-input/v1/canonical/new.json",
@@ -176,7 +192,7 @@ def test_latest_expected_local_date_accepts_same_night_across_utc_date(monkeypat
 
 def test_latest_reports_missing_files_without_claiming_coach(monkeypatch, tmp_path):
     _health_file(tmp_path)
-    store = FakeStore()
+    store = FakeStore(tmp_path)
     monkeypatch.setattr("pipeline.latest_activity.garmin_source.fetch",
                         lambda **kwargs: [_activity("2", 10)])
     monkeypatch.setattr("pipeline.latest_activity.refresh_activity",
@@ -199,7 +215,7 @@ def test_latest_can_target_an_exact_recent_activity(monkeypatch, tmp_path):
                         lambda *args, **kwargs: {"status": "unsupported"})
     garmin = FakeGarmin()
     result = run(run_id="126", data_dir=str(tmp_path),
-                 requested_activity_id="1", store=FakeStore(), garmin=garmin)
+                 requested_activity_id="1", store=FakeStore(tmp_path), garmin=garmin)
     assert garmin.checked == ["1"]
     assert result["activity_id"] == "garmin-1"
     assert result["status"] == "files_unavailable"
@@ -207,7 +223,7 @@ def test_latest_can_target_an_exact_recent_activity(monkeypatch, tmp_path):
 
 def test_latest_keeps_files_ready_when_coach_generation_fails(monkeypatch, tmp_path):
     _health_file(tmp_path)
-    store = FakeStore()
+    store = FakeStore(tmp_path)
     monkeypatch.setattr("pipeline.latest_activity.garmin_source.fetch",
                         lambda **kwargs: [_activity("2", 10)])
 

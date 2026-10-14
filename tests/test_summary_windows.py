@@ -9,6 +9,7 @@ from botocore.exceptions import ClientError
 
 from pipeline.r2_store import R2BudgetError, R2Store
 from pipeline.refresh_summaries import checkpoint_key, run, select_windows
+from pipeline.summary_publication import SummaryUnverified
 from pipeline.summary_restore import decode_summary, restore_summaries
 from scripts.benchmark_summary_windows import NOW, HealthClient, SummaryGarmin
 
@@ -42,7 +43,7 @@ def test_first_reconciles_repeat_is_recent_and_retains_original_summary_bytes(en
     assert second["provider_diagnostics"]["garmin_api_calls"] == 19
     assert second["windows"]["activities"]["calendar_days"] == 8
     assert second["windows"]["health"]["calendar_days"] == 3
-    assert storage.counts["get"] == 3 and storage.counts["head"] == 5 and storage.counts["list"] == 1
+    assert storage.counts["get"] == 13 and storage.counts["head"] == 0 and storage.counts["list"] == 1
     assert storage.writes == [checkpoint_key(s, False) for s in ("activities", "health")]
     assert all(p.read_bytes() == originals[p.name] for p in root.glob("*.csv"))
     assert all(check(storage, s) == old_checks[s] for s in old_checks)
@@ -142,12 +143,13 @@ def test_activity_request_failure_publishes_no_receipts(environment):
     assert all(storage.objects[k]["Body"] == value for k, value in before.items())
 
 
-@pytest.mark.parametrize("phase", ["get", "head", "checkpoint"])
+@pytest.mark.parametrize("phase", ["get", "publication", "checkpoint"])
 def test_storage_errors_never_advance_failed_receipts(environment, monkeypatch, phase):
-    storage, _, _, refresh = environment
+    storage, sdk, _, refresh = environment
     refresh()
+    sdk.edits[NOW.date().isoformat()] = 1234
     before = {k: v["Body"] for k, v in storage.objects.items() if k.startswith("refresh/")}
-    method = {"get": "get_object", "head": "head_object", "checkpoint": "put_object"}[phase]
+    method = {"get": "get_object", "publication": "put_object", "checkpoint": "put_object"}[phase]
     original = getattr(storage, method)
     def fail(**kwargs):
         if phase != "checkpoint" or kwargs["Key"].startswith("refresh/"):
@@ -171,7 +173,7 @@ def test_budget_and_corrupt_local_summary_fail_without_new_checks(environment, m
     assert storage.objects[checkpoint_key("health", False)]["Body"] == before[checkpoint_key("health", False)]
     sdk.calls.clear()
     (root / "health_daily.csv").write_text("Invalid,header\n")
-    with pytest.raises(ValueError, match="header"):
+    with pytest.raises(SummaryUnverified):
         refresh()
     assert sdk.calls == []
 
@@ -214,7 +216,7 @@ def test_existing_unmanifested_r2_history_is_never_overwritten(environment):
     storage, sdk, _, refresh = environment
     storage.put_object(Key="summary/health_daily.csv", Body=b"Date,Source\n2020-01-01,garmin\n")
     before = storage.objects["summary/health_daily.csv"]["Body"]
-    with pytest.raises(ValueError, match="manifest"):
+    with pytest.raises(SummaryUnverified):
         refresh()
     assert sdk.calls == [] and storage.objects["summary/health_daily.csv"]["Body"] == before
 
@@ -232,7 +234,7 @@ def test_corrupt_health_source_shape_does_not_advance_scope(environment, shape):
 
 
 def test_storage_export_failure_leaves_all_old_checks_and_repeat_repairs(environment, monkeypatch):
-    storage, sdk, _, refresh = environment
+    storage, sdk, root, refresh = environment
     refresh()
     before = {k: v["Body"] for k, v in storage.objects.items() if k.startswith("refresh/")}
     sdk.edits[NOW.date().isoformat()] = 1234
@@ -246,6 +248,9 @@ def test_storage_export_failure_leaves_all_old_checks_and_repeat_repairs(environ
         refresh(now=NOW + timedelta(minutes=1))
     assert all(storage.objects[k]["Body"] == value for k, value in before.items())
     monkeypatch.setattr(storage, "put_object", original)
+    with pytest.raises(SummaryUnverified):
+        refresh(now=NOW + timedelta(minutes=2))
+    restore_summaries(str(root), R2Store(client=storage, bucket="synthetic-summary"))
     assert refresh(now=NOW + timedelta(minutes=2))["status"] == "complete"
 
 

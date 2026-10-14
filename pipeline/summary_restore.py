@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import gzip
-import json
-from pathlib import Path
 from typing import Any
 
-from .granular import sha256
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
 
 SUMMARY_FILES = (
@@ -37,50 +34,20 @@ def decode_summary(data: bytes, expected_header: str) -> bytes:
     return data
 
 
-def _manifest_files(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    if manifest.get("schema_version") != 1 or not isinstance(manifest.get("files"), list):
-        raise ValueError("R2 summary manifest has an unsupported format")
-    return {
-        item["name"]: item
-        for item in manifest["files"]
-        if isinstance(item, dict) and isinstance(item.get("name"), str)
-    }
-
-
 def restore_summaries(data_dir: str, store: Any) -> dict[str, Any]:
-    """Validate both R2 summaries, then replace the local copies atomically."""
-    try:
-        manifest = json.loads(store.get("summary/manifest.json"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ValueError("R2 summary manifest is not valid JSON") from exc
+    """Restore the exact verified commit; the payload remains compatible."""
+    from .summary_publication import restore_report
 
-    manifest_files = _manifest_files(manifest)
-    restored: list[tuple[Path, bytes]] = []
-
-    for filename, key, expected_header in SUMMARY_FILES:
-        metadata = manifest_files.get(filename)
-        if not metadata or metadata.get("current_key") != key:
-            raise ValueError(f"R2 manifest is missing metadata for {filename}")
-
-        raw = decode_summary(store.get(key), expected_header)
-        if sha256(raw) != metadata.get("sha256"):
-            raise ValueError(f"R2 checksum mismatch for {filename}")
-        restored.append((Path(data_dir) / filename, raw))
-
-    Path(data_dir).mkdir(parents=True, exist_ok=True)
-    for destination, raw in restored:
-        temporary = destination.with_name(f".{destination.name}.tmp")
-        temporary.write_bytes(raw)
-        temporary.replace(destination)
-
-    result = {
-        "generated_at": manifest.get("generated_at"),
-        "files": [
-            {"name": path.name, "rows": max(len(raw.splitlines()) - 1, 0)}
-            for path, raw in restored
-        ],
-    }
+    result = restore_report(data_dir, store)
     log_report("summary_restore", result)
+    return result
+
+
+def restore_with_base(data_dir: str, store: Any, *, flow_id: str):
+    from .summary_publication import restore_with_base as capture
+
+    result = capture(data_dir, store, flow_id=flow_id)
+    log_report("summary_restore", result.report)
     return result
 
 

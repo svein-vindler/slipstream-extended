@@ -14,7 +14,7 @@ def routed(monkeypatch, tmp_path):
 
     def factory():
         store = SimpleNamespace(operations={"get": 0, "head": 0, "list_pages": 0, "put": 0},
-                                put=lambda *args: None)
+                                put=lambda *args, **kwargs: SimpleNamespace(base=None))
         stores.append(store)
         return store
 
@@ -34,11 +34,13 @@ def routed(monkeypatch, tmp_path):
             if name in {"summary", "fetch"}:
                 (tmp_path / "data").mkdir(exist_ok=True)
                 (tmp_path / "data/health_daily.csv").write_text("Date,Weight KG\n", encoding="utf-8")
+            if name == "restore":
+                return SimpleNamespace(base=object())
             return {"status": "complete", "private_metric": "never-log-this"}
         return run
 
     for module, method, name in [
-        (refresh.summary_restore, "restore_summaries", "restore"),
+        (refresh.summary_restore, "restore_with_base", "restore"),
         (refresh.refresh_summaries, "run", "summary"),
         (refresh.recent_health, "run", "night_overlap"),
         (refresh.recent_body, "run", "body_overlap"),
@@ -47,7 +49,7 @@ def routed(monkeypatch, tmp_path):
         (refresh.latest_activity, "run", "activity"),
         (refresh.latest_night, "run", "night"),
         (refresh.fetch, "run", "fetch"),
-        (refresh.summary_export, "run", "export"),
+        (refresh.summary_export, "publish_derived", "export"),
         (refresh.health_index_reconcile, "run", "indexes"),
     ]:
         monkeypatch.setattr(module, method, operation(name))
