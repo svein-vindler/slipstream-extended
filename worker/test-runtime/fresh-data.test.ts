@@ -2,6 +2,7 @@ import { env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FreshDataService, freshResultSchema, freshScope, localToday, record,
   validateRecentDate, type FreshRequest } from "../src/fresh-data";
+import { syntheticStartupReceipt } from "../test-support/dispatch-receipt";
 import { decodePossiblyGzippedText } from "../src/security";
 
 const NOW = Date.parse("2026-10-05T12:00:00Z");
@@ -11,7 +12,8 @@ const NIGHT: FreshRequest = { kind: "night", date: DAY };
 const CONFIG = { repository: "owner/slipstream", workflow: "refresh.yml", ref: "main",
   token: "synthetic-test-token", cooldownMinutes: 30 };
 const RUN = { id: 44, status: "queued", conclusion: null, event: "workflow_dispatch",
-  path: ".github/workflows/refresh.yml", created_at: "2026-10-05T12:00:00Z",
+  path: ".github/workflows/refresh.yml", repository: { full_name: CONFIG.repository },
+  head_repository: { full_name: CONFIG.repository }, head_branch: "main", head_sha: "a".repeat(40), created_at: "2026-10-05T12:00:00Z",
   updated_at: null, html_url: "https://github.com/owner/slipstream/actions/runs/44" };
 const PROFILE = { profile_id: "test-profile", effective_from: "2026-01-01", created_at: "2026-01-01T12:00:00Z",
   zones: [{ label: "test-zone", min_bpm: 100, max_bpm: 150 }] };
@@ -33,9 +35,16 @@ async function json(keys: string[]) {
   }
   return null;
 }
+async function writeStartup(id: string) {
+  await put("refresh/requests/" + id + ".json",
+    syntheticStartupReceipt((await coordinator.dispatchOperation(id))!, RUN.id));
+}
 const fetcher: typeof fetch = async (_url, init) => {
   if (init?.method === "POST") {
-    posts.push(record(JSON.parse(String(init.body))));
+    const payload = record(JSON.parse(String(init.body)));
+    posts.push(payload);
+    const inputs = record(payload.inputs);
+    await writeStartup(String(inputs.sync_request_id));
     return Response.json({ workflow_run_id: 44 });
   }
   gets++;
@@ -45,6 +54,16 @@ function service(customFetch = fetcher, getActivities = async () => [] as import
   return new FreshDataService(testEnv, { getActivities, getR2Json: json,
     getCoachProfiles: async () => ({ keys: ["test-profile"], profiles: [PROFILE] }) },
   CONFIG, () => now, customFetch, async () => {});
+}
+async function completedReport(request: FreshRequest) {
+  await put("refresh/reports/" + RUN.id + ".json", request.kind === "night"
+    ? { schema_version: 1, kind: "latest-night", wake_date: DAY, scope: freshScope(request),
+      checked_at: new Date(NOW).toISOString(), source_checked: true, status: "stored", sleep_status: "stored", hrv_status: "stored" }
+    : { schema_version: 1, kind: "latest-activity", scope: freshScope(request), checked_at: new Date(NOW).toISOString(),
+      source_checked: true, status: "ready", activity_id: "garmin-1", activity_date: DAY,
+      activity_started_at_utc: DAY + "T08:00:00Z", activity_started_at_garmin_local: DAY + "T10:00:00",
+      expected_date: DAY, already_in_slipstream: true, activity_name: "Synthetic run",
+      summary_updated: false, files_ready: true, file_status: "existing", coach_status: "ready" });
 }
 async function check(request = REQUEST, age = 30_000, extra = {}) {
   await put(`refresh/checks/v1/${freshScope(request)}.json`, {
@@ -159,15 +178,19 @@ describe("R2-first targeted freshness", () => {
     expect(record((await service().snapshot(REQUEST)).package.user_context).context_id).toBe("new-context");
   });
 
-  it("stops after three short polling windows and still checks a later completion", async () => {
+  it("stops after three tickets and does not read a later completion without a ticket", async () => {
     const result = await service().request(REQUEST);
     const id = String(result.request_id);
     for (let i = 0; i < 4; i++) await service().status((await coordinator.freshJob(id))!);
     expect(await coordinator.freshJob(id)).toMatchObject({ polls: 3 });
     expect(await service().status((await coordinator.freshJob(id))!))
-      .toMatchObject({ should_continue_polling: false, retry_after_seconds: 60 });
+      .toMatchObject({ should_continue_polling: false, dispatch_status: { duplicate_guard_held: true, action_required: true } });
     await activity(); await check(); runState = { ...RUN, status: "completed", conclusion: "success" };
-    expect(await service().status((await coordinator.freshJob(id))!)).toMatchObject({ terminal: true, data_ready: true });
+    const before = gets;
+    expect(await service().status((await coordinator.freshJob(id))!)).toMatchObject({ terminal: false,
+      sync_status: { job_state: "unknown", job_start_confirmed: null }, freshness: { complete: true } });
+    expect(gets).toBe(before);
+    expect(await coordinator.freshJob(id)).toMatchObject({ state: "active", polls: 3 });
     expect(posts).toHaveLength(1);
   });
 
@@ -176,7 +199,7 @@ describe("R2-first targeted freshness", () => {
     const job = (await coordinator.freshJob(String(result.request_id)))!;
     const status = await service(fetcher, async () => [], NOW + 3 * 60 * 60_000).status(job);
     expect(status).toMatchObject({ terminal: false, should_continue_polling: false,
-      sync_status: { job_state: "queued", polling_state: "stopped", next_action: "check_later" } });
+      sync_status: { job_state: "queued", job_start_confirmed: true, polling_state: "stopped", next_action: "check_later" } });
     expect(posts).toHaveLength(1);
   });
 
@@ -184,7 +207,7 @@ describe("R2-first targeted freshness", () => {
     await activity();
     await env.SLIPSTREAM_DATA.delete("activities/2026/1/activity.tcx");
     const first = await service().request(REQUEST);
-    await check();
+    await check(); await completedReport(REQUEST);
     runState = { ...RUN, status: "completed", conclusion: "success" };
     const result = await service().status((await coordinator.freshJob(String(first.request_id)))!);
     expect(result).toMatchObject({ terminal: true, data_ready: false,
@@ -194,12 +217,12 @@ describe("R2-first targeted freshness", () => {
     expect(posts).toHaveLength(1);
   });
 
-  it("uses the original shared job request time and can observe readiness after polling stops", async () => {
+  it("uses the original shared job request time within the remaining admitted ticket", async () => {
     const first = await service().request(NIGHT);
     const job = (await coordinator.freshJob(String(first.request_id)))!;
     expect(JSON.parse(job.request).requestedAt).toBe(NOW);
-    for (let i = 0; i < 3; i++) await service().status((await coordinator.freshJob(job.request_id))!);
-    await night(); await check(NIGHT); runState = { ...RUN, status: "completed", conclusion: "success" };
+    await service().status((await coordinator.freshJob(job.request_id))!);
+    await night(); await check(NIGHT); await completedReport(NIGHT); runState = { ...RUN, status: "completed", conclusion: "success" };
     const later = await service(fetcher, async () => [], NOW + 60_000).status((await coordinator.freshJob(job.request_id))!);
     expect(later).toMatchObject({ data_ready: true, latency: { request_elapsed_ms: 60000,
       request_to_ready_observed_ms: 60000 }, sync_status: { data_state: "ready", job_state: "completed" } });
@@ -210,8 +233,9 @@ describe("R2-first targeted freshness", () => {
     const first = await service().request(NIGHT);
     const denied: typeof fetch = async () => new Response(null, { status: 403 });
     expect(await service(denied).status((await coordinator.freshJob(String(first.request_id)))!))
-      .toMatchObject({ reason: "status_error", terminal: false, should_continue_polling: false,
-        sync_status: { job_state: "unknown", user_action_required: true, next_action: "fix_configuration" } });
+      .toMatchObject({ reason: "dispatch_unconfirmed", terminal: false, should_continue_polling: false,
+        sync_status: { job_state: "unknown", job_start_confirmed: null, next_action: "none" },
+        dispatch_status: { candidate_present: true, duplicate_guard_held: true, action_required: true } });
     expect(posts).toHaveLength(1);
   });
 
@@ -249,7 +273,7 @@ describe("R2-first targeted freshness", () => {
   });
 
   it("a workflow success with no data never means requested data are ready", async () => {
-    runState = { ...RUN, status: "completed", conclusion: "success" };
+    runState = { ...RUN, status: "completed", conclusion: "success" }; await completedReport(NIGHT);
     const result = await service().request(NIGHT);
     expect(result).toMatchObject({ terminal: true, data_ready: false, should_continue_polling: false });
     expect(String(result.message)).toContain("Missing:");
@@ -314,7 +338,7 @@ describe("R2-first targeted freshness", () => {
   });
 
   it("reports failed/cancelled jobs and keeps the cooldown", async () => {
-    runState = { ...RUN, status: "completed", conclusion: "cancelled" };
+    runState = { ...RUN, status: "completed", conclusion: "cancelled" }; await completedReport(NIGHT);
     const result = await service().request(NIGHT);
     expect(result).toMatchObject({ data_ready: false, terminal: true });
     expect(await service().request(NIGHT)).toMatchObject({ accepted: false, reason: "cooldown" });
@@ -325,7 +349,7 @@ describe("R2-first targeted freshness", () => {
     const result = await service(async () => { throw new Error("synthetic connection lost"); }).request(NIGHT);
     expect(result).toMatchObject({ reason: "dispatch_unconfirmed", should_continue_polling: false });
     expect(await coordinator.activeFreshJob(freshScope(NIGHT), NOW)).toMatchObject({ request_id: result.request_id, run_id: null });
-    expect(await service().request(NIGHT)).toMatchObject({ request_id: result.request_id, run: null });
+    expect(await service().request(NIGHT)).toMatchObject({ request_id: result.request_id, dispatch_status: { duplicate_guard_held: true } });
     expect(posts).toHaveLength(0); expect(gets).toBe(0);
   });
 
@@ -334,13 +358,13 @@ describe("R2-first targeted freshness", () => {
     const uncertain: typeof fetch = async () => { dispatches++; throw new Error("synthetic response lost"); };
     const first = await service(uncertain).request(request);
     expect(first).toMatchObject({ reason: "dispatch_unconfirmed", terminal: false,
-      sync_status: { job_start_confirmed: false, current_job_source_checked: null } });
+      sync_status: { job_start_confirmed: null, current_job_source_checked: null } });
     const id = String(first.request_id);
-    expect(await service().request(request)).toMatchObject({ request_id: id, run: null,
+    expect(await service().request(request)).toMatchObject({ request_id: id, dispatch_status: { duplicate_guard_held: true },
       reason: "dispatch_unconfirmed", should_continue_polling: false });
-    for (let i = 0; i < 2; i++) await service().request(request);
+    // Initial observation and shared request have consumed two tickets.
     // The receipt arrives later, after the same reservation has been reused.
-    await put(`refresh/requests/${id}.json`, { scope: freshScope(request), run_id: RUN.id });
+    await writeStartup(String(id));
     if (request.kind === "night") await night(); else await activity();
     await check(request, -60_000);
     const checkedAt = new Date(NOW + 60_000).toISOString();
@@ -384,7 +408,12 @@ describe("R2-first targeted freshness", () => {
       current_job_source_checked_at: null, stored_source_checked_at: older },
       freshness: { source_checked_at: older, source_fresh: sourceChecked !== false,
         source_freshness_reason: sourceChecked === false ? "current_check_failed" : "within_ttl" } });
-    expect(String(result.message)).toContain(older);
+    if (sourceChecked === false) expect(String(result.message)).toContain(older);
+    else {
+      expect(result).toMatchObject({ terminal: false, sync_status: { job_state: "unknown", job_start_confirmed: null },
+        dispatch_status: { duplicate_guard_held: true } });
+      expect(String(result.message)).toContain("maintainer inspection");
+    }
     expect(posts).toHaveLength(1);
   });
 
@@ -409,21 +438,23 @@ describe("R2-first targeted freshness", () => {
     expect(await coordinator.activeFreshJob(freshScope(NIGHT), NOW))
       .toMatchObject({ state: "active", request_id: result.request_id });
     expect(await service().request(NIGHT)).toMatchObject({ request_id: result.request_id,
-      reason: "dispatch_unconfirmed", sync_status: { job_start_confirmed: false } });
-    await put(`refresh/requests/${result.request_id}.json`, { run_id: RUN.id, scope: freshScope(NIGHT) });
+      reason: "dispatch_unconfirmed", sync_status: { job_start_confirmed: null } });
+    await writeStartup(String(result.request_id));
+    await completedReport(NIGHT); runState = { ...RUN, status: "completed", conclusion: "success" };
     expect(await service().status((await coordinator.freshJob(String(result.request_id)))!))
       .toMatchObject({ run: { id: RUN.id }, sync_status: { job_start_confirmed: true } });
     expect(posts).toHaveLength(0);
   });
 
-  it("resolves a 204 dispatch with its own persisted receipt only", async () => {
+  it("resolves a 204 dispatch with its own persisted receipt and terminal proof only", async () => {
+    await completedReport(NIGHT);
     const receiptFetch: typeof fetch = async (_url, init) => {
       if (init?.method === "POST") {
         const id = record(JSON.parse(String(init.body)).inputs).sync_request_id;
-        await put(`refresh/requests/${id}.json`, { run_id: 44, scope: freshScope(NIGHT) });
+        await writeStartup(String(id));
         return new Response(null, { status: 204 });
       }
-      return Response.json(RUN);
+      return Response.json({ ...RUN, status: "completed", conclusion: "success" });
     };
     expect(await service(receiptFetch).request(NIGHT)).toMatchObject({ run: { id: 44 } });
   });
@@ -437,25 +468,26 @@ describe("R2-first targeted freshness", () => {
       }
       throw new Error("Unexpected lookup of another scope's run");
     };
-    expect(await service(mismatched).request(NIGHT)).toMatchObject({ run: null, terminal: false });
+    expect(await service(mismatched).request(NIGHT)).toMatchObject({ terminal: false, dispatch_status: { state: "unconfirmed", candidate_present: false, duplicate_guard_held: true } });
   });
 
   it("cannot attach a receipt for another UUID even when its scope matches", async () => {
     const first = await service(async () => new Response(null, { status: 204 })).request(NIGHT);
     await put(`refresh/requests/${crypto.randomUUID()}.json`, { run_id: RUN.id, scope: freshScope(NIGHT) });
     expect(await service().status((await coordinator.freshJob(String(first.request_id)))!))
-      .toMatchObject({ run: null, reason: "dispatch_unconfirmed" });
+      .toMatchObject({ reason: "dispatch_unconfirmed", dispatch_status: { candidate_present: false, duplicate_guard_held: true } });
     expect(gets).toBe(0); expect(posts).toHaveLength(0);
   });
 
   it("rejects receipt lookup from a different workflow without another dispatch", async () => {
     const first = await service(async () => new Response(null, { status: 204 })).request(NIGHT);
-    await put(`refresh/requests/${first.request_id}.json`, { run_id: RUN.id, scope: freshScope(NIGHT) });
+    await writeStartup(String(first.request_id));
     runState = { ...RUN, path: ".github/workflows/unrelated.yml" };
     const result = await service().status((await coordinator.freshJob(String(first.request_id)))!);
     expect(result).not.toHaveProperty("run");
-    expect(result).toMatchObject({ reason: "status_error",
-        sync_status: { job_start_confirmed: null, current_job_source_checked: null } });
+    expect(result).toMatchObject({ reason: "dispatch_unconfirmed",
+        sync_status: { job_start_confirmed: null, current_job_source_checked: null },
+        dispatch_status: { candidate_present: true, duplicate_guard_held: true } });
     expect(gets).toBe(1); expect(posts).toHaveLength(0);
   });
 
@@ -473,10 +505,11 @@ describe("R2-first targeted freshness", () => {
     expect(posts).toHaveLength(0);
   });
 
-  it("keeps incompatible activity IDs separate without bypassing the cooldown", async () => {
+  it("blocks incompatible activity IDs before dispatch while coverage is unverified", async () => {
     await service().request({ ...REQUEST, activityId: "1" });
     const result = await service().request({ ...REQUEST, activityId: "2" });
-    expect(result).toMatchObject({ accepted: false, reason: "cooldown" });
+    expect(result).toMatchObject({ accepted: false, reason: "dispatch_overlap",
+      dispatch_status: { duplicate_guard_held: true } });
     expect(result.request_id).toBeUndefined();
     expect(posts).toHaveLength(1);
   });

@@ -34,6 +34,32 @@ const TOOL_NAMES = [
 ] as const;
 
 describe("MCP structured outputs", () => {
+  it("projects typed strength dimensions as own properties without changing prototypes", () => {
+    const groups = JSON.parse('{"__proto__":{"sets":0,"repetitions":"2","external_volume_kg":null,"extra":"remove"},"Normal":{"sets":1}}');
+    const result = outputSchemas.strength_session.parse({ available: true, session: {
+      summary: { by_exercise: groups, by_category: groups },
+    } });
+    for (const map of [result.session!.summary!.by_exercise, result.session!.summary!.by_category]) {
+      expect(Object.hasOwn(map!, "__proto__")).toBe(true);
+      expect(Object.getPrototypeOf(map)).toBe(Object.prototype);
+      expect((map as Record<string, unknown>).__proto__).toEqual({ sets: 0, repetitions: "2", external_volume_kg: null });
+    }
+    expect(Object.hasOwn(Object.prototype, "sets")).toBe(false);
+  });
+  it("advertises typed strength dimension leaves with structural extras excluded", () => {
+    const schema = z.toJSONSchema(outputSchemas.strength_session);
+    const session = schema.properties!.session as { properties: { summary: {
+      properties: Record<string, { type: string; additionalProperties: {
+        properties: Record<string, unknown>; additionalProperties: boolean;
+      } }>;
+    } } };
+    for (const key of ["by_exercise", "by_category"]) {
+      const map = session.properties.summary.properties[key];
+      expect(map.type).toBe("object");
+      expect(Object.keys(map.additionalProperties.properties)).toEqual(["sets", "repetitions", "external_volume_kg"]);
+      expect(map.additionalProperties.additionalProperties).toBe(false);
+    }
+  });
   it("advertises optional activity calendar provenance without changing required fields", () => {
     const summary = (z.toJSONSchema(outputSchemas.list_activities).properties!.activities as {
       items: { properties: Record<string, { enum?: string[] }>; required: string[] }

@@ -58,10 +58,14 @@ def test_bulk_and_targeted_publish_the_same_version_for_the_same_input(targeted_
     else:
         bulk = coach_backfill.run(store=client.store())
         targeted = coach_backfill.run_one(activity=activity, store=client.store())
-    canonical = bulk["completed_this_run"][0]
+    assert bulk["status"] == "complete" and bulk["blocked_activity_count"] == 0
+    if targeted_first:
+        assert bulk["generated_this_run"] == 0 and bulk["already_current_activities"] == 1
+    pointer = client.read(f"{PREFIX}/coach-input/v1/latest-ready.json")
+    canonical = client.read(pointer["analysis_key"])
     assert targeted["processed_sources"]["1"] == canonical["analysis_id"]
     assert len([key for key in client.objects if "/canonical/" in key]) == 1
-    assert client.puts.count(canonical["key"]) == 1
+    assert client.puts.count(pointer["analysis_key"]) == 1
 
 @pytest.mark.parametrize("mode", ["bulk", "targeted"])
 def test_unchanged_input_reuses_identity_without_rewriting_canonical_bytes(mode):

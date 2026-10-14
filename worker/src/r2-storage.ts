@@ -2,7 +2,7 @@
 import { errorCategory } from "./output-privacy";
 
 import { Activity, HealthDay, parseCsv, parseHealthCsv } from "./lib";
-import { PayloadTooLargeError, decodePossiblyGzippedText } from "./security";
+import { PayloadTooLargeError, decodePossiblyGzippedText, readStreamLimited } from "./security";
 
 export interface R2ReadLimits { stored: number; decoded: number }
 export const SUMMARY_R2_LIMITS = { stored: 2 * 1024 * 1024, decoded: 16 * 1024 * 1024 };
@@ -95,9 +95,11 @@ export class R2Storage {
       const object = await this.bucket.get(key);
       if (!object) continue;
       if (object.size > limits.stored) {
+        try { await object.body.cancel("size limit exceeded"); } catch { /* Preserve the size error. */ }
         throw new PayloadTooLargeError("R2 object exceeds the stored-size limit.");
       }
-      const buffer = await object.arrayBuffer();
+      const buffer = await readStreamLimited(object.body, limits.stored,
+        "R2 object exceeds the stored-size limit.");
       const text = await decodePossiblyGzippedText(buffer, limits.decoded);
       return { key, text, etag: object.etag, ...(object.uploaded ? { uploaded: object.uploaded } : {}) };
     }

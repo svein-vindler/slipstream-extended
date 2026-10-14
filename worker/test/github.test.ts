@@ -23,6 +23,22 @@ const RUN = {
 };
 
 describe("GitHub refresh helpers", () => {
+  it("rejects missing workflow-run discovery instead of reporting an empty list", async () => {
+    await expect(latestRefreshRun(CONFIG, async () => Response.json({})))
+      .rejects.toThrow("GitHub workflow-run discovery could not be verified.");
+  });
+
+  it.each([null, [], { workflow_runs: null }, { workflow_runs: {} }, { workflow_runs: "" },
+    { workflow_runs: 0 }, { workflow_runs: false }])("rejects unsupported discovery envelope %j", async payload => {
+    await expect(latestRefreshRun(CONFIG, async () => Response.json(payload)))
+      .rejects.toThrow("GitHub workflow-run discovery could not be verified.");
+  });
+
+  it("preserves a verified empty workflow-run list", async () => {
+    await expect(latestRefreshRun(CONFIG, async () => Response.json({ total_count: 0, workflow_runs: [] })))
+      .resolves.toBeNull();
+  });
+
   it("normalizes only the safe workflow-run fields", () => {
     expect(normalizeRefreshRun({ ...RUN, token: "must-not-leak" })).toEqual(RUN);
   });
@@ -161,7 +177,8 @@ describe("GitHub refresh helpers", () => {
       expect(init?.method).toBe("GET");
       return Response.json({ ...RUN, path: ".github/workflows/refresh.yml" });
     };
-    await expect(dispatchRefresh(CONFIG, fetcher)).resolves.toEqual(RUN);
+    await expect(dispatchRefresh(CONFIG, fetcher)).resolves.toEqual({ kind: "ack_candidate", run_id: RUN.id });
+    expect(request).toBe(1);
   });
 
   it("dispatches a bounded latest-activity import with an optional exact ID", async () => {
@@ -183,21 +200,22 @@ describe("GitHub refresh helpers", () => {
     };
     await expect(dispatchLatestActivity(CONFIG, {
       activityId: "123", newActivityExpected: true,
-    }, fetcher)).resolves.toEqual(RUN);
+    }, fetcher)).resolves.toEqual({ kind: "ack_candidate", run_id: RUN.id });
+    expect(request).toBe(1);
     await expect(dispatchLatestActivity(CONFIG, {
       activityId: "../../bad", newActivityExpected: true,
     }, fetcher)).rejects.toThrow("numeric Garmin ID");
   });
 
-  it("rejects a malformed workflow-dispatch receipt", async () => {
+  it("holds an unconfirmed malformed workflow-dispatch receipt", async () => {
     const fetcher = async () => Response.json({ id: RUN.id });
     await expect(dispatchRefresh(CONFIG, fetcher))
-      .rejects.toThrow("invalid workflow-dispatch response");
+      .resolves.toEqual({ kind: "unconfirmed", reason: "invalid_ack" });
   });
 
   it("accepts GitHub's empty successful dispatch response", async () => {
     const fetcher = async () => new Response(null, { status: 204 });
-    await expect(dispatchRefresh(CONFIG, fetcher)).resolves.toBeNull();
+    await expect(dispatchRefresh(CONFIG, fetcher)).resolves.toEqual({ kind: "unconfirmed", reason: "empty_ack" });
   });
 
   it("rejects malformed repository configuration", async () => {

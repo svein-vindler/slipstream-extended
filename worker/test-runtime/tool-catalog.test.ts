@@ -82,9 +82,9 @@ it.each([false, true])("preserves the complete tool contracts with writes=%s", a
   expect({ writes, count: tools.length, hash }).toMatchSnapshot();
 });
 
-it.each([false, true])("preserves the previous contracts apart from optional confirmation outputs with writes=%s", async writes => {
+it.each([false, true])("preserves previous contracts apart from reviewed optional and D1 detail outputs with writes=%s", async writes => {
   const additions = new Set(["job_start_confirmed", "current_job_source_checked",
-    "current_job_source_checked_at", "stored_source_checked_at", "source_freshness_reason", "date_source"]);
+    "current_job_source_checked_at", "stored_source_checked_at", "source_freshness_reason", "date_source", "dispatch_status"]);
   function previousSchema(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(previousSchema);
     if (!value || typeof value !== "object") return value;
@@ -107,6 +107,23 @@ it.each([false, true])("preserves the previous contracts apart from optional con
         endurance_session: "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series.",
       };
       const outputSchema = structuredClone(tool.outputSchema);
+      // Reconstruct only D1's reviewed old output fields for the historical hash.
+      // Full current hashes above and authenticated D1 tests cover the new shapes.
+      const detail = outputSchema!.properties as Record<string, Record<string, unknown>>;
+      if (tool.name === "hrv_curve") {
+        for (const field of ["date", "sleep_start_gmt", "sleep_end_gmt", "summary"]) detail[field] = {};
+        const reading = detail.readings.items as { properties: Record<string, unknown> };
+        reading.properties.timestamp = {}; reading.properties.hrv_ms = {};
+      }
+      if (tool.name === "sleep_detail") {
+        const summary = detail.summary.properties as Record<string, unknown>;
+        for (const field of Object.keys(summary)) summary[field] = { type: ["number", "null"] };
+        const score = detail.score_breakdown.additionalProperties as { properties: Record<string, unknown> };
+        score.properties.value = { type: ["number", "null"] };
+      }
+      if (tool.name === "strength_session" || tool.name === "endurance_session") {
+        detail.session = { type: "object", propertyNames: { type: "string" }, additionalProperties: {} };
+      }
       if (tool.name in descriptions) {
         const properties = outputSchema!.properties as Record<string, unknown>;
         expect(properties.training_context).toBeDefined();

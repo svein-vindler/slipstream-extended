@@ -64,6 +64,24 @@ not assert that any particular activity/night is complete. The package's
 the current attempt fails. R2-only Coach Input repair does not claim a new
 Garmin check.
 
+Recent sleep/HRV overlap treats `wrong_date` and `invalid_response` as source
+errors, even when older canonical data remain available. Those failures have no
+new diagnostic check time. A validated dated empty response, or a structurally
+valid but unconfirmed sleep window, remains a successful `not_ready` observation
+without replacing good history. Undated, unknown or incomplete response shapes
+are not evidence of absence. Existing reason names and payload schemas remain
+unchanged; readiness/completeness and the last stored successful check remain
+separate from the current diagnostic observation.
+
+Actual producer-to-diagnostics-to-MCP tests exercise general and targeted-night
+status in JSON and SSE. Wrong-date, invalid-response and source failures retain
+false current-check evidence and no new check time, rather than source_pending.
+A successful general job can still have legacy data_ready=true while its
+sync_status reports a source error; that field remains a job-success contract.
+Preserved canonical bytes and stored check time do not become proof of a new
+successful source observation. Valid dated pending and unchanged valid data
+remain positive controls; the tests use synthetic provider and storage boundaries.
+
 The additive `freshness.source_freshness_reason` distinguishes `within_ttl`,
 `ttl_expired`, `no_confirmed_check`, `invalid_check_time` and
 `current_check_failed`. The existing five-minute boundary remains inclusive;

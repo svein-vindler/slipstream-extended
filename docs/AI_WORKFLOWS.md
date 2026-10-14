@@ -29,6 +29,13 @@ Replace dates, activity IDs and timezone with the user's confirmed local context
   components, source-pending/blocked state or 429. Never dispatch another job to
   extend polling. A later user request may check the same ID. Do not promise later
   automatic follow-up without a separately agreed mechanism.
+- When optional `dispatch_status` reports a held duplicate guard and
+  `next_action: inspect_dispatch`, preserve its `operation_id` for maintainer
+  inspection. An ACK identifies a candidate run; it does not prove execution.
+  Unknown status or an expired polling window does not authorize another POST.
+  Request-ID and candidate run-ID aliases use the same persisted polling budget.
+  See [dispatch reconciliation](DISPATCH_RECONCILIATION.md) for limits and legacy
+  availability, including general dispatches that return no run ID.
 - A client may expose HTTP 429 without forwarding the `Retry-After` header to
   the model. Use a cooldown explicitly stated in the response body when the
   header is unavailable. If neither the body nor header states a cooldown,
@@ -58,6 +65,11 @@ Replace dates, activity IDs and timezone with the user's confirmed local context
 
 Read with `coach_profile`. Save with `add_coach_profile` only after confirmation
 and when it is registered. No sync is needed to prepare the profile.
+New profile effective dates and selected activity-context dates must be real
+calendar dates in YYYY-MM-DD format, within years 0001 through 9999. Invalid
+dates are rejected before saving or using the accepted-write allowance. This
+does not revalidate stored history or change Garmin-local date selection.
+
 These example zone values demonstrate schema validity only; they are not defaults.
 
 ```json

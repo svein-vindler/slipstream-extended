@@ -81,26 +81,85 @@ def extract_fit(original: bytes) -> bytes:
         raise ValueError("Garmin ORIGINAL response is neither FIT nor ZIP") from exc
 
 
+class HrvResponseError(ValueError):
+    """Controlled invalid/wrong-date response, never confirmed absence."""
+
+    def __init__(self, status: str = "invalid_response"):
+        super().__init__(status)
+        self.status = status
+
+
 def normalize_hrv(day: str, raw: Any) -> dict[str, Any]:
-    source = raw if isinstance(raw, dict) else {}
-    summary = source.get("hrvSummary")
-    if not isinstance(summary, dict):
-        summary = {}
-    readings = source.get("hrvReadings")
-    if not isinstance(readings, list):
-        readings = []
+    if not isinstance(raw, dict):
+        raise HrvResponseError()
+    source = raw
+    summary = source.get("hrvSummary", {})
+    readings = source.get("hrvReadings", [])
+    if not isinstance(summary, dict) or not isinstance(readings, list):
+        raise HrvResponseError()
+    for declaration in (source.get("calendarDate"), summary.get("calendarDate")):
+        if declaration is None:
+            continue
+        try:
+            declared = date.fromisoformat(declaration).isoformat()
+        except (TypeError, ValueError) as exc:
+            raise HrvResponseError() from exc
+        if declared != day:
+            raise HrvResponseError("wrong_date")
+
+    # These are the existing index/readers' supported summary fields. Extra
+    # unknown keys alone do not establish either data presence or absence.
+    has_summary = False
+    for key in (
+        "lastNightAvg", "lastNightAverage", "lastNightAvgMs",
+        "lastNight5MinHigh", "lastNightFiveMinHigh", "lastNight5MinHighMs",
+        "weeklyAvg", "weeklyAverage", "weeklyAvgMs",
+        "baselineBalancedLower", "baselineLow", "baselineLower",
+        "baselineBalancedUpper", "baselineHigh", "baselineUpper",
+    ):
+        value = summary.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool) or _number(value) is None:
+            raise HrvResponseError()
+        has_summary = True
+    for key in ("status", "statusKey", "hrvStatus"):
+        value = summary.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise HrvResponseError()
+        has_summary = has_summary or bool(value.strip())
 
     normalized = []
     for reading in readings:
         if not isinstance(reading, dict):
-            continue
+            raise HrvResponseError()
         timestamp = next((reading.get(key) for key in (
             "readingTimeGMT", "readingTimeLocal", "timestamp", "readingTimestamp",
         ) if reading.get(key) is not None), None)
         value = next((reading.get(key) for key in (
             "hrvValue", "value", "hrv", "rmssd",
         ) if reading.get(key) is not None), None)
+        number = None if isinstance(value, bool) else _number(value)
+        if number is None or number <= 0 or isinstance(timestamp, bool):
+            raise HrvResponseError()
+        numeric_time = _number(timestamp)
+        if numeric_time is not None:
+            if numeric_time <= 0:
+                raise HrvResponseError()
+        else:
+            try:
+                datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise HrvResponseError() from exc
         normalized.append({"timestamp": timestamp, "hrv_ms": value, "raw": reading})
+
+    # Only an explicit empty list with a matching calendar declaration proves
+    # absence. Known summary-only data remains readable without a curve.
+    dated = day in (source.get("calendarDate"), summary.get("calendarDate"))
+    if not normalized and not has_summary and not ("hrvReadings" in source and dated):
+        raise HrvResponseError()
 
     return {
         "schema_version": SCHEMA_VERSION,

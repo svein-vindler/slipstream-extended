@@ -160,7 +160,7 @@ def test_workflow_input_adapter_preserves_targeting_and_correlation(monkeypatch)
     for key, value in {"ACTIVITY_ONLY": "true", "NIGHT_ONLY": "false", "INCLUDE_GRANULAR": "true",
                        "REFRESH_EVENT": "workflow_dispatch", "GITHUB_RUN_ID": "123",
                        "LATEST_R2_ONLY": "true", "LATEST_ACTIVITY_ID": "456",
-                       "LATEST_NEW_ACTIVITY_EXPECTED": "false", "SYNC_REQUEST_ID": "a" * 36,
+                       "LATEST_NEW_ACTIVITY_EXPECTED": "false", "SYNC_REQUEST_ID": "12345678-1234-4234-8234-123456789012",
                        "LATEST_EXPECTED_DATE": "", "HEALTH_START": "", "HEALTH_END": "",
                        "BACKFILL_START_YEAR": "", "BACKFILL_END_YEAR": ""}.items():
         monkeypatch.setenv(key, value)
@@ -169,7 +169,7 @@ def test_workflow_input_adapter_preserves_targeting_and_correlation(monkeypatch)
     request = captured[0]
     assert request.mode == "activity" and request.repair_only and request.include_granular
     assert request.run_id == "123" and request.activity_id == "456"
-    assert request.request_id == "a" * 36 and request.new_activity_expected is False
+    assert request.request_id == "12345678-1234-4234-8234-123456789012" and request.new_activity_expected is False
     monkeypatch.setenv("NIGHT_ONLY", "true")
     with pytest.raises(SystemExit):
         refresh.main()
@@ -196,3 +196,63 @@ def test_real_targeted_night_pipeline_keeps_receipts_and_reuses_canonical_bytes(
         persisted = json.loads(client.objects["refresh/reports/123.json"]["Body"])
         assert persisted["status"] == "stored" and persisted["source_checked"] is True
     assert persisted["sleep_reused"] and persisted["hrv_reused"]
+
+
+def test_general_preserves_the_original_mcp_operation_id(routed):
+    request_id = "12345678-1234-4234-8234-123456789012"
+    report = refresh.run(refresh.RefreshRequest(run_id="55", request_id=request_id), **routed[3])
+    assert report["correlation_id"] == request_id
+
+
+def test_general_publishes_correlated_start_before_restore_or_login_with_existing_stage_budget(routed, monkeypatch):
+    from test_latest_activity import FakeStore
+    request_id = "12345678-1234-4234-8234-123456789012"
+    context = {"GITHUB_REPOSITORY": "synthetic/slipstream",
+               "GITHUB_WORKFLOW_REF": "synthetic/slipstream/.github/workflows/refresh.yml@refs/heads/main",
+               "GITHUB_REF": "refs/heads/main", "GITHUB_SHA": "a" * 40,
+               "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_RUN_ID": "55"}
+    store = FakeStore()
+    original_restore = refresh.summary_restore.restore_with_base
+    def restore(*args, **kwargs):
+        saved = json.loads(store.get(f"refresh/requests/{request_id}.json"))
+        assert saved["run_id"] == 55 and saved["request_id"] == request_id
+        assert saved["source"]["workflow_path"] == ".github/workflows/refresh.yml"
+        assert saved["source"]["source_sha"] == "a" * 40
+        assert saved["request"]["mode"] == "general"
+        assert saved["request"]["include_granular"] is False
+        assert saved["request"]["components"] == ["summary", "health", "body"]
+        assert store.write_budget_initialized
+        return original_restore(*args, **kwargs)
+    monkeypatch.setattr(refresh.summary_restore, "restore_with_base", restore)
+    options = {**routed[3], "store_factory": lambda: store}
+    result = refresh.run(refresh.RefreshRequest(run_id="55", request_id=request_id),
+                         workflow_context=context, **options)
+    assert result["correlation_id"] == request_id
+    assert len(routed[2]) == 1
+
+
+@pytest.mark.parametrize("fields", [
+    {"scheduled": True},
+    {"health_start": "2026-10-01", "health_end": "2026-10-02"},
+    {"mode": "night", "wake_date": date.today().isoformat(), "include_granular": True},
+])
+def test_existing_non_normal_workflow_inputs_do_not_gain_a_false_bounded_receipt_or_fail(routed, fields):
+    from test_latest_activity import FakeStore
+    store = FakeStore()
+    context = {"GITHUB_REPOSITORY": "synthetic/slipstream",
+               "GITHUB_WORKFLOW_REF": "synthetic/slipstream/.github/workflows/refresh.yml@refs/heads/main",
+               "GITHUB_REF": "refs/heads/main", "GITHUB_SHA": "a" * 40,
+               "GITHUB_EVENT_NAME": "schedule" if fields.get("scheduled") else "workflow_dispatch",
+               "GITHUB_RUN_ID": "55"}
+    request = refresh.RefreshRequest(run_id="55", request_id="12345678-1234-4234-8234-123456789012", **fields)
+    report = refresh.run(request, workflow_context=context, **{**routed[3], "store_factory": lambda: store})
+    assert report["correlation_id"] == request.request_id
+    assert report["status"] == "complete"
+    key = f"refresh/requests/{request.request_id}.json"
+    if request.scheduled or request.backfill:
+        assert key not in store.objects
+    else:
+        saved = json.loads(store.get(key))
+        assert saved["request"]["include_granular"] is True
+        assert saved["request"]["mode"] == "night"
+        assert saved["request"]["components"] == ["sleep", "hrv"]

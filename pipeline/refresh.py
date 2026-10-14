@@ -24,6 +24,7 @@ from . import (
     summary_restore,
     training_sync,
 )
+from .dispatch_receipt import publish_start, valid_request_id, workflow_receipt
 from .freshness import recent_day
 from .granular import json_bytes
 from .local_bootstrap import prepare_environment
@@ -51,11 +52,14 @@ class RefreshRequest:
     backfill_end_year: str | None = None
 
     def validate(self):
+        if any(type(getattr(self, name)) is not bool for name in
+               ("scheduled", "include_granular", "new_activity_expected", "repair_only")):
+            raise ValueError("Refresh flags must be booleans")
         if self.mode not in {"general", "activity", "night"}:
             raise ValueError("Choose general, activity or night refresh")
         if not re.fullmatch(r"\d+", self.run_id):
             raise ValueError("run_id must contain digits only")
-        if self.request_id and not re.fullmatch(r"[a-f0-9-]{36}", self.request_id):
+        if self.request_id is not None and not valid_request_id(self.request_id):
             raise ValueError("Invalid request_id")
         if self.scheduled and (self.mode != "general" or self.include_granular or self.backfill):
             raise ValueError("Scheduled refresh must use the normal bounded general mode")
@@ -161,14 +165,16 @@ def _publish_diagnostics(report, *, store, run_id, original_failure):
 
 
 def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
-        login=_login, diagnostics_file: Path | None = None) -> dict:
+        login=_login, diagnostics_file: Path | None = None, workflow_context=None) -> dict:
     request.validate()  # Reject incompatible inputs before login or storage access.
+    startup = workflow_receipt(request, workflow_context)
+    startup_saved = startup is None
     data = Path(data_dir)
     baseline = data.parent / ".granular/on-demand-baseline.json"
     provider = MeasuredGarmin(login)
     began = time.perf_counter()
     report = {"schema_version": 1, "kind": "refresh-diagnostics",
-              "correlation_id": str(uuid.uuid4()), "mode": request.mode,
+              "correlation_id": request.request_id or str(uuid.uuid4()), "mode": request.mode,
               "scheduled": request.scheduled, "status": "complete", "stages": [],
               "started_at": datetime.now(timezone.utc).isoformat(), "source_checks": []}
     last_store = publication_store = None
@@ -204,7 +210,7 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
                 "failed" if not checked else "not_ready" if result["days_not_ready"] else "checked")
 
     def stage(name, operation, *, storage=True, same_budget=False):
-        nonlocal last_store, publication_store
+        nonlocal last_store, publication_store, startup_saved
         expects_source = name in {"refresh_summaries", "historical_health", "recent_health", "recent_body",
                                   "manual_activity", "latest_activity", "latest_night"} and not request.repair_only
         # Separate step budgets; one client/inventory and conservative bucket
@@ -225,6 +231,10 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
                 last_store = store
             before = dict(getattr(store, "operations", {}))
             before_timings = dict(getattr(store, "timings_ms", {}))
+            if store is not None and not startup_saved:
+                # Charge metadata to the first existing stage/root inventory.
+                publish_start(store, startup)
+                startup_saved = True
             result = operation(store)
             source_checks(result)
             if isinstance(result, dict) and result.get("status") in {
@@ -243,7 +253,7 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
         finally:
             # Stages share guarded inventory, retaining their own allowances.
             # Use the last established budget without starting a new inventory.
-            if getattr(store, "write_budget_initialized", False):
+            if startup_saved and getattr(store, "write_budget_initialized", False):
                 publication_store = store
             entry.update(elapsed_ms=round((time.perf_counter() - started) * 1000),
                          garmin_connectapi_calls=provider.calls - calls if provider.available or not expects_source else None,
@@ -268,14 +278,14 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
         if request.mode == "activity":
             stage("latest_activity", lambda store: latest_activity.run(
                 run_id=request.run_id, data_dir=str(data), lookback_days=7,
-                request_id=request.request_id, repair_only=request.repair_only,
+                request_id=request.request_id if startup is None else None, repair_only=request.repair_only,
                 requested_activity_id=request.activity_id, expected_date=request.expected_date,
                 new_activity_expected=request.new_activity_expected,
                 store=store, garmin=None if request.repair_only else provider.get(), base=base, flow_id=flow_id))
         elif request.mode == "night":
             stage("latest_night", lambda store: latest_night.run(
                 run_id=request.run_id, wake_date=request.wake_date,
-                request_id=request.request_id, store=store, garmin=provider.get()))
+                request_id=request.request_id if startup is None else None, store=store, garmin=provider.get()))
         else:
             if request.include_granular:
                 stage("activity_baseline", lambda _: manual_activity_refresh.snapshot(
@@ -334,6 +344,17 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
     return report
 
 
+def _workflow_bool(values, name, *, default=False):
+    value = values.get(name)
+    if value is None or value == "":
+        return default
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
 @safe_cli
 def main():
     parser = SafeArgumentParser(description=__doc__)
@@ -359,20 +380,20 @@ def main():
     try:
         if args.workflow:
             values = os.environ
-            activity = values.get("ACTIVITY_ONLY") == "true"
-            night = values.get("NIGHT_ONLY") == "true"
+            activity = _workflow_bool(values, "ACTIVITY_ONLY")
+            night = _workflow_bool(values, "NIGHT_ONLY")
             if activity and night:
                 raise ValueError("Choose one targeted mode")
             request = RefreshRequest(
                 mode="activity" if activity else "night" if night else "general",
                 scheduled=values.get("REFRESH_EVENT") == "schedule",
-                include_granular=values.get("INCLUDE_GRANULAR") == "true",
+                include_granular=_workflow_bool(values, "INCLUDE_GRANULAR"),
                 run_id=values["GITHUB_RUN_ID"], request_id=values.get("SYNC_REQUEST_ID") or None,
                 wake_date=values.get("LATEST_WAKE_DATE") or None,
-                repair_only=values.get("LATEST_R2_ONLY") == "true",
+                repair_only=_workflow_bool(values, "LATEST_R2_ONLY"),
                 activity_id=values.get("LATEST_ACTIVITY_ID") or None,
                 expected_date=values.get("LATEST_EXPECTED_DATE") or None,
-                new_activity_expected=values.get("LATEST_NEW_ACTIVITY_EXPECTED") != "false",
+                new_activity_expected=_workflow_bool(values, "LATEST_NEW_ACTIVITY_EXPECTED", default=True),
                 health_start=values.get("HEALTH_START") or None, health_end=values.get("HEALTH_END") or None,
                 backfill_start_year=values.get("BACKFILL_START_YEAR") or None,
                 backfill_end_year=values.get("BACKFILL_END_YEAR") or None)
@@ -387,7 +408,8 @@ def main():
         request.validate()
         if not args.workflow:
             prepare_environment(args.env_file)
-        run(request, data_dir=args.data_dir, diagnostics_file=args.diagnostics_file)
+        run(request, data_dir=args.data_dir, diagnostics_file=args.diagnostics_file,
+            workflow_context=os.environ if args.workflow else None)
     except (KeyError, ValueError) as exc:
         parser.error(str(exc))
 

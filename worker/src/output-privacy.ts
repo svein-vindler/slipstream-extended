@@ -2,7 +2,7 @@
 import { McpServer, type JSONRPCMessage, type Transport } from "@modelcontextprotocol/server";
 import { ApplicationToolError, takeApplicationError } from "./application-errors";
 import { PayloadTooLargeError } from "./security";
-import { GitHubRequestError } from "./github";
+import { GitHubRequestError, WORKFLOW_RUNS_UNVERIFIED } from "./github";
 import { syncStatus, latency } from "./sync-status";
 
 export function errorCategory(error: unknown): string {
@@ -30,12 +30,15 @@ function safeToolResult(result: Record<string, unknown>, guidance?: ApplicationT
     }
     // Existing application status/latency are deliberately carried only by those callbacks.
     // Generic SDK errors do not supply these fields.
-    if (REFRESH_FAILURES.has(source.message as string)) {
+    const unverifiedDiscovery = source.message === WORKFLOW_RUNS_UNVERIFIED;
+    if (unverifiedDiscovery || REFRESH_FAILURES.has(source.message as string)) {
       value.message = source.message;
-      value.sync_status = syncStatus({
+      const status = syncStatus({
         kind: "accepted" in value ? "general" : "unknown",
-        reason: "accepted" in value ? "configuration_error" : "status_error",
+        reason: unverifiedDiscovery ? undefined : "accepted" in value ? "configuration_error" : "status_error",
       });
+      if (unverifiedDiscovery && !("accepted" in value)) status.job_state = "unknown";
+      value.sync_status = status;
       value.latency = latency(null);
     } else {
       value.message = TOOL_FAILURE;

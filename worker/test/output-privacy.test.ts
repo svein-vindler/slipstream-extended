@@ -9,6 +9,25 @@ import { PayloadTooLargeError } from "../src/security";
 
 const marker = "SYNTHETIC_PRIVATE token email@example.invalid activity date key GPS health\n" + "x".repeat(1000);
 const logs: unknown[][] = [];
+for (const field of ["accepted", "available"]) {
+  it(`projects unverified discovery without trusting supplied status or private extras: ${field}`, () => {
+    const safe = safeMcpMessage({ jsonrpc: "2.0", id: 1, result: { isError: true,
+      content: [{ type: "text", text: marker }], structuredContent: {
+        [field]: false, terminal: true, data_ready: false, should_continue_polling: false,
+        message: "GitHub workflow-run discovery could not be verified.",
+        sync_status: { job_state: "completed", data_state: "ready", private: marker },
+        latency: { private: marker }, private: marker,
+      } } });
+    expect(JSON.stringify(safe)).not.toContain(marker);
+    expect("result" in safe).toBe(true);
+    if (!("result" in safe)) throw new Error("Expected a tool result");
+    const value = safe.result.structuredContent as Record<string, unknown>;
+    expect(value.sync_status).toMatchObject({ job_state: field === "accepted" ? "not_started" : "unknown",
+      job_conclusion: null, data_state: "unknown", user_action_required: false, next_action: "retry_later" });
+    expect(value).not.toHaveProperty("private");
+    expect(JSON.parse((safe.result.content as Array<{ text: string }>)[0].text)).toEqual(value);
+  });
+}
 beforeEach(() => {
   logs.length = 0; verifyAccessRequest.mockReset();
   vi.spyOn(console, "error").mockImplementation((...args) => { logs.push(args); });

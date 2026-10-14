@@ -20,3 +20,11 @@ execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
 execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
   "scripts/build_coach_versions_contract.py", "worker/test-runtime/generated/coach-versions.json",
 ], { cwd: root, stdio: "inherit" });
+
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_dispatch_contract.py", "worker/test-runtime/generated/dispatch-contract.json",
+], { cwd: root, stdio: "inherit" });
+
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_source_status_contract.py", "worker/test-runtime/generated/source-status-contract.json",
+], { cwd: root, stdio: "inherit" });
