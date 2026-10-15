@@ -517,3 +517,22 @@ duplicate requests, travel/DST dates and a source edit. Check source age,
 package ID, missing components, bounded requests and warm-worker reads. Observe
 a representative run before considering promotion to the independent public
 history. Do not enable the data-producing workflow in the public source repo.
+
+
+### Component failure coverage
+
+Recent body-composition refreshes distinguish a verified empty dayview from
+wrong-date, malformed or incomplete measurement data. Only the verified empty
+dayview is a successful not-ready check. Invalid measurements keep the previous
+good object and successful checkpoint, and contribute a source error to the
+existing refresh diagnostics. Missing weight or measurement time is unverified;
+a legitimate zero in another measurement field remains zero.
+
+Fatal login, source or transport errors may leave startup evidence and diagnostics
+without a complete terminal report. Such a request remains unverified through
+the existing correlation guard: it does not establish a new successful source
+check or justify another dispatch. Stored data and their prior check time remain
+separate evidence. The synthetic source-status contract tests exercise these
+cases, combined health/body errors, and a complete general component sequence
+through both MCP JSON and SSE; they do not attest live SDK transport, every
+optional training source, or production recovery.

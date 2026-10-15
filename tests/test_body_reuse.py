@@ -159,6 +159,7 @@ def test_partial_invalid_or_wrong_date_preserves_previous_data_and_success_check
     client.reset()
     result = refresh()
     assert result["status"] == "partial" and result["days_not_ready"] == 1
+    assert result["source_errors"] == (0 if defect == "empty" else 1)
     assert all(client.objects[key] == value for key, value in before.items())
     assert canonical() not in client.writes and check() not in client.writes
 
