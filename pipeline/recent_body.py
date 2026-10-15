@@ -49,8 +49,10 @@ def run(*, max_days: int = 3, health_csv: bytes | None = None, store=None, garmi
             continue
         try:
             records.append(store_day(store, STREAM, day, raw))
-        except HealthNotReady:
+        except HealthNotReady as exc:
             not_ready += 1
+            if exc.status != "garmin_not_ready":
+                failures += 1
     # Optional compact indexes retain every actual measurement and source revision.
     # Storage/budget failures propagate and leave failed scope checks unchanged.
     finalize_days(store, STREAM, records)

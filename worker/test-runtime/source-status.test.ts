@@ -90,7 +90,7 @@ async function call(name: string, values: unknown, protocol: string) {
 
 
 for (const protocol of ["2025-03-26", "2026-07-28"]) for (const fixture of contract.cases) {
-  it("keeps actual " + fixture.mode + "/" + fixture.outcome + " source provenance through " + protocol, async () => {
+  it("keeps actual " + fixture.mode + "/" + fixture.outcome + " source provenance through " + protocol, async ({ task }) => {
     for (const [key, value] of Object.entries(fixture.objects))
       await env.SLIPSTREAM_DATA.put(key, JSON.stringify(value));
     const receipt = fixture.objects["refresh/requests/" + fixture.request_id + ".json"];
@@ -104,27 +104,65 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) for (const fixture of contr
     } else {
       await runInDurableObject(coordinator, instance => {
         const uuid = vi.spyOn(crypto, "randomUUID").mockReturnValue(fixture.request_id);
-        try { instance.beginFresh("night/" + DAY, "night", JSON.stringify({ kind: "night", date: DAY }), NOW, false, descriptor); }
+        try { instance.beginFresh(receipt.request.scope!, fixture.mode as "activity" | "night",
+            JSON.stringify({ kind: fixture.mode, date: DAY, ...(fixture.mode === "activity" ? { activityId: "1" } : {}) }), NOW, false, descriptor); }
         finally { uuid.mockRestore(); }
       });
       operation = (await coordinator.dispatchOperation(fixture.request_id))!;
     }
     await coordinator.mergeDispatchPost(operation, { kind: "ack_candidate", run_id: fixture.run_id }, NOW);
-    provider = async () => Response.json({ id: fixture.run_id, status: "completed", conclusion: "success",
+    provider = async () => Response.json({ id: fixture.run_id, status: "completed", conclusion: fixture.job_conclusion,
       event: "workflow_dispatch", path: ".github/workflows/refresh.yml", repository: { full_name: "synthetic/slipstream" },
       head_repository: { full_name: "synthetic/slipstream" }, head_branch: "main", head_sha: "a".repeat(40),
       created_at: new Date(NOW).toISOString(), updated_at: null,
       html_url: "https://github.com/synthetic/slipstream/actions/runs/" + fixture.run_id });
     const result = await call("refresh_status", { request_id: fixture.request_id }, protocol);
+    task.meta.c10Resources = { outcome: fixture.outcome, mode: fixture.mode, protocol, counts: { ...counts },
+      current_checked: result.sync_status.current_job_source_checked, data_state: result.sync_status.data_state };
     expect(outputSchemas.refresh_status.safeParse(result).success).toBe(true);
-    const bad = ["wrong_date", "invalid_response", "source_error"].includes(fixture.outcome);
+    if (fixture.fatal) {
+      expect(result).toMatchObject({ terminal: false, should_continue_polling: false,
+        dispatch_status: { state: "candidate", duplicate_guard_held: true },
+        sync_status: { job_state: "unknown", current_job_source_checked: null, current_job_source_checked_at: null } });
+      expect(result.data_ready).toBe(false);
+      expect(result.sync_status.data_state).not.toBe("source_pending");
+      expect(fixture.diagnostic.status).toBe("failed");
+      expect(fixture.diagnostic.source_checks.some(check => check.checked === false && check.outcome === "failed")).toBe(true);
+      expect(fixture.objects).not.toHaveProperty("refresh/reports/" + fixture.run_id + ".json");
+      expect(fixture.canonical_bytes_preserved).toBe(true);
+      expect(counts.github_post).toBe(0); expect(counts.github_get).toBe(1);
+      expect(counts.r2_control_get).toBe(3); expect(counts.r2_put).toBe(0);
+      return;
+    }
+    const bad = ["wrong_date", "invalid_response", "source_error", "body_wrong_date", "body_invalid_response",
+      "body_unknown", "body_missing_weight", "body_missing_time", "both_errors", "summary_schema"].includes(fixture.outcome);
     expect(result).toMatchObject({ terminal: true, data_ready: fixture.mode === "general" || fixture.outcome === "valid",
       dispatch_status: { state: "verified_terminal", duplicate_guard_held: false },
       sync_status: { kind: fixture.mode, job_state: "completed", source_checked: !bad, current_job_source_checked: !bad,
         current_job_source_checked_at: bad ? null : "2026-10-14T12:00:00+00:00",
-        data_state: bad ? "error" : fixture.outcome === "pending" ? "source_pending" : fixture.mode === "night" ? "ready" : "unknown" } });
+        data_state: bad ? "error" : ["pending", "body_pending", "mixed_pending"].includes(fixture.outcome) ? "source_pending" : fixture.mode === "night" ? "ready" : "unknown" } });
     expect(fixture.canonical_bytes_preserved).toBe(true);
-    if (bad) expect(fixture.checkpoint_bytes_preserved["refresh/checks/v1/night/" + DAY + ".json"]).toBe(true);
+    if (fixture.outcome === "body_valid") {
+      const day = fixture.objects["health/body-composition/v1/2026/10/" + DAY + ".json"];
+      expect(day.measurements[0]).toMatchObject({ weight_kg: 80, body_fat_percent: 0, muscle_mass_kg: 60.1,
+        timestamp_local: DAY + "T07:00:00", source_type: "MANUAL" });
+      expect(day.measurements[1].body_fat_percent).toBeNull();
+    }
+    if (fixture.outcome === "full_valid") {
+      expect(fixture.diagnostic.source_checks.map(check => check.scope)).toEqual(
+        ["activities_summary", "health_summary", "sleep", "hrv", "body"]);
+      expect(fixture.diagnostic.source_checks.every(check => check.checked)).toBe(true);
+    }
+    if (fixture.outcome === "both_errors") {
+      expect(fixture.diagnostic.source_checks.filter(check => check.outcome === "failed").map(check => check.scope))
+        .toEqual(["sleep", "body"]);
+      expect(fixture.checkpoint_bytes_preserved["refresh/checks/v1/night/" + DAY + ".json"]).toBe(true);
+    }
+    if (bad) expect(fixture.checkpoint_bytes_preserved[fixture.outcome === "summary_schema"
+      ? "refresh/checks/v1/summary/health/reconciliation.json"
+      : (fixture.outcome.startsWith("body_") || fixture.outcome === "both_errors")
+      ? "refresh/checks/v1/health/body_composition/" + DAY + ".json"
+      : "refresh/checks/v1/night/" + DAY + ".json"]).toBe(true);
     if (fixture.mode === "night" && bad)
       expect(result.sync_status.stored_source_checked_at).toBe("2026-10-14T11:50:00+00:00");
     expect(counts.github_post).toBe(0); expect(counts.github_get).toBe(1); expect(counts.r2_control_get).toBe(3);

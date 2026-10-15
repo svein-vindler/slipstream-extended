@@ -68,11 +68,11 @@ def _body_day(day: str, raw: dict[str, Any]) -> dict[str, Any]:
     if any(not any((weight := _number(item.get(key))) is not None and weight > 0
                    for key in ("weight", "value")) for item in items):
         # An aggregate max/min/latest value is not an individual dayview sample.
-        raise HealthNotReady()
+        raise HealthNotReady("invalid_response")
     try:
         payload = normalize_body_composition(day, {"dateWeightList": items})
     except ValueError as exc:
-        raise HealthNotReady() from exc
+        raise HealthNotReady("invalid_response") from exc
     if len(payload["measurements"]) != len(items) or any(
         item["is_daily_average"]
         or (weight := _number(item["weight_kg"])) is None or weight <= 0
@@ -80,7 +80,7 @@ def _body_day(day: str, raw: dict[str, Any]) -> dict[str, Any]:
                    for key in ("timestamp_gmt", "timestamp_local"))
         for item in payload["measurements"]
     ):
-        raise HealthNotReady()
+        raise HealthNotReady("invalid_response")
     for item in payload["measurements"]:
         for key in ("timestamp_gmt", "timestamp_local"):
             value = item[key]
