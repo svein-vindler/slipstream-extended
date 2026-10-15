@@ -271,6 +271,10 @@ def normalize_strength_session(activity_id: str, exercise_sets: Any) -> dict[str
             "exercises", "duration", "repetitionCount", "weight", "setType",
             "startTime", "wktStepIndex", "messageIndex",
         }
+        if any(key not in known and value is not None
+               and not isinstance(value, (str, int, float, bool))
+               for key, value in row.items()):
+            raise ValueError("Unsupported strength metric shape.")
         performance_metrics = {
             key: _json_safe(value) for key, value in row.items()
             if key not in known and value is not None

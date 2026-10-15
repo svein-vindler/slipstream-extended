@@ -96,6 +96,14 @@ export class GitHubRequestError extends Error {
 }
 
 export const WORKFLOW_RUNS_UNVERIFIED = "GitHub workflow-run discovery could not be verified.";
+export const GITHUB_READ_UNVERIFIED = "GitHub workflow-run response could not be verified.";
+
+export class GitHubReadError extends Error {
+  constructor(readonly reason: "timeout" | "size" | "read" | "json" | "cleanup") {
+    super(GITHUB_READ_UNVERIFIED);
+    this.name = "GitHubReadError";
+  }
+}
 
 export class GitHubWorkflowRunsEnvelopeError extends Error {
   constructor() {
@@ -110,16 +118,73 @@ async function githubJson(
   init: RequestInit,
   fetcher: Fetcher,
 ): Promise<unknown> {
-  const response = await fetcher(`https://api.github.com${path}`, {
-    ...init,
-    headers: { ...headers(config), ...init.headers },
-  });
-  if (!response.ok) {
-    throw new GitHubRequestError(response.status, init.method ?? "GET",
+  // GET-only seam. The separate dispatch POST implementation is unchanged.
+  const controller = new AbortController();
+  let response: Response | undefined;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let closed: Promise<void> | undefined, canceled: Promise<void> | undefined;
+  let closedFailed = false;
+  let failure: GitHubReadError | GitHubRequestError | undefined;
+  const cancelBody = () => {
+    if (canceled) return;
+    try {
+      if (!response?.body) return;
+      canceled = Promise.resolve(reader ? reader.cancel() : response.body.cancel()).catch(() => {
+        failure ??= new GitHubReadError("cleanup");
+      });
+    } catch {
+      failure ??= new GitHubReadError("cleanup");
+      canceled = Promise.resolve();
+    }
+  };
+  const timer = setTimeout(() => {
+    failure ??= new GitHubReadError("timeout");
+    controller.abort();
+    cancelBody();
+  }, 15_000);
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    response = await fetcher(`https://api.github.com${path}`, {
+      ...init, signal: controller.signal,
+      headers: { ...headers(config), ...init.headers },
+    });
+    if (failure) throw failure;
+    if (!response.ok) throw new GitHubRequestError(response.status, init.method ?? "GET",
       `GitHub Actions request failed with HTTP ${response.status}.`);
+    if (response.body) {
+      reader = response.body.getReader();
+      closed = reader.closed.catch(() => { closedFailed = true; });
+      while (true) {
+        const { done, value } = await reader.read();
+        if (failure) throw failure;
+        if (done) break;
+        total += value.byteLength;
+        if (total > 4_194_304) throw new GitHubReadError("size");
+        chunks.push(value);
+      }
+    }
+    // I/O is complete. Parsing/cleanup have no elapsed-time acceptance deadline.
+    clearTimeout(timer);
+  } catch (error) {
+    failure ??= error instanceof GitHubRequestError || error instanceof GitHubReadError
+      ? error : new GitHubReadError("read");
+    controller.abort();
+    cancelBody();
+  } finally {
+    clearTimeout(timer);
+    await canceled;
+    await closed;
+    if (closedFailed) failure ??= new GitHubReadError("cleanup");
+    try { reader?.releaseLock(); } catch { failure ??= new GitHubReadError("cleanup"); }
   }
-  if (response.status === 204) return null;
-  return response.json() as Promise<unknown>;
+  if (failure) throw failure;
+  if (response?.status === 204) return null;
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  try { return JSON.parse(new TextDecoder().decode(bytes)) as unknown; }
+  catch { throw new GitHubReadError("json"); }
 }
 
 function asObject(value: unknown): Record<string, unknown> | null {

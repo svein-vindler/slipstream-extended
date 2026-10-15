@@ -61,6 +61,8 @@ def _score_breakdown(dto: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(item, dict):
             continue
         qualifier = _first(item, "qualifierKey", "qualifier")
+        if qualifier is not None and not isinstance(qualifier, (str, int, float, bool)):
+            raise ValueError("Unsupported sleep qualifier shape.")
         result[str(name)] = {
             "value": _number(item.get("value"), 1),
             "qualifier": str(qualifier) if qualifier is not None else None,

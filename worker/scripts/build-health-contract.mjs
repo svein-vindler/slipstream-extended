@@ -28,3 +28,7 @@ execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
 execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
   "scripts/build_source_status_contract.py", "worker/test-runtime/generated/source-status-contract.json",
 ], { cwd: root, stdio: "inherit" });
+
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_scalar_leaf_contract.py", "worker/test-runtime/generated/scalar-leaf-contract.json",
+], { cwd: root, stdio: "inherit" });

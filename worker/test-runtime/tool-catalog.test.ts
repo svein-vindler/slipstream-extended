@@ -75,11 +75,37 @@ it.each([false, true])("preserves the complete tool contracts with writes=%s", a
   const tools = modes.find(mode => mode.writes === writes && mode.refresh)!.tools;
   expect(tools.some((tool: { name: string }) => tool.name === "add_coach_profile")).toBe(writes);
   expect(tools.some((tool: { name: string }) => tool.name === "add_activity_context")).toBe(writes);
-  // Captured against the pre-refactor Worker: includes order, descriptions,
-  // titles, input/output schemas and safety annotations, with no fitness data.
+  // Includes order, descriptions, titles, input/output schemas and safety
+  // annotations, including D4's scalar metric schema, with no fitness data.
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(tools)));
   const hash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
   expect({ writes, count: tools.length, hash }).toMatchSnapshot();
+});
+
+it("advertises the D4 scalar metric contract in every registration mode", () => {
+  for (const mode of modes) {
+    const schema = requireTool(mode.tools, "strength_session").outputSchema as {
+      properties: { session: { properties: { sets: { items: {
+        properties: { performance_metrics: Record<string, unknown> };
+      } } } } };
+    };
+    expect(schema.properties.session.properties.sets.items.properties.performance_metrics).toEqual({
+      type: "object", propertyNames: { type: "string" },
+      additionalProperties: { type: ["number", "string", "boolean", "null"] },
+    });
+  }
+});
+
+it.each([false, true])("preserves catalog bytes apart from D4 metric leaves with writes=%s", async writes => {
+  const tools = structuredClone(modes.find(mode => mode.writes === writes && mode.refresh)!.tools);
+  const schema = requireTool(tools, "strength_session").outputSchema as {
+    properties: { session: { properties: { sets: { items: { properties: Record<string, unknown> } } } } };
+  };
+  schema.properties.session.properties.sets.items.properties.performance_metrics = {};
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(tools)));
+  const hash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  expect(hash).toBe(writes ? "9f7e7b632e8e66689d53556face47c1462807b67cf22b79eda596e5b19a7c3ed"
+    : "4b5b79ece31af172cecbae456f4b4b2916cd525686eddfb905912aece445085e");
 });
 
 it.each([false, true])("preserves previous contracts apart from reviewed optional and D1 detail outputs with writes=%s", async writes => {

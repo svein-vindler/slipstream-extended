@@ -74,7 +74,7 @@ export const sleepDetailSourceSchema = z.object({
   confirmed: z.boolean().nullish(),
   summary: sleepDetailSummarySchema,
   // Names remain dynamic. Already-stringified producer qualifiers remain strings;
-  // their original upstream type cannot be recovered here (deferred D4).
+  // their original upstream type cannot be recovered here.
   score_breakdown: z.record(z.string(), sleepDetailScoreSchema).nullish(),
   stages: z.array(sleepDetailStageSchema).nullish(),
 });
@@ -105,6 +105,27 @@ const strengthDimensions = z.preprocess((value, context): Record<string, Strengt
   // Creates own data properties even for __proto__, without invoking its setter.
   return Object.fromEntries(entries);
 }, z.unknown()).meta(strengthDimensionsJsonSchema);
+const strengthMetricScalar = z.union([z.number().finite(), z.string(), z.boolean(), z.null()]);
+type StrengthMetricScalar = z.infer<typeof strengthMetricScalar>;
+const { $schema: _strengthMetricDialect, ...strengthMetricsJsonSchema } =
+  z.toJSONSchema(z.record(z.string(), strengthMetricScalar));
+// Validate every leaf without record parsing, preserving all literal data keys.
+const strengthMetrics = z.preprocess((value, context): Record<string, StrengthMetricScalar> => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    context.addIssue({ code: "custom", message: "Unsupported strength metric shape." });
+    return z.NEVER;
+  }
+  const entries: Array<[string, StrengthMetricScalar]> = [];
+  for (const [name, leaf] of Object.entries(value)) {
+    const parsed = strengthMetricScalar.safeParse(leaf);
+    if (!parsed.success) {
+      context.addIssue({ code: "custom", message: "Unsupported strength metric shape." });
+      return z.NEVER;
+    }
+    entries.push([name, parsed.data]);
+  }
+  return Object.fromEntries(entries);
+}, z.unknown()).meta(strengthMetricsJsonSchema);
 export const strengthSessionSchema = z.object({
   schema_version: detailNumber.optional(), activity_id: text.optional(),
   sets: z.array(z.object({
@@ -115,11 +136,7 @@ export const strengthSessionSchema = z.object({
     repetitions: detailNumber.optional(), weight_kg: detailNumber.optional(),
     active_duration_seconds: detailNumber.optional(), rest_after_seconds: detailNumber.optional(),
     start_time: detailClock.optional(), workout_step_index: detailNumber.optional(),
-    // D4 remains open: preserve all scalar names AND existing opaque extensions.
-    // This is structural projection, not a claim of closed metric leaf shapes.
-    // Validate only the map container; record parsing would rewrite literal keys.
-    performance_metrics: z.unknown().refine(value => value !== null
-      && typeof value === "object" && !Array.isArray(value)).optional(),
+    performance_metrics: strengthMetrics.optional(),
   })).optional(),
   summary: z.object({
     active_sets: detailNumber.optional(), total_repetitions: detailNumber.optional(),

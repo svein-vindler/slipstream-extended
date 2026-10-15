@@ -123,6 +123,21 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     task.meta.envelope = { counts: structuredClone(counts), result };
   });
   for (const name of ["refresh_today", "refresh_status"]) {
+    for (const fault of ["size", "read", "json"]) {
+      it(`keeps failed GET ${fault} unknown without dispatch in ${name} ${protocol}`, async ({ task }) => {
+        provider = async () => fault === "size"
+          ? new Response('{"workflow_runs":[]}'.padEnd(4_194_305), { headers: { "content-length": "1" } })
+          : fault === "json" ? new Response("SYNTHETIC_PROVIDER_TEXT")
+            : new Response(new ReadableStream({ start(controller) { controller.error(new Error("SYNTHETIC_PROVIDER_TEXT")); } }));
+        const result = await call(name, {}, protocol, true);
+        expect(result.sync_status).toMatchObject({ job_state: name === "refresh_today" ? "not_started" : "unknown",
+          data_state: "unknown", user_action_required: false, next_action: "retry_later" });
+        expect(counts.github_get).toBe(1); expect(counts.github_post).toBe(0);
+        expect(await coordinator.activeDispatch("general-refresh")).toBeNull();
+        task.meta.d2 = { counts: structuredClone(counts), fault,
+          delivered_body_bytes: fault === "size" ? 4_194_305 : fault === "json" ? 23 : 0, result };
+      });
+    }
     it(`keeps unverified discovery unknown without dispatch in ${name} ${protocol}`, async ({ task }) => {
       provider = async () => Response.json({ SYNTHETIC_PROVIDER_TEXT: "not a run-list envelope" });
       const result = await call(name, {}, protocol, true);
