@@ -1,4 +1,4 @@
-/** Authenticated D1/X0 detail contracts. D4 compatibility holes are explicit below. */
+/** Authenticated D1/X0 projection and D4 scalar-leaf contracts. */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeAll, beforeEach, afterEach, expect, it, vi } from "vitest";
@@ -7,7 +7,9 @@ import worker from "../src/index";
 import { outputSchemas } from "../src/mcp-output";
 import { clearSummaryCaches } from "../src/r2-storage";
 import strengthLabelJson from "./generated/strength-label-contract.json?raw";
+import scalarLeafJson from "./generated/scalar-leaf-contract.json?raw";
 const strengthLabels = JSON.parse(strengthLabelJson);
+const scalarLeaves = JSON.parse(scalarLeafJson);
 
 const DAY = "2026-09-30", OTHER_DAY = "2026-10-01";
 const HRV = "health/hrv/2026/09/2026-09-30.json";
@@ -434,29 +436,60 @@ for (const protocol of ["2026-07-28", "2025-03-26"]) {
     const expected = fit().normalized_strength_session; expected.sets[0].repetitions = "12";
     expect(success(reply, outputSchemas.strength_session).session).toEqual(expected);
   });
-  contractTest(`${protocol}: D4 deferred compatibility preserves opaque metric extensions`, async () => {
+  contractTest(`${protocol}: D4 rejects opaque metric extensions`, async () => {
     const source = fit(); source.normalized_strength_session.sets[0].performance_metrics = {
       future_scalar_zero: 0, future_scalar_false: false, future_scalar_text: "scalar", future_scalar_null: null,
-      future_opaque: { original: ["synthetic extension", { value: 1 }] },
+      future_opaque: { original: [MARKER, { value: 1 }] },
     };
     await put(FIT, source); await initialize(protocol);
-    const output = success(await call(protocol, "strength_session", { activity_id: "123" }), outputSchemas.strength_session);
-    expect(output.session.sets[0].performance_metrics).toEqual(source.normalized_strength_session.sets[0].performance_metrics);
+    controlledError(await call(protocol, "strength_session", { activity_id: "123" }));
   });
-  contractTest(`${protocol}: D4 deferred compatibility preserves already-stringified qualifiers`, async () => {
+  contractTest(`${protocol}: D4 preserves already-stringified qualifiers`, async () => {
     const source = sleep(); source.score_breakdown.overall.qualifier = JSON.stringify({ original: ["synthetic extension"] });
     await put(SLEEP, source); await initialize(protocol);
     expect(success(await call(protocol, "sleep_detail", { date: DAY }), outputSchemas.sleep_detail).score_breakdown)
       .toEqual(source.score_breakdown);
   });
-  contractTest(`${protocol}: D4 deferred compatibility preserves literal metric names without record rewriting`, async () => {
+  contractTest(`${protocol}: D4 preserves literal scalar metric names without record rewriting`, async () => {
     const source = fit();
     source.normalized_strength_session.sets[0].performance_metrics = JSON.parse(
-      '{"__proto__":{"original":["synthetic extension"]},"constructor":0,"future_scalar":null}');
+      '{"__proto__":false,"constructor":0,"future_scalar":null,"numeric_text":"0","empty_text":""}');
     await put(FIT, source); await initialize(protocol);
     const output = success(await call(protocol, "strength_session", { activity_id: "123" }), outputSchemas.strength_session);
     expect(output.session.sets[0].performance_metrics).toEqual(source.normalized_strength_session.sets[0].performance_metrics);
     expect(Object.getPrototypeOf({})).not.toHaveProperty("original");
+  });
+  for (const name of ["__proto__", "constructor", "future_metric"]) {
+    for (const value of [{ private: MARKER }, [MARKER], {}, []]) {
+      contractTest(`${protocol}: D4 rejects compound ${name} metric ${JSON.stringify(value)}`, async () => {
+        const source = fit();
+        source.normalized_strength_session.sets[0].performance_metrics = Object.fromEntries([[name, value]]);
+        await put(FIT, source); await initialize(protocol);
+        controlledError(await call(protocol, "strength_session", { activity_id: "123" }));
+      });
+    }
+  }
+  contractTest(`${protocol}: D4 preserves actual Python producer strength scalars and literal dimensions`, async () => {
+    const source = fit(); source.normalized_strength_session = scalarLeaves.strength;
+    await put(FIT, source); await initialize(protocol);
+    const reply = await call(protocol, "strength_session", { activity_id: "123" });
+    const output = success(reply, outputSchemas.strength_session);
+    expect(output.session).toEqual(scalarLeaves.strength);
+    for (const channel of [output, JSON.parse(reply.result.content[0].text)]) {
+      expect(Object.hasOwn(channel.session.sets[0].performance_metrics, "__proto__")).toBe(true);
+      expect(channel.session.sets[0].performance_metrics).toEqual(JSON.parse(
+        '{"avgConcentricMeanVelocity":0.42,"tal_grit":null,"__proto__":0,"constructor":false,"future_numeric_text":"0","future_text":"scalar","future_true":true}'));
+    }
+  });
+  contractTest(`${protocol}: D4 preserves actual Python producer sleep qualifier scalars and history`, async () => {
+    await put(SLEEP, scalarLeaves.sleep); await initialize(protocol);
+    const output = success(await call(protocol, "sleep_detail", { date: DAY }), outputSchemas.sleep_detail);
+    expect(output.score_breakdown).toEqual(scalarLeaves.sleep.score_breakdown);
+    expect(output.score_breakdown.future_numeric_qualifier).toEqual({ value: 0, qualifier: "0" });
+    expect(output.score_breakdown.future_boolean).toEqual({ value: 0, qualifier: "False" });
+    expect(output.score_breakdown.future_history.qualifier).toBe("{'historical': ['synthetic text']}");
+    expect(output).toMatchObject({ wake_date: DAY, night_of: "2026-09-29",
+      sleep_start_local: "2026-09-29T23:30:00+02:00", local_time_source: "garmin_local" });
   });
   const badStructures: Array<[string, string, string, unknown]> = [
     ["HRV root", HRV, "hrv_curve", [MARKER]],

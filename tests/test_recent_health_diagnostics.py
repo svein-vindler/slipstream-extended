@@ -113,6 +113,8 @@ def test_unknown_sleep_shape_is_not_a_verified_empty_response(entry):
         ("sleep", "wrong_date"),
         ("sleep", "conflicting_date"),
         ("sleep", "invalid_date"),
+        ("sleep", "compound_qualifier_object"),
+        ("sleep", "compound_qualifier_list"),
         ("hrv", "unknown"),
         ("hrv", "partial"),
         ("hrv", "wrong_date"),
@@ -145,6 +147,10 @@ def test_unverified_source_shapes_preserve_good_data_and_check_times(entry, stre
     elif case == "invalid_date":
         raw = source._fetch(stream, DAY)
         raw["dailySleepDTO"]["calendarDate"] = ""
+    elif case.startswith("compound_qualifier_"):
+        raw = source._fetch(stream, DAY)
+        qualifier = {"private": "D4_SYNTHETIC_MARKER"} if case.endswith("object") else []
+        raw["dailySleepDTO"]["sleepScores"] = {"future_score": {"value": 0, "qualifierKey": qualifier}}
     else:
         raw = source._fetch(stream, DAY)
         raw["dailySleepDTO" if stream == "sleep" else "hrvSummary"]["calendarDate"] = "2026-09-29"

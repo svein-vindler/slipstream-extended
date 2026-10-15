@@ -42,7 +42,7 @@ import { exactDate, dateRange, PRIVATE_READ_TOOL_ANNOTATIONS } from "./tool-cont
 import {
   RefreshConfig, RefreshRun, dispatchRefresh,
   latestRefreshRun, pollRefreshRun,
-  GitHubWorkflowRunsEnvelopeError, WORKFLOW_RUNS_UNVERIFIED,
+  GitHubWorkflowRunsEnvelopeError, WORKFLOW_RUNS_UNVERIFIED, GitHubReadError, GITHUB_READ_UNVERIFIED,
   refreshDecision, refreshProgress,
 } from "./github";
 import { RefreshCoordinator } from "./refresh-coordinator";
@@ -550,10 +550,10 @@ class FitnessService {
         if (owned && operation) return this.text(await this.ownedGeneralStatus(operation, "shared", true));
         await coordinator.release("refresh-today", lease.token);
         console.error(JSON.stringify({ message: "Could not request Garmin refresh", error: errorCategory(error) }));
-        const unverifiedDiscovery = error instanceof GitHubWorkflowRunsEnvelopeError;
+        const unverifiedDiscovery = error instanceof GitHubWorkflowRunsEnvelopeError || error instanceof GitHubReadError;
         return { ...this.text({ accepted: false,
           message: unverifiedDiscovery
-            ? WORKFLOW_RUNS_UNVERIFIED
+            ? error instanceof GitHubReadError ? GITHUB_READ_UNVERIFIED : WORKFLOW_RUNS_UNVERIFIED
             : "Could not request the Garmin refresh. Check workflow configuration, access and service availability.",
           terminal: true, data_ready: false, should_continue_polling: false,
           sync_status: syncStatus({ kind: "general", reason: unverifiedDiscovery ? undefined : "configuration_error" }), latency: latency(null) }), isError: true };
@@ -648,7 +648,7 @@ class FitnessService {
           error: errorCategory(error),
         }));
         const status = syncStatus({ kind: "unknown", reason: "status_error" });
-        if (error instanceof GitHubWorkflowRunsEnvelopeError) {
+        if (error instanceof GitHubWorkflowRunsEnvelopeError || error instanceof GitHubReadError) {
           status.data_state = "unknown";
           status.user_action_required = false;
           status.next_action = "retry_later";
@@ -656,7 +656,8 @@ class FitnessService {
         return {
           ...this.text({
             available: false,
-            message: error instanceof GitHubWorkflowRunsEnvelopeError ? WORKFLOW_RUNS_UNVERIFIED
+            message: error instanceof GitHubReadError ? GITHUB_READ_UNVERIFIED
+              : error instanceof GitHubWorkflowRunsEnvelopeError ? WORKFLOW_RUNS_UNVERIFIED
               : "Could not read Garmin refresh status. Check workflow configuration, access and service availability.",
             terminal: true,
             data_ready: false,

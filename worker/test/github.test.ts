@@ -23,6 +23,11 @@ const RUN = {
 };
 
 describe("GitHub refresh helpers", () => {
+  it("rejects actual GET bytes above 4 MiB rather than accepting oversized run JSON", async () => {
+    const body = JSON.stringify({ ...RUN, path: ".github/workflows/refresh.yml" }).padEnd(4_194_305);
+    await expect(getRefreshRun(CONFIG, 123, async () => new Response(body)))
+      .rejects.toThrow("GitHub workflow-run response could not be verified.");
+  });
   it("rejects missing workflow-run discovery instead of reporting an empty list", async () => {
     await expect(latestRefreshRun(CONFIG, async () => Response.json({})))
       .rejects.toThrow("GitHub workflow-run discovery could not be verified.");

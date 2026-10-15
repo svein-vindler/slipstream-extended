@@ -79,11 +79,22 @@ storage/decode limits, sampling and request budgets are unchanged.
 
 These detail contracts preserve numeric strings without coercion, nulls, zero,
 units, source clocks, calendar provenance, dynamic sleep-score names and all
-strength metric names. Opaque nested `performance_metrics` extensions remain
-open for compatibility; already-stringified producer qualifiers remain strings.
-Separate tests explicitly preserve both deferred cases. This is not complete
-hardening of arbitrary extension leaves, history/index calculations, coach
-payloads or upstream producer normalization. It adds no partial-status protocol.
+strength metric names. Every `performance_metrics` leaf must be a finite number,
+string, boolean or null; compound leaves produce a controlled error. Literal
+names such as `__proto__` remain own data properties. The strength producer
+rejects compound metrics before publication. Its existing null omission and
+non-finite-number normalization to null remain unchanged.
+
+The sleep producer validates the selected qualifier's original type before
+converting a scalar to text. Alias order and scalar conversions are unchanged;
+already-stringified historical qualifiers remain strings without parsing or
+heuristic cleaning. Invalid future source shapes preserve good canonical data
+and remain errors, not confirmed absence. `tests/test_scalar_leaf_contract.py`
+checks producer/storage boundaries. `scripts/build_scalar_leaf_contract.py`
+supplies actual producer bytes to both authenticated MCP transports.
+
+This is not complete hardening of history/index calculations or coach payloads,
+and adds no partial-status protocol or historical rewrite.
 
 The existing training-context fixture builder also emits strength dimension rows
 from the actual Python normalizer. The native tests load those bytes as raw JSON
@@ -116,6 +127,20 @@ return old cached data. Additional cases cover ordered object aliases,
 missing objects, exact stored/decoded size boundaries, gzip decoding and invalid
 JSON/compressed objects. These checks preserve the reader's existing errors and
 limits when moving storage logic between modules.
+
+## GitHub GET I/O contract
+
+The refresh reader accepts at most 4,194,304 bytes actually delivered by
+`Response.body`, regardless of Content-Length. An owned 15,000 ms timer starts
+before fetch and initiates abort across headers and body. It does not promise a
+hard parsing, CPU, cleanup, settlement or return deadline. Reads and cancellation
+settle before releasing the reader and the caller's read claim. Primary failures
+win over cleanup failures; cleanup failure cannot become successful data.
+
+`worker/test-runtime/d2-get-io.test.ts` checks actual byte boundaries, delayed
+headers/body, cancellation settlement, error precedence and owned late results.
+Authenticated JSON/SSE tests require unverifiable reads to stay unknown without
+dispatch, while valid empty/positive results and HTTP 403 classification remain.
 
 ## Verified HRV absence and retry checkpoints
 
