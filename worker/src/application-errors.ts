@@ -2,6 +2,8 @@
 import type { McpServer, RequestId, ServerContext, CallToolResult } from "@modelcontextprotocol/server";
 
 const MESSAGES = {
+  profile_in_progress: "This immutable profile write is already reserved. Read coach_profile to check whether it completed; do not create another version to bypass the reservation.",
+  profile_capacity: "Coach profile capacity of 100 has been reached. Existing immutable profiles remain available.",
   calendar_date: "Invalid calendar date. Use YYYY-MM-DD with a valid calendar day.",
   reversed_dates: "start_date cannot be after end_date.",
   history_limit: "Health history is limited to 366 days per request.",

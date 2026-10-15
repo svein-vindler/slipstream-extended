@@ -70,6 +70,16 @@ calendar dates in YYYY-MM-DD format, within years 0001 through 9999. Invalid
 dates are rejected before saving or using the accepted-write allowance. This
 does not revalidate stored history or change Garmin-local date selection.
 
+
+Writer and reader support at most 100 immutable profiles. Pending or unconfirmed
+profile writes also reserve capacity. A rejected new version does not consume
+the accepted-write budget or write a profile. Repeating an already stored
+identical profile returns that version without another write. An uncertain
+write may leave fewer than 100 stored profiles while new writes stop safely;
+reservations do not automatically expire. Existing profiles remain readable
+within the supported capacity. Do not delete profile history to bypass the
+limit. An existing over-capacity installation is not automatically repaired.
+
 These example zone values demonstrate schema validity only; they are not defaults.
 
 ```json
