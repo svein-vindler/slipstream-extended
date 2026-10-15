@@ -1,3 +1,4 @@
+import { COACH_PROFILE_CAPACITY, COACH_PROFILE_SLOT_PREFIX } from "./coach-profile-capacity";
 import { DispatchOperations, type DispatchDescriptor, type DispatchIdentity, type DispatchClaim, type DispatchOperation } from "./dispatch-operations";
 import type { DispatchPostOutcome } from "./github";
 import { DurableObject } from "cloudflare:workers";
@@ -12,6 +13,10 @@ export interface BudgetedLease extends RefreshLease {
   reason?: "cooldown" | "daily_limit";
   remaining?: number;
 }
+
+export type CoachProfileLease = Omit<BudgetedLease, "reason"> & {
+  reason?: BudgetedLease["reason"] | "profile_capacity" | "profile_in_progress";
+};
 
 export type FreshJob = {
   request_id: string;
@@ -183,6 +188,41 @@ export class RefreshCoordinator extends DurableObject<Env> {
       token,
     );
     return { released: result.rowsWritten > 0 };
+  }
+
+  reserveCoachProfileWrite(
+    profileKey: string, existingKeys: string[], actorKey: string, nowMs: number, dailyLimit: number,
+  ): CoachProfileLease {
+    if (!/^coach\/profiles\/v1\/\d{4}-\d{2}-\d{2}\/hr-[a-f0-9]{24}\.json$/.test(profileKey)
+      || !Array.isArray(existingKeys) || existingKeys.length > COACH_PROFILE_CAPACITY
+      || existingKeys.some(key => typeof key !== "string" || key.length > 1024
+        || !key.startsWith("coach/profiles/v1/"))) {
+      throw new Error("Invalid coach profile reservation.");
+    }
+    return this.ctx.storage.transactionSync(() => {
+      const reserved = this.ctx.storage.sql.exec<{ token: string }>(
+        "SELECT token FROM refresh_leases WHERE lease_key GLOB ? LIMIT ?",
+        `${COACH_PROFILE_SLOT_PREFIX}*`, COACH_PROFILE_CAPACITY + 1,
+      ).toArray();
+      if (reserved.some(row => row.token === profileKey)) {
+        return { acquired: false, reason: "profile_in_progress" };
+      }
+      const occupied = new Set([...existingKeys, ...reserved.map(row => row.token)]);
+      if (occupied.size >= COACH_PROFILE_CAPACITY) {
+        return { acquired: false, reason: "profile_capacity" };
+      }
+      const writeKey = `mcp-write:${actorKey}`;
+      const lease = this.reserveBudgeted(writeKey, writeKey, nowMs, 60_000, dailyLimit);
+      if (!lease.acquired) return lease;
+      // Reuse the existing durable table, without a DO/schema migration. An
+      // immutable profile owns its slot permanently, including uncertain PUTs.
+      // Never expire/refund it while a delayed R2 write can still arrive.
+      this.ctx.storage.sql.exec(
+        "INSERT INTO refresh_leases (lease_key, token, expires_at) VALUES (?, ?, ?)",
+        `${COACH_PROFILE_SLOT_PREFIX}${profileKey}`, profileKey, Number.MAX_SAFE_INTEGER,
+      );
+      return lease;
+    });
   }
 
   reserveBudgeted(

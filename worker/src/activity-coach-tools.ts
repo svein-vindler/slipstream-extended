@@ -1,3 +1,4 @@
+import { COACH_PROFILE_CAPACITY } from "./coach-profile-capacity";
 import { readCurrentCoachInput } from "./coach-selection";
 import { resolveActivityClock } from "./activity-clock";
 import { ApplicationToolError, applicationToolResult } from "./application-errors";
@@ -57,9 +58,9 @@ export class ActivityCoachTools {
   }> {
     const listed = await this.env.SLIPSTREAM_DATA.list({
       prefix: COACH_PROFILE_PREFIX,
-      limit: 101,
+      limit: COACH_PROFILE_CAPACITY + 1,
     });
-    if (listed.truncated || listed.objects.length > 100) {
+    if (listed.truncated || listed.objects.length > COACH_PROFILE_CAPACITY) {
       throw new Error("Coach profile count exceeds the supported safety limit of 100.");
     }
     const keys = listed.objects.map((object) => object.key).sort();
@@ -106,21 +107,20 @@ export class ActivityCoachTools {
     });
   }
 
-  async reserveCoachWrite(ttlMs: number): Promise<void> {
+  async reserveCoachWrite(ttlMs: number, profile?: { key: string; keys: string[] }): Promise<void> {
     const configured = Number.parseInt(this.env.MCP_WRITE_DAILY_LIMIT, 10);
     const dailyLimit = Number.isSafeInteger(configured) && configured > 0
       ? Math.min(configured, 1000)
       : DEFAULT_MCP_WRITE_DAILY_LIMIT;
     const coordinator = this.env.REFRESH_COORDINATOR.getByName("global");
     const key = `mcp-write:${this.actorKey}`;
-    const lease = await coordinator.reserveBudgeted(
-      key,
-      key,
-      Date.now(),
-      ttlMs,
-      dailyLimit,
-    );
+    const lease = profile
+      ? await coordinator.reserveCoachProfileWrite(profile.key, profile.keys, this.actorKey, Date.now(), dailyLimit)
+      : await coordinator.reserveBudgeted(key, key, Date.now(), ttlMs, dailyLimit);
     if (!lease.acquired) {
+      if (lease.reason === "profile_capacity" || lease.reason === "profile_in_progress") {
+        throw new ApplicationToolError({ kind: lease.reason });
+      }
       const retrySeconds = Math.max(
         1, Math.ceil((lease.retryAfterMs ?? ttlMs) / 1000),
       );
@@ -428,7 +428,10 @@ export class ActivityCoachTools {
       const existing = await this.getR2Json([key]);
       if (!existing) {
         const current = await this.getCoachProfiles();
-        await this.reserveCoachWrite(COACH_PROFILE_WRITE_TTL_MS);
+        if (current.keys.length >= COACH_PROFILE_CAPACITY) {
+          throw new ApplicationToolError({ kind: "profile_capacity" });
+        }
+        await this.reserveCoachWrite(COACH_PROFILE_WRITE_TTL_MS, { key, keys: current.keys });
         await this.putSmallJson(key, profile);
         try {
           await this.updateCoachProfileIndex(
