@@ -120,6 +120,8 @@ For an explicitly requested update, `sync_latest_activity` and
 `sync_latest_night` check canonical R2 data and a recent successful source check
 before starting a targeted import. They report source age, missing components
 and readiness, and share compatible jobs. Historical read tools stay read-only.
+An acknowledged targeted job can wait for its startup receipt and queue within
+its existing three status windows; clients must honor the returned polling delay.
 See [Fresh data on request](docs/FRESH_DATA.md) for local workout/wake-date rules,
 polling limits and R2-only Coach Input repair.
 See [HRV and sleep history](docs/HEALTH_HISTORY.md) for date-range behavior,

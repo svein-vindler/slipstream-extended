@@ -431,15 +431,24 @@ describe("R2-first targeted freshness", () => {
   });
 
   it("retains an accepted dispatch when the follow-up run lookup is rejected", async () => {
-    const unavailableDetails: typeof fetch = async (_url, init) => init?.method === "POST"
-      ? Response.json({ workflow_run_id: 44 }) : new Response(null, { status: 403 });
+    let dispatches = 0, deniedLookups = 0;
+    const unavailableDetails: typeof fetch = async (_url, init) => {
+      if (init?.method === "POST") {
+        dispatches++;
+        const id = record(JSON.parse(String(init.body)).inputs).sync_request_id;
+        await writeStartup(String(id));
+        return Response.json({ workflow_run_id: 44 });
+      }
+      deniedLookups++;
+      return new Response(null, { status: 403 });
+    };
     const result = await service(unavailableDetails).request(NIGHT);
     expect(result).toMatchObject({ accepted: true, terminal: false, reason: "dispatch_unconfirmed" });
     expect(await coordinator.activeFreshJob(freshScope(NIGHT), NOW))
       .toMatchObject({ state: "active", request_id: result.request_id });
-    expect(await service().request(NIGHT)).toMatchObject({ request_id: result.request_id,
+    expect(await service(unavailableDetails).request(NIGHT)).toMatchObject({ request_id: result.request_id,
       reason: "dispatch_unconfirmed", sync_status: { job_start_confirmed: null } });
-    await writeStartup(String(result.request_id));
+    expect(dispatches).toBe(1); expect(deniedLookups).toBe(2);
     await completedReport(NIGHT); runState = { ...RUN, status: "completed", conclusion: "success" };
     expect(await service().status((await coordinator.freshJob(String(result.request_id)))!))
       .toMatchObject({ run: { id: RUN.id }, sync_status: { job_start_confirmed: true } });

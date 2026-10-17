@@ -162,12 +162,16 @@ export class FreshDataService {
   }
 
   private async json(keys: string[], small = false): Promise<Json> {
+    return await this.jsonNullable(keys, small) ?? {};
+  }
+
+  private async jsonNullable(keys: string[], small = false): Promise<Json | null> {
     const began = performance.now();
     let stored;
     try { stored = await this.reader.getR2Json(keys, small ? SMALL : undefined); }
     finally { this.diagnostics.r2_read_ms += performance.now() - began; }
     this.diagnostics.canonical_json_gets += stored ? keys.indexOf(stored.key) + 1 : keys.length;
-    return record(stored?.data);
+    return stored ? record(stored.data) : null;
   }
 
   private async list(prefix: string, limit = 100): Promise<R2Object[]> {
@@ -501,7 +505,7 @@ export class FreshDataService {
       return this.response(await this.snapshot(request), "This legacy operation has no verified dispatch record. Keep its correlation for maintainer inspection.",
         { accepted, request_id: job.request_id, terminal: false, should_continue_polling: false });
     }
-    const observed = await new DispatchReader(this.env, this.config, keys => this.json(keys, true), this.now, this.fetcher)
+    const observed = await new DispatchReader(this.env, this.config, keys => this.jsonNullable(keys, true), this.now, this.fetcher)
       .observe(operation, intent, this.actorKey);
     const snapshot = await this.snapshot(request);
     if (observed.report.source_checked === false && observed.report.kind !== "activity-repair") {
@@ -509,17 +513,32 @@ export class FreshDataService {
       if (snapshot.complete) snapshot.status = "source_stale";
     }
     if (observed.fresh && observed.run) {
+      const polling = observed.run.status !== "completed" && await this.canContinueJob(job);
       const status = syncStatus({ kind: request.kind, snapshot, run: observed.run, pipeline: observed.pipeline,
+        polling,
         sourceChecked: typeof observed.report.source_checked === "boolean" ? observed.report.source_checked : undefined,
         sourceCheckedAt: typeof observed.report.checked_at === "string" ? observed.report.checked_at : undefined });
       return this.response(snapshot, packageStatusMessage(request.kind, snapshot, status),
         { accepted, available: true, request_id: job.request_id, run: observed.run,
-          terminal: observed.operation.owner_released_at !== null, should_continue_polling: false, sync_status: status,
-          pipeline_diagnostics: observed.pipeline, dispatch_status: dispatchStatus(observed.operation),
+          terminal: observed.operation.owner_released_at !== null, should_continue_polling: polling,
+          ...(polling ? { poll_after_seconds: 25 } : {}), sync_status: status,
+          pipeline_diagnostics: observed.pipeline, dispatch_status: dispatchStatus(observed.operation, !polling),
           latency: latency(observed.run, observed.pipeline, request.requestedAt, status.data_state === "ready", this.now()),
           ...(observed.run.conclusion !== "success" ? { data_ready: false, activity_ready: request.kind === "activity" ? false : null } : {}) });
     }
     const status = syncStatus({ kind: request.kind, snapshot });
+    if (observed.awaiting_receipt && observed.operation.dispatch_state === "candidate"
+      && observed.operation.candidate_run_id !== null) {
+      if (await this.canContinueJob(job)) {
+        status.job_state = "unknown"; status.job_start_confirmed = null;
+        status.current_job_source_checked = null; status.current_job_source_checked_at = null;
+        status.polling_state = "continue"; status.next_action = "check_later";
+        return this.response(snapshot, "The dispatch is awaiting its workflow startup receipt. Check the same request after the stated delay; no new sync is needed.",
+          { accepted, available: false, request_id: job.request_id, terminal: false, data_ready: false,
+            should_continue_polling: true, poll_after_seconds: 25, reason: "awaiting_startup_receipt",
+            sync_status: status, dispatch_status: dispatchStatus(observed.operation, false) });
+      }
+    }
     if (observed.operation.dispatch_state === "verified_terminal") {
       const success = observed.operation.last_observation?.conclusion === "success";
       status.job_state = success ? "completed" : "failed";
@@ -544,5 +563,11 @@ export class FreshDataService {
     return this.response(snapshot, "Dispatch verification is incomplete. Preserve the correlation for maintainer inspection; do not start another sync to test it.",
       { accepted, available: false, request_id: job.request_id, terminal: false, should_continue_polling: false,
         reason: "dispatch_unconfirmed", sync_status: status, dispatch_status: dispatchStatus(observed.operation) });
+  }
+
+  private async canContinueJob(job: FreshJob): Promise<boolean> {
+    const current = await this.env.REFRESH_COORDINATOR.getByName("global").freshJob(job.request_id);
+    return current?.state === "active" && current.polls < 3 && this.now() < current.expires_at
+      && current.scope === job.scope && current.request === job.request;
   }
 }

@@ -166,9 +166,21 @@ Use `refresh_status(request_id=...)` for follow-up. A run ID can also resolve a
 known targeted job. There are at most three short polling windows per job,
 with two GitHub checks and a four-second interval per window. Stop when
 `should_continue_polling=false`, even if `terminal=false`, and report the
-60-second retry guidance. Later status reads can still observe completion.
+60-second retry guidance. Later status reads can observe completion only while
+the existing status-ticket budget and observation deadline remain.
 The two-hour observation deadline stops polling; it never authorizes a
 duplicate dispatch while the existing job is unconfirmed or still active.
+
+For a newly acknowledged targeted dispatch, a confirmed absent startup receipt
+is normal bounded waiting, not a rejected dispatch. While a status ticket and
+the observation deadline remain, the result uses `awaiting_startup_receipt`,
+`should_continue_polling=true` and `poll_after_seconds=25`. A verified queued or
+running job can likewise continue within that same budget. Neither case claims
+a current source check or a ready package. Invalid/mismatching receipts, failed
+reads, conflicting revisions, unacknowledged POSTs and exhausted tickets still
+stop polling with the duplicate guard held; do not start another sync to test
+them. This waiting correction does not itself add later inspection tickets or
+automatic cleanup after the three-window budget is exhausted.
 
 When GitHub returns no dispatch receipt, only the request UUID's private R2
 receipt may resolve the run ID. The unrelated latest workflow is never used.

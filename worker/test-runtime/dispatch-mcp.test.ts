@@ -11,6 +11,7 @@ const issuer = "https://synthetic-dispatch.cloudflareaccess.com", hostname = "di
 let privateKey: CryptoKey, jwk: Record<string, unknown>, testEnv: Env, actor: string;
 let coordinator: ReturnType<Env["REFRESH_COORDINATOR"]["getByName"]>;
 let provider: typeof fetch;
+let startupOnAck: boolean;
 let beforeControlGet: ((key: string) => Promise<void>) | undefined;
 let counts: { github_post: number; github_get: number; r2_get: number; r2_control_get: number; r2_head: number; r2_list: number; r2_put: number; r2_body_bytes: number };
 beforeAll(async () => {
@@ -24,6 +25,7 @@ beforeEach(async () => {
   }
   clearSummaryCaches(); actor = crypto.randomUUID();
   beforeControlGet = undefined;
+  startupOnAck = true;
   counts = { github_post: 0, github_get: 0, r2_get: 0, r2_control_get: 0, r2_head: 0, r2_list: 0, r2_put: 0, r2_body_bytes: 0 };
   coordinator = env.REFRESH_COORDINATOR.getByName(crypto.randomUUID());
   const namespace = new Proxy(env.REFRESH_COORDINATOR, { get(target, property) {
@@ -61,7 +63,7 @@ beforeEach(async () => {
       throw new Error("External network forbidden in synthetic dispatch tests");
     if (init?.method === "POST") counts.github_post++; else counts.github_get++;
     const response = await provider(input, init);
-    if (init?.method === "POST" && response.ok && response.status !== 204) {
+    if (startupOnAck && init?.method === "POST" && response.ok && response.status !== 204) {
       const ack = await response.clone().json().catch(() => null);
       const id = JSON.parse(String(init.body)).inputs.sync_request_id;
       if (id && Number.isSafeInteger(ack?.workflow_run_id)
@@ -76,6 +78,97 @@ afterEach(() => vi.restoreAllMocks());
 async function writeStartup(id: string, runId: number) {
   const operation = (await coordinator.dispatchOperation(id))!;
   await env.SLIPSTREAM_DATA.put("refresh/requests/" + id + ".json", JSON.stringify(syntheticStartupReceipt(operation, runId)));
+}
+
+for (const kind of ["night", "activity"] as const) {
+it.each(["2025-03-26", "2026-07-28"])(`keeps a newly acknowledged targeted job pollable while its ${kind} startup receipt is delayed through %s`, async protocol => {
+  // GitHub accepts the dispatch before the independent workflow writes its receipt.
+  startupOnAck = false;
+  provider = async (_input, init) => {
+    if (init?.method === "POST") return Response.json({ workflow_run_id: 55 });
+    throw new Error("A run must not be trusted before its matching startup receipt");
+  };
+  const pending = await call(kind === "night" ? "sync_latest_night" : "sync_latest_activity", kind === "night"
+    ? { wake_date: DAY } : { activity_id: "73", expected_date: DAY, new_activity_expected: false }, protocol);
+  expect(pending).toMatchObject({ accepted: true, terminal: false, data_ready: false,
+    should_continue_polling: true, dispatch_status: { state: "candidate", duplicate_guard_held: true },
+    sync_status: { job_start_confirmed: null, current_job_source_checked: null } });
+  expect(counts.github_post).toBe(1);
+  expect(counts.github_get).toBe(0);
+  expect(await coordinator.freshJob(pending.request_id)).toMatchObject({ state: "active", polls: 1 });
+  await writeStartup(pending.request_id, 55);
+  let finished = false;
+  provider = async () => Response.json({ id: 55, status: finished ? "completed" : "queued",
+    conclusion: finished ? "success" : null, event: "workflow_dispatch",
+    path: ".github/workflows/refresh.yml", repository: { full_name: "synthetic/slipstream" },
+    head_repository: { full_name: "synthetic/slipstream" }, head_branch: "main", head_sha: "a".repeat(40),
+    created_at: new Date(NOW).toISOString(), updated_at: new Date(NOW).toISOString(),
+    html_url: "https://github.com/synthetic/slipstream/actions/runs/55" });
+  vi.mocked(Date.now).mockReturnValue(NOW + 25_000);
+  const queued = await call("refresh_status", { request_id: pending.request_id }, protocol);
+  expect(queued).toMatchObject({ terminal: false, data_ready: false, should_continue_polling: true,
+    dispatch_status: { state: "verified_active", duplicate_guard_held: true },
+    sync_status: { job_state: "queued", job_start_confirmed: true, current_job_source_checked: null } });
+  finished = true;
+  await env.SLIPSTREAM_DATA.put("refresh/reports/55.json", JSON.stringify(kind === "night" ? { schema_version: 1, kind: "latest-night",
+    wake_date: DAY, scope: `night/${DAY}`, checked_at: new Date(NOW).toISOString(), source_checked: true,
+    status: "pending", sleep_status: "garmin_not_ready", hrv_status: "garmin_not_ready" }
+    : { schema_version: 1, kind: "latest-activity", source_checked: true, scope: `activity/${DAY}/73/known`,
+      checked_at: new Date(NOW).toISOString(), status: "no_recent_activity", activity_id: null, activity_date: null,
+      activity_started_at_utc: null, activity_started_at_garmin_local: null, expected_date: DAY,
+      already_in_slipstream: false, activity_name: null, summary_updated: false,
+      files_ready: false, file_status: "not_checked", coach_status: "not_checked" }));
+  vi.mocked(Date.now).mockReturnValue(NOW + 50_000);
+  const terminal = await call("refresh_status", { request_id: pending.request_id }, protocol);
+  expect(terminal).toMatchObject({ terminal: true, data_ready: false, should_continue_polling: false,
+    dispatch_status: { state: "verified_terminal", duplicate_guard_held: false },
+    sync_status: { job_state: "completed", job_conclusion: "success", current_job_source_checked: true } });
+  expect(await coordinator.freshJob(pending.request_id)).toMatchObject({ state: "completed", polls: 3 });
+  expect(counts.github_post).toBe(1);
+});
+}
+
+it.each(["2025-03-26", "2026-07-28"])("does not refund or extend the three targeted receipt checks through %s", async protocol => {
+  startupOnAck = false;
+  provider = async () => Response.json({ workflow_run_id: 55 });
+  const pending = await call("sync_latest_night", { wake_date: DAY }, protocol);
+  vi.mocked(Date.now).mockReturnValue(NOW + 25_000);
+  expect((await call("refresh_status", { request_id: pending.request_id }, protocol)).should_continue_polling).toBe(true);
+  vi.mocked(Date.now).mockReturnValue(NOW + 50_000);
+  const exhausted = await call("refresh_status", { request_id: pending.request_id }, protocol);
+  expect(exhausted).toMatchObject({ terminal: false, should_continue_polling: false,
+    dispatch_status: { duplicate_guard_held: true }, sync_status: { job_start_confirmed: null } });
+  expect(await coordinator.freshJob(pending.request_id)).toMatchObject({ polls: 3, state: "active" });
+  const before = { ...counts };
+  await call("refresh_status", { request_id: pending.request_id }, protocol);
+  expect(counts.github_post).toBe(1);
+  expect(counts.r2_control_get).toBe(before.r2_control_get);
+  expect(counts.github_get).toBe(before.github_get);
+});
+
+for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  it.each(["invalid_json", "empty_object", "null", "legacy", "wrong_scope", "read_failure", "no_ack"])(
+    "does not call a faulty or unacknowledged startup %s normal waiting through " + protocol, async fault => {
+      startupOnAck = false;
+      provider = async (_input, init) => {
+        if (init?.method !== "POST") throw new Error("Unverified startup must not read a run");
+        const id = JSON.parse(String(init.body)).inputs.sync_request_id;
+        const receipt = syntheticStartupReceipt((await coordinator.dispatchOperation(id))!, 55);
+        if (fault === "read_failure") beforeControlGet = async key => {
+          if (key.startsWith("refresh/requests/")) throw new Error("Synthetic storage failure");
+        };
+        else if (fault !== "no_ack") await env.SLIPSTREAM_DATA.put("refresh/requests/" + id + ".json",
+          fault === "invalid_json" ? "not JSON" : fault === "empty_object" ? "{}" : fault === "null" ? "null"
+            : JSON.stringify(fault === "legacy" ? { run_id: 55, scope: `night/${DAY}` }
+              : { ...receipt, request: { ...receipt.request, scope: "night/2026-10-13" } }));
+        return fault === "no_ack" ? new Response(null, { status: 204 }) : Response.json({ workflow_run_id: 55 });
+      };
+      const held = await call("sync_latest_night", { wake_date: DAY }, protocol);
+      expect(held).toMatchObject({ terminal: false, should_continue_polling: false, data_ready: false,
+        dispatch_status: { duplicate_guard_held: true }, sync_status: { job_start_confirmed: null } });
+      expect(counts.github_post).toBe(1); expect(counts.github_get).toBe(0);
+      expect(await coordinator.freshJob(held.request_id)).toMatchObject({ polls: 1, state: "active" });
+    });
 }
 
 async function call(name: string, values: unknown, protocol: string, expectedError = false) {
