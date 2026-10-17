@@ -46,7 +46,7 @@ routes, arbitrary R2 objects or Garmin credentials.
 
 ```text
 Garmin Connect
-      │ read-only session token
+      │ saved session + application read guard
       ▼
 GitHub Actions ── restore / merge / upload ──► private Cloudflare R2
                                                       │ private binding
@@ -70,7 +70,16 @@ AI client ◄── MCP + Managed OAuth ── Cloudflare Access ── Worker
 - A rate limiter, payload bounds and a Durable Object refresh lease protect the
   installation from abuse and duplicate dispatches.
 
+The Garmin session is not a provider-issued read-only token and may have write
+privileges. The pipeline's fail-closed method/endpoint guard permits only the
+reviewed fitness reads; separate authentication/token renewal may use POST.
+See [Security](SECURITY.md) for the boundary and its limits.
+
 See [Architecture](docs/ARCHITECTURE.md) for the complete flow.
+
+A matching stored revision permits parsed-summary reuse; it is not a new Garmin
+source check. Cache reuse, object upload time, job completion and completeness
+of the requested workout/night must be distinguished from source freshness.
 
 ## Install
 
@@ -81,7 +90,7 @@ Start with the [complete installation guide](docs/INSTALL.md). It covers R2,
 GitHub secrets, Garmin login, Worker deployment, Cloudflare Access, Managed
 OAuth, redirect URIs, testing and cost checks.
 
-`./setup.sh` is a safe bootstrap helper for macOS/Linux, and
+`bash setup.sh` is a safe bootstrap helper for macOS/Linux, and
 `setup-windows.ps1` provides the equivalent native PowerShell flow on Windows.
 Both check prerequisites and install local dependencies, but deliberately leave
 account-specific R2 credentials and Access policy decisions to the documented
@@ -122,6 +131,9 @@ before starting a targeted import. They report source age, missing components
 and readiness, and share compatible jobs. Historical read tools stay read-only.
 An acknowledged targeted job can wait for its startup receipt and queue within
 its existing three status windows; clients must honor the returned polling delay.
+After those are spent, at most one later, expressly requested inspection of the
+same request ID is available. Unknown/error results consume it; it starts no new
+import and does not establish data readiness. It must never become automatic polling.
 See [Fresh data on request](docs/FRESH_DATA.md) for local workout/wake-date rules,
 polling limits and R2-only Coach Input repair.
 See [HRV and sleep history](docs/HEALTH_HISTORY.md) for date-range behavior,
@@ -187,9 +199,11 @@ This repairs indexes from stored data; it does not re-download Garmin history.
 See [health-history maintenance](docs/HEALTH_HISTORY.md) for recovery and
 reproducible operation counts.
 
-`data_ready` reports workflow completion. Check each activity's `files_ready`
-and `coach_status` before claiming its files and analysis are ready. A configured
-coach profile and usable endurance artifacts are still required for an analysis.
+Legacy general/run-only `data_ready` reports workflow success. Targeted sync
+tools require a complete, source-fresh canonical package for readiness; inspect
+`sync_status`, its source-check time and missing components. A successful job
+alone does not establish TCX/Coach readiness. A configured coach profile and
+usable endurance artifacts are still required for an analysis.
 
 For a new installation with years of history, an optional
 [local overnight bootstrap](docs/LOCAL_BOOTSTRAP.md) can advance the same R2
@@ -207,8 +221,14 @@ artifacts are not reread on every backfill cycle.
 Manual refresh:
 
 ```bash
-gh workflow run refresh.yml -f include_granular=true
+gh workflow run refresh.yml --repo "<owner>/<repo>" -f include_granular=true
 ```
+
+This is a broad source refresh that may contact Garmin and write private R2;
+it is not a workaround for an exhausted targeted job or a held duplicate guard.
+Stored-data/index repair and source refresh are different operations; see the
+[installation index-repair command](docs/INSTALL.md#5-seed-summaries-and-detailed-data)
+and [R2-only Coach Input repair](docs/FRESH_DATA.md#coordination-and-limits).
 
 Optional chat-triggered refresh requires a fine-grained, single-repository
 GitHub token with **Actions: read and write**. Store both values as Worker
@@ -218,7 +238,7 @@ secrets, never in `wrangler.jsonc`:
 cd worker
 npx wrangler secret put GITHUB_REPOSITORY
 npx wrangler secret put GITHUB_ACTIONS_TOKEN
-npm run deploy
+npm run deploy -- --no-upload-source-maps
 ```
 
 Use `owner/repository` for `GITHUB_REPOSITORY`. Without these optional secrets,
@@ -228,11 +248,11 @@ all read tools still work and only on-demand refresh is disabled.
 
 The workflows use R2 Standard storage and fail closed before projected usage
 exceeds conservative project limits: 5 GiB stored, 100,000 objects, 250 writes
-per run and 512 MiB uploaded per run. These are below Cloudflare R2's published
-free allowance of 10 GB-month, 1 million Class A operations and 10 million
-Class B operations per month. Authenticated MCP calls are limited to 30 per
-minute per identity, leaving substantial room below the Workers Free daily
-request allowance for a personal installation.
+per run and 512 MiB uploaded per run. Authenticated MCP calls are limited to 30
+per minute per identity. These application limits are not an account-wide or
+monthly spending cap: stored history, retries, overlapping work and combined
+R2, Workers and Actions usage still count. Per-job guards and synthetic request
+reductions do not guarantee free operation or a total performance improvement.
 
 The public template exposes only read tools by default. Installers may opt in
 to immutable coach-profile and append-only activity-context writes; accepted
@@ -247,9 +267,8 @@ activity scheduler keeps its 50-activity Garmin limit but carries unused capacit
 across year boundaries. Once complete these jobs perform no
 further writes until a relevant source, profile or user context changes.
 
-Standard GitHub-hosted runners are free for public repositories. Private
-repositories use the account's included Actions allowance. Cloudflare and
-GitHub can change their terms, so verify the official pages:
+Check the installer's actual account plan, accumulated usage and current terms
+before changing budgets or schedules:
 
 - [Cloudflare R2 pricing](https://developers.cloudflare.com/r2/pricing/)
 - [Cloudflare Workers limits](https://developers.cloudflare.com/workers/platform/limits/)

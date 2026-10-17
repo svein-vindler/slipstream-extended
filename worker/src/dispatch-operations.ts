@@ -42,7 +42,7 @@ const postOutcomeSchema = z.discriminatedUnion("kind", [
 ]);
 export type DispatchIdentity = { operation_id: string; owner_key: string; owner_token: string };
 export type DispatchClaim = { claim_id: string; claim_revision: number;
-  intent: "initial" | "shared" | "status"; run_get_limit: number; run_gets_used: number;
+  intent: "initial" | "shared" | "status" | "terminal_inspection"; run_get_limit: number; run_gets_used: number;
   receipt_used: boolean; report_used: boolean; diagnostics_used: boolean;
   status_actor?: string; status_run_reserved?: boolean };
 export type DispatchBinding = { run_id: number; repository: string; workflow: string; ref: string;
@@ -68,9 +68,10 @@ export type DispatchOperation = DispatchIdentity & {
   evidence_conflict: boolean; owner_released_at: number | null; read_claim: DispatchClaim | null;
   general_initial_reads_used: number | null;
   startup_receipt?: DispatchStartupReceipt | null;
+  terminal_inspection_used?: true;
 };
 const claimSchema = z.strictObject({ claim_id: z.uuid(), claim_revision: z.number().int().safe().nonnegative(),
-  intent: z.enum(["initial", "shared", "status"]), run_get_limit: z.number().int().min(1).max(5),
+  intent: z.enum(["initial", "shared", "status", "terminal_inspection"]), run_get_limit: z.number().int().min(1).max(5),
   run_gets_used: z.number().int().min(0).max(5), receipt_used: z.boolean(), report_used: z.boolean(), diagnostics_used: z.boolean(),
   status_actor: z.string().min(1).max(128).optional(), status_run_reserved: z.boolean().optional(),
 }).refine(value => value.run_gets_used <= value.run_get_limit);
@@ -84,7 +85,11 @@ const operationSchema = z.strictObject({ operation_id: z.uuid(), owner_key: z.st
     observed_at: z.number().finite().nonnegative() }).nullable(),
   evidence_conflict: z.boolean(), owner_released_at: z.number().finite().nonnegative().nullable(),
   read_claim: claimSchema.nullable(), startup_receipt: dispatchReceiptSchema.nullable().optional(), general_initial_reads_used: z.number().int().min(0).max(5).nullable(),
+  terminal_inspection_used: z.literal(true).optional(),
 }).refine(value => value.operation_id === value.owner_token)
+  .refine(value => !value.terminal_inspection_used || value.origin !== "general"
+    && value.descriptor !== null && "startup_receipt" in value)
+  .refine(value => value.read_claim?.intent !== "terminal_inspection" || value.terminal_inspection_used === true)
   .refine(value => !value.startup_receipt || receiptMatches(value, value.descriptor, value.startup_receipt)
     && value.candidate_run_id === value.startup_receipt.run_id
     && (!value.verified_binding || value.verified_binding.source_sha === value.startup_receipt.source.source_sha))
@@ -273,12 +278,12 @@ export class DispatchOperations {
   claim(identity: DispatchIdentity, intent: DispatchClaim["intent"], actorKey: string, nowMs: number,
     reserveStatus: (key: string, now: number, ttl: number) => boolean):
     { acquired: boolean; operation: DispatchOperation | null; claim?: DispatchClaim } {
-    if (!Number.isFinite(nowMs) || !["initial", "shared", "status"].includes(intent)) throw new Error("Invalid dispatch claim.");
+    if (!Number.isFinite(nowMs) || !["initial", "shared", "status", "terminal_inspection"].includes(intent)) throw new Error("Invalid dispatch claim.");
     const op = this.current(identity);
     if (!op || !this.owns(op) || op.read_claim || op.evidence_conflict || !("startup_receipt" in op)) return { acquired: false, operation: op };
     let limit: number;
     if (op.origin === "general") {
-      if (intent === "shared") return { acquired: false, operation: op };
+      if (intent === "shared" || intent === "terminal_inspection") return { acquired: false, operation: op };
       if (intent === "initial") {
         const lease = this.storage.sql.exec<{ token: string; expires_at: number }>(
           "SELECT token, expires_at FROM refresh_leases WHERE lease_key = 'refresh-today'").toArray()[0];
@@ -299,11 +304,24 @@ export class DispatchOperations {
         limit = 5;
       }
     } else {
-      const job = this.storage.sql.exec<{ polls: number; expires_at: number; state: string }>(
-        "SELECT polls, expires_at, state FROM fresh_jobs WHERE request_id = ?", op.operation_id).toArray()[0];
-      if (!job || job.state !== "active" || job.polls >= 3 || nowMs >= job.expires_at && intent !== "status")
-        return { acquired: false, operation: op };
-      this.storage.sql.exec("UPDATE fresh_jobs SET polls = polls + 1 WHERE request_id = ? AND polls < 3", op.operation_id);
+      const job = this.storage.sql.exec<{ polls: number; expires_at: number; state: string;
+        scope: string; kind: string; run_id: number | null }>(
+        "SELECT polls, expires_at, state, scope, kind, run_id FROM fresh_jobs WHERE request_id = ?", op.operation_id).toArray()[0];
+      if (!job || job.state !== "active") return { acquired: false, operation: op };
+      if (intent === "terminal_inspection") {
+        if (job.polls !== 3 || op.terminal_inspection_used || !actorKey || actorKey.length > 128
+          || !op.descriptor || op.descriptor.scope !== job.scope || op.descriptor.mode !== job.kind
+          || op.owner_key !== "targeted:" + job.scope || job.run_id !== op.candidate_run_id
+          || (job.kind === "night" ? op.origin !== "targeted_night"
+            : job.kind !== "activity" || !["targeted_activity", "targeted_repair"].includes(op.origin))
+          || !Number.isSafeInteger(job.expires_at) || job.expires_at < 0) return { acquired: false, operation: op };
+        // Persist with the claim/CAS in the coordinator's transaction, before I/O.
+        // Unknown, failed and interrupted observations never refund this opportunity.
+        op.terminal_inspection_used = true;
+      } else {
+        if (job.polls >= 3 || nowMs >= job.expires_at && intent !== "status") return { acquired: false, operation: op };
+        this.storage.sql.exec("UPDATE fresh_jobs SET polls = polls + 1 WHERE request_id = ? AND polls < 3", op.operation_id);
+      }
       limit = nowMs >= job.expires_at ? 1 : 2;
     }
     const previous = op.revision++;

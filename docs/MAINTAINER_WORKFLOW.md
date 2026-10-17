@@ -66,7 +66,7 @@ From the public clone:
 ```bash
 git fetch canary main
 git switch -c feature/<portable-change>
-git cherry-pick -x <private-commit-sha>
+git cherry-pick <reviewed-portable-commit>
 ```
 
 `cherry-pick` preserves the original author identity. Inspect both author and
@@ -77,8 +77,8 @@ git log -1 --format='%an <%ae> | %cn <%ce>'
 ```
 
 If the private commit used an email that should not be public, replace its author
-with the public clone's configured identity while retaining the commit message
-and `cherry picked from` trailer:
+with the public clone's configured identity. Keep the message portable and omit
+private-origin SHA trailers and operational identifiers:
 
 ```bash
 git commit --amend --no-edit --reset-author
@@ -157,11 +157,30 @@ Access policies or repository secrets.
 - Keep dependency versions aligned between repositories after validation; do
   not maintain silent long-lived forks.
 
+### Source maps and existing installations
+
+[Wrangler 4.151](https://github.com/cloudflare/workers-sdk/releases/tag/wrangler%404.151.0)
+generates/uploads source maps by default for normal deploy.
+To preserve non-upload with unchanged configuration, pass
+`--no-upload-source-maps` to both dry-run and actual deploy. From `worker/`,
+bind the placeholders to the existing installation's reviewed paths and name:
+
+```bash
+npm run deploy -- "<reviewed-entry.ts>" --config "<reviewed-config.jsonc>" --name "<worker-name>" --keep-vars --strict --autoconfig=false --no-upload-source-maps --dry-run
+npm run deploy -- "<reviewed-entry.ts>" --config "<reviewed-config.jsonc>" --name "<worker-name>" --keep-vars --strict --autoconfig=false --no-upload-source-maps
+```
+
+Use the candidate's own pinned Wrangler and retain its actual bindings,
+environment, resources and approved output locations. Local map files and a
+successful dry-run do not attest remote upload or resource parity. Respect the
+cf-output guard; do not bypass it by deleting other build state. Unknown flag
+support or configuration drift stops release, without silently accepting the
+default upload policy. Opt-out does not remove maps uploaded by earlier releases.
+
 ### Native image security override
 
 `worker/package.json` temporarily overrides only Miniflare's `sharp` dependency
-to `0.35.5`. Current Wrangler and Cloudflare Vitest releases still pin Miniflare
-with `sharp 0.35.4`; the scoped override addresses
+to `0.35.5`. The scoped override addresses
 [GHSA-wq5f-xc86-pv6w](https://github.com/advisories/GHSA-wq5f-xc86-pv6w)
 without changing the parent tools, application dependencies or Worker code.
 Keep the regenerated lockfile, including optional platform packages, committed.
@@ -211,6 +230,31 @@ Portable data changes must be backward-compatible with existing installations:
 
 The private R2 bucket survives repository changes. Publishing or cherry-picking
 source does not copy, delete or recreate stored fitness data.
+
+### Retained hardening and measurement boundaries
+
+The GitHub GET boundary accepts at most 4,194,304 delivered body bytes. Its
+15,000 ms owned timer initiates I/O abort, and read/cancel settlement precedes
+claim release; this is not a hard parse, CPU, cleanup or return deadline. Invalid
+run-list envelopes stay unknown instead of causing a new dispatch. Scalar
+detail leaves retain literal names, units, zero/null and provenance; unsupported
+compound values fail in a controlled way. Stored/decode guards remain per object,
+not a new aggregate/output or legacy archive/XML ceiling. Pipeline R2 reads close
+their bodies while preserving an earlier read failure over a later close error.
+
+The 100-profile capacity includes permanent reservations for immutable keys,
+including unknown PUT results. Creation can stop below 100 stored profiles;
+identical repeats do not refund capacity. There is no automatic expiry, refund,
+reclaim or reset. See [fresh-data recovery](FRESH_DATA.md#recovery-and-reader-compatibility)
+before considering a rollback across new durable inspection state.
+
+Existing reviewed synthetic Python comparisons and the warm profile-capacity
+sequence establish only their selected workload observations. They are historical
+measurements, not new counts for the current Wrangler/runtime. Initialization,
+full SQL/CPU/wire usage, retries, queue overlap and combined account cost remain
+outside that evidence. Neither local tests nor CI establish total performance,
+free operation or complete provider/failure coverage. Keep the existing ceilings
+until a separately reviewed contract changes them.
 
 ## Public workflow privacy
 

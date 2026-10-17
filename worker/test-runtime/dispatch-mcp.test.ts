@@ -128,6 +128,59 @@ it.each(["2025-03-26", "2026-07-28"])(`keeps a newly acknowledged targeted job p
 });
 }
 
+for (const protocol of ["2025-03-26", "2026-07-28"]) {
+it("requires an explicit later terminal inspection after three ordinary checks without claiming ready data through " + protocol, async ({ task }) => {
+  startupOnAck = false;
+  provider = async (_input, init) => {
+    if (init?.method === "POST") return Response.json({ workflow_run_id: 55 });
+    return Response.json({ id: 55, status: "completed", conclusion: "success", event: "workflow_dispatch",
+      path: ".github/workflows/refresh.yml", repository: { full_name: "synthetic/slipstream" },
+      head_repository: { full_name: "synthetic/slipstream" }, head_branch: "main", head_sha: "a".repeat(40),
+      created_at: new Date(NOW).toISOString(), updated_at: new Date(NOW).toISOString(),
+      html_url: "https://github.com/synthetic/slipstream/actions/runs/55" });
+  };
+  const pending = await call("sync_latest_night", { wake_date: DAY }, protocol);
+  vi.mocked(Date.now).mockReturnValue(NOW + 25_000);
+  await call("refresh_status", { request_id: pending.request_id }, protocol);
+  vi.mocked(Date.now).mockReturnValue(NOW + 50_000);
+  const exhausted = await call("refresh_status", { request_id: pending.request_id }, protocol);
+  expect(exhausted).toMatchObject({ terminal: false, should_continue_polling: false, data_ready: false,
+    dispatch_status: { duplicate_guard_held: true } });
+  expect(await coordinator.freshJob(pending.request_id)).toMatchObject({ state: "active", polls: 3 });
+  await writeStartup(pending.request_id, 55);
+  // A successful job may end without having confirmed the requested source/data.
+  await env.SLIPSTREAM_DATA.put("refresh/reports/55.json", JSON.stringify({ schema_version: 1, kind: "latest-night",
+    wake_date: DAY, scope: `night/${DAY}`, checked_at: new Date(NOW).toISOString(), source_checked: false,
+    status: "pending", sleep_status: "not_checked", hrv_status: "not_checked" }));
+  vi.mocked(Date.now).mockReturnValue(NOW + 3 * 60 * 60_000);
+  const beforeDefault = { ...counts };
+  const defaultStatus = await call("refresh_status", { request_id: pending.request_id }, protocol);
+  expect(defaultStatus).toMatchObject({ terminal: false, should_continue_polling: false, data_ready: false,
+    dispatch_status: { duplicate_guard_held: true } });
+  expect(counts.github_get).toBe(beforeDefault.github_get);
+  expect(counts.r2_control_get).toBe(beforeDefault.r2_control_get);
+  const beforeExplicit = { ...counts };
+  const terminal = await call("refresh_status", { request_id: pending.request_id, terminal_inspection: true }, protocol);
+  task.meta.late_terminal = { before_default: beforeDefault, before_explicit: beforeExplicit,
+    after_explicit: { ...counts }, result: terminal };
+  expect(terminal).toMatchObject({ terminal: true, data_ready: false, should_continue_polling: false,
+    dispatch_status: { state: "verified_terminal", duplicate_guard_held: false },
+    sync_status: { job_state: "completed", job_conclusion: "success", current_job_source_checked: false,
+      complete: false, fresh: false } });
+  expect(terminal.sync_status.data_state).not.toBe("ready");
+  expect(terminal.latency.request_to_ready_observed_ms).toBeNull();
+  expect(await coordinator.freshJob(pending.request_id)).toMatchObject({ state: "completed", polls: 3 });
+  expect(counts.github_get - beforeExplicit.github_get).toBe(1);
+  expect(counts.r2_control_get - beforeExplicit.r2_control_get).toBe(3);
+  expect(counts.github_post).toBe(1);
+  expect(counts.r2_put).toBe(0);
+  const beforeRepeat = { ...counts };
+  await call("refresh_status", { request_id: pending.request_id, terminal_inspection: true }, protocol);
+  expect(counts.github_get).toBe(beforeRepeat.github_get);
+  expect(counts.r2_control_get).toBe(beforeRepeat.r2_control_get);
+});
+}
+
 it.each(["2025-03-26", "2026-07-28"])("does not refund or extend the three targeted receipt checks through %s", async protocol => {
   startupOnAck = false;
   provider = async () => Response.json({ workflow_run_id: 55 });
@@ -171,7 +224,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     });
 }
 
-async function call(name: string, values: unknown, protocol: string, expectedError = false) {
+async function call(name: string, values: unknown, protocol: string, expectedError: boolean | "validation" = false) {
   const modern = protocol === "2026-07-28", authNow = Math.floor(new Date().getTime() / 1000);
   const token = await new SignJWT({ type: "app", email: "synthetic@example.invalid" })
     .setProtectedHeader({ alg: "RS256", kid: "dispatch" }).setIssuer(issuer).setAudience("dispatch")
@@ -190,11 +243,145 @@ async function call(name: string, values: unknown, protocol: string, expectedErr
   const line = body.split("\n").find(item => item.startsWith("data: "));
   const message = JSON.parse(line ? line.slice(6) : body);
   expect(message.error).toBeUndefined();
+  if (expectedError === "validation") {
+    expect(message.result.isError).toBe(true);
+    expect(message.result.structuredContent).toBeUndefined();
+    expect(message.result.content).toEqual([{ type: "text",
+      text: "The request could not be completed. Check arguments, access, configuration and service availability." }]);
+    return message.result;
+  }
   if (expectedError) expect(message.result.isError).toBe(true);
   else expect(message.result.isError).not.toBe(true);
   expect(JSON.parse(message.result.content[0].text)).toEqual(message.result.structuredContent);
   expect(body).not.toContain("SYNTHETIC_PROVIDER_TEXT");
   return message.result.structuredContent;
+}
+
+async function spendNightWindows(protocol: string) {
+  startupOnAck = false;
+  provider = async (_input, init) => {
+    if (init?.method === "POST") return Response.json({ workflow_run_id: 55 });
+    throw new Error("Unexpected run read before the synthetic receipt");
+  };
+  const pending = await call("sync_latest_night", { wake_date: DAY }, protocol);
+  vi.mocked(Date.now).mockReturnValue(NOW + 25_000);
+  await call("refresh_status", { request_id: pending.request_id }, protocol);
+  vi.mocked(Date.now).mockReturnValue(NOW + 50_000);
+  await call("refresh_status", { request_id: pending.request_id }, protocol);
+  expect(await coordinator.freshJob(pending.request_id)).toMatchObject({ state: "active", polls: 3 });
+  return pending.request_id as string;
+}
+
+for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  it("late-terminal negative: early explicit and later false keep automatic admission unchanged through " + protocol, async () => {
+    startupOnAck = false;
+    provider = async () => Response.json({ workflow_run_id: 55 });
+    const pending = await call("sync_latest_night", { wake_date: DAY }, protocol);
+    const beforeEarly = await coordinator.dispatchOperation(pending.request_id), earlyControl = counts.r2_control_get;
+    const early = await call("refresh_status", { request_id: pending.request_id, terminal_inspection: true }, protocol);
+    expect(early).toMatchObject({ terminal: false, data_ready: false, should_continue_polling: false });
+    expect(await coordinator.dispatchOperation(pending.request_id)).toEqual(beforeEarly);
+    expect(await coordinator.freshJob(pending.request_id)).toMatchObject({ polls: 1, state: "active" });
+    expect(counts.r2_control_get).toBe(earlyControl);
+    for (const offset of [25_000, 50_000]) {
+      vi.mocked(Date.now).mockReturnValue(NOW + offset);
+      await call("refresh_status", { request_id: pending.request_id }, protocol);
+    }
+    const beforeFalse = await coordinator.dispatchOperation(pending.request_id), control = counts.r2_control_get;
+    await call("refresh_status", { request_id: pending.request_id, terminal_inspection: false }, protocol);
+    expect(await coordinator.dispatchOperation(pending.request_id)).toEqual(beforeFalse);
+    expect(beforeFalse).not.toHaveProperty("terminal_inspection_used");
+    expect(await coordinator.freshJob(pending.request_id)).toMatchObject({ polls: 3, state: "active" });
+    expect(counts.r2_control_get).toBe(control);
+    expect(counts.github_get).toBe(0); expect(counts.github_post).toBe(1); expect(counts.r2_put).toBe(0);
+  });
+
+  it.each(["true", 1, null])("late-terminal negative: rejects non-boolean explicit input %s through " + protocol, async value => {
+    const before = { ...counts };
+    await call("refresh_status", { request_id: crypto.randomUUID(), terminal_inspection: value }, protocol, "validation");
+    expect(counts).toEqual(before);
+  });
+
+  it.each(["missing_request", "unknown_request", "run_alias_only", "wrong_run"])(
+    "late-terminal negative: rejects explicit %s without discovery or spending the known job through " + protocol, async fault => {
+      const id = await spendNightWindows(protocol);
+      const before = await coordinator.dispatchOperation(id), jobBefore = await coordinator.freshJob(id), countsBefore = { ...counts };
+      const params = fault === "missing_request" ? {} : fault === "unknown_request" ? { request_id: crypto.randomUUID() }
+        : fault === "run_alias_only" ? { run_id: 55 } : { request_id: id, run_id: 66 };
+      const rejected = await call("refresh_status", { ...params, terminal_inspection: true }, protocol);
+      expect(rejected).toMatchObject({ available: false, terminal: false, data_ready: false, should_continue_polling: false });
+      expect(counts).toEqual(countsBefore);
+      expect(await coordinator.dispatchOperation(id)).toEqual(before);
+      expect(await coordinator.freshJob(id)).toEqual(jobBefore);
+    });
+
+  it.each([false, true])("late-terminal negative: never upgrades or inspects legacy adopted=%s through " + protocol, async adopted => {
+    const begun = await coordinator.beginFresh(`night/${DAY}`, "night", JSON.stringify({ kind: "night", date: DAY }), NOW);
+    const id = begun.job!.request_id;
+    await coordinator.bindFreshRun(id, 55);
+    for (let i = 0; i < 3; i++) await coordinator.takeFreshPoll(id);
+    if (adopted) await coordinator.adoptFreshDispatch(id); // Fixture for an already-adopted old record.
+    const before = await coordinator.dispatchOperation(id), jobBefore = await coordinator.freshJob(id), countsBefore = { ...counts };
+    const rejected = await call("refresh_status", { request_id: id, terminal_inspection: true }, protocol);
+    expect(rejected).toMatchObject({ terminal: false, data_ready: false, should_continue_polling: false });
+    expect(counts).toEqual(countsBefore);
+    expect(await coordinator.dispatchOperation(id)).toEqual(before);
+    expect(await coordinator.freshJob(id)).toEqual(jobBefore);
+  });
+
+  it("late-terminal negative: one concurrent unknown inspection survives eviction without actor or alias refund through " + protocol, async ({ task }) => {
+    const id = await spendNightWindows(protocol);
+    await writeStartup(id, 55);
+    vi.mocked(Date.now).mockReturnValue(NOW + 3 * 60 * 60_000);
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; });
+    beforeControlGet = async key => { if (key === `refresh/requests/${id}.json`) { entered(); await held; } };
+    provider = async () => { throw new Error("SYNTHETIC_PROVIDER_TEXT"); };
+    const before = { ...counts };
+    const first = call("refresh_status", { request_id: id, terminal_inspection: true }, protocol);
+    await started;
+    try {
+      await evictDurableObject(coordinator);
+      const second = await call("refresh_status", { request_id: id, terminal_inspection: true }, protocol);
+      expect(second).toMatchObject({ terminal: false, data_ready: false, should_continue_polling: false });
+    } finally { release(); }
+    const unknown = await first;
+    beforeControlGet = undefined;
+    expect(unknown).toMatchObject({ terminal: false, data_ready: false, should_continue_polling: false,
+      dispatch_status: { duplicate_guard_held: true }, sync_status: { current_job_source_checked: null } });
+    expect(await coordinator.dispatchOperation(id)).toMatchObject({ terminal_inspection_used: true, read_claim: null, owner_released_at: null });
+    expect(await coordinator.freshJob(id)).toMatchObject({ state: "active", polls: 3 });
+    await evictDurableObject(coordinator);
+    actor = crypto.randomUUID(); vi.mocked(Date.now).mockReturnValue(NOW + 86_400_000);
+    const spent = { ...counts };
+    await call("refresh_status", { request_id: id, terminal_inspection: true }, protocol);
+    await call("refresh_status", { run_id: 55, terminal_inspection: true }, protocol);
+    expect(counts.github_get).toBe(spent.github_get);
+    expect(counts.r2_control_get).toBe(spent.r2_control_get);
+    expect(counts.github_get - before.github_get).toBe(1);
+    expect(counts.r2_control_get - before.r2_control_get).toBe(1);
+    expect(counts.github_post).toBe(1); expect(counts.r2_put).toBe(0);
+    task.meta.late_unknown = { before, after: { ...counts } };
+  });
+
+  it.each(["invalid_json", "wrong_scope"])("late-terminal negative: corrupt %s receipt spends one inspection but never releases the guard through " + protocol, async fault => {
+    const id = await spendNightWindows(protocol), operation = (await coordinator.dispatchOperation(id))!;
+    const receipt = syntheticStartupReceipt(operation, 55);
+    await env.SLIPSTREAM_DATA.put(`refresh/requests/${id}.json`, fault === "invalid_json" ? "not JSON"
+      : JSON.stringify({ ...receipt, request: { ...receipt.request, scope: "night/2026-10-13" } }));
+    const before = { ...counts };
+    const held = await call("refresh_status", { request_id: id, terminal_inspection: true }, protocol);
+    expect(held).toMatchObject({ terminal: false, data_ready: false, should_continue_polling: false,
+      dispatch_status: { duplicate_guard_held: true }, sync_status: { current_job_source_checked: null } });
+    expect(await coordinator.dispatchOperation(id)).toMatchObject({ terminal_inspection_used: true, owner_released_at: null, read_claim: null });
+    await writeStartup(id, 55); // Later good metadata cannot refund the consumed attempt.
+    const after = { ...counts };
+    await call("refresh_status", { request_id: id, terminal_inspection: true }, protocol);
+    expect(counts.r2_control_get).toBe(after.r2_control_get);
+    expect(counts.github_get).toBe(before.github_get);
+    expect(counts.github_post).toBe(1); expect(counts.r2_put).toBe(0);
+    expect(await coordinator.freshJob(id)).toMatchObject({ state: "active", polls: 3 });
+  });
 }
 
 for (const protocol of ["2025-03-26", "2026-07-28"]) {

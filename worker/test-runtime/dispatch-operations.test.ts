@@ -20,6 +20,119 @@ const descriptor = { repository: "synthetic/slipstream", workflow: "refresh.yml"
   mode: "night" as const, scope, date: "2026-10-14", activity_id: null,
   new_expected: false, repair_only: false, include_granular: false, components: ["sleep", "hrv"] };
 
+it("allows exactly one explicit later terminal inspection without refunding automatic tickets even when the result is unknown", async () => {
+  const stub = env.REFRESH_COORDINATOR.getByName(crypto.randomUUID());
+  const begun = await stub.beginFresh(scope, "night", JSON.stringify({ kind: "night", date: "2026-10-14" }), now, false, descriptor);
+  const identity = { operation_id: begun.job!.request_id, owner_key: "targeted:" + scope,
+    owner_token: begun.job!.request_id };
+  await stub.mergeDispatchPost(identity, { kind: "ack_candidate", run_id: 55 }, now);
+  for (let i = 0; i < 3; i++) {
+    const reading = await stub.claimDispatchRead(identity, "status", "synthetic-actor", now + i);
+    expect(reading.acquired).toBe(true);
+    await stub.finishDispatchRead(identity, reading.claim!, reading.operation!.revision, null, now + i);
+  }
+  await evictDurableObject(stub);
+  const later = now + 3 * 60 * 60_000;
+  expect(await stub.freshJob(identity.operation_id)).toMatchObject({ state: "active", polls: 3 });
+  expect((await stub.claimDispatchRead(identity, "status", "synthetic-actor", later)).acquired).toBe(false);
+
+  // Explicit caller intent is separate from all automatic/shared status calls.
+  // Concurrent requests must contend for one durable opportunity for this job.
+  const attempts = await Promise.all([
+    stub.claimDispatchRead(identity, "terminal_inspection", "synthetic-actor", later),
+    stub.claimDispatchRead(identity, "terminal_inspection", "other-actor", later),
+  ]);
+  expect(attempts.filter(attempt => attempt.acquired)).toHaveLength(1);
+  const admitted = attempts.find(attempt => attempt.acquired)!;
+  expect(admitted.operation).toMatchObject({ owner_released_at: null, candidate_run_id: 55 });
+  expect(admitted.claim!.run_get_limit).toBe(1); // Existing expired-job per-call limit.
+  await evictDurableObject(stub);
+  const recovered = (await stub.dispatchOperation(identity.operation_id))!;
+  expect(recovered.read_claim!.claim_id).toBe(admitted.claim!.claim_id);
+  expect((await stub.claimDispatchRead(identity, "terminal_inspection", "synthetic-actor", later + 1)).acquired).toBe(false);
+
+  let current = (await stub.takeDispatchRead(identity, admitted.claim!, recovered.revision, "receipt", later))!;
+  const receipt = await stub.recordDispatchReceipt(identity, admitted.claim!, current.revision,
+    syntheticStartupReceipt(current, 55), later);
+  expect(receipt.receipt_verified).toBe(true);
+  current = (await stub.takeDispatchRead(identity, admitted.claim!, receipt.operation!.revision, "run", later))!;
+  expect(current).not.toBeNull();
+  expect(await stub.takeDispatchRead(identity, admitted.claim!, current.revision, "run", later)).toBeNull();
+  // Provider/read failure or absence is unknown, never a refund or terminal proof.
+  await stub.finishDispatchRead(identity, admitted.claim!, current.revision, null, later);
+  await evictDurableObject(stub);
+  const alias = (await stub.dispatchForRun(55))!;
+  expect(alias).toMatchObject({ owner_released_at: null, dispatch_state: "candidate", read_claim: null });
+  expect(await stub.freshJob(identity.operation_id)).toMatchObject({ state: "active", polls: 3 });
+  expect((await stub.claimDispatchRead(alias, "terminal_inspection", "another-actor", later + 86_400_000)).acquired).toBe(false);
+  expect((await stub.claimDispatchRead(alias, "status", "synthetic-actor", later + 86_400_000)).acquired).toBe(false);
+});
+
+it("late-terminal negative: rejects early, wrong-owner and invalid-actor claims without spending the later opportunity", async () => {
+  const stub = env.REFRESH_COORDINATOR.getByName(crypto.randomUUID());
+  const begun = await stub.beginFresh(scope, "night", JSON.stringify({ kind: "night", date: "2026-10-14" }), now, false, descriptor);
+  const identity = { operation_id: begun.job!.request_id, owner_key: "targeted:" + scope, owner_token: begun.job!.request_id };
+  expect((await stub.claimDispatchRead(identity, "terminal_inspection", "synthetic-actor", now)).acquired).toBe(false);
+  for (let i = 0; i < 3; i++) {
+    const reading = await stub.claimDispatchRead(identity, "status", "synthetic-actor", now + i);
+    expect(reading.acquired).toBe(true);
+    await stub.finishDispatchRead(identity, reading.claim!, reading.operation!.revision, null, now + i);
+  }
+  const before = await stub.dispatchOperation(identity.operation_id);
+  for (const actor of ["", "x".repeat(129)])
+    expect((await stub.claimDispatchRead(identity, "terminal_inspection", actor, now + 3)).acquired).toBe(false);
+  for (const wrong of [{ ...identity, owner_key: "targeted:night/2026-10-13" },
+    { ...identity, owner_token: crypto.randomUUID() }, { ...identity, operation_id: crypto.randomUUID() }])
+    expect((await stub.claimDispatchRead(wrong, "terminal_inspection", "synthetic-actor", now + 3)).acquired).toBe(false);
+  expect(await stub.dispatchOperation(identity.operation_id)).toEqual(before);
+  expect(await stub.freshJob(identity.operation_id)).toMatchObject({ state: "active", polls: 3 });
+  const allowed = await stub.claimDispatchRead(identity, "terminal_inspection", "synthetic-actor", now + 3);
+  expect(allowed.acquired).toBe(true);
+  await stub.finishDispatchRead(identity, allowed.claim!, allowed.operation!.revision, null, now + 3);
+});
+
+it.each(["scope", "kind", "run_id"])("late-terminal negative: rejects persisted job %s mismatch without changing the operation", async field => {
+  const stub = env.REFRESH_COORDINATOR.getByName(crypto.randomUUID());
+  const begun = await stub.beginFresh(scope, "night", JSON.stringify({ kind: "night", date: "2026-10-14" }), now, false, descriptor);
+  const identity = { operation_id: begun.job!.request_id, owner_key: "targeted:" + scope, owner_token: begun.job!.request_id };
+  for (let i = 0; i < 3; i++) {
+    const reading = await stub.claimDispatchRead(identity, "status", "synthetic-actor", now + i);
+    await stub.finishDispatchRead(identity, reading.claim!, reading.operation!.revision, null, now + i);
+  }
+  // Fault fixture only. Verification remains at the public RPC seam, never SQL.
+  await runInDurableObject(stub, (_instance, state) => {
+    if (field === "scope") state.storage.sql.exec("UPDATE fresh_jobs SET scope = 'night/2026-10-13' WHERE request_id = ?", identity.operation_id);
+    if (field === "kind") state.storage.sql.exec("UPDATE fresh_jobs SET kind = 'activity' WHERE request_id = ?", identity.operation_id);
+    if (field === "run_id") state.storage.sql.exec("UPDATE fresh_jobs SET run_id = 66 WHERE request_id = ?", identity.operation_id);
+  });
+  const before = await stub.dispatchOperation(identity.operation_id), jobBefore = await stub.freshJob(identity.operation_id);
+  expect((await stub.claimDispatchRead(identity, "terminal_inspection", "synthetic-actor", now + 3)).acquired).toBe(false);
+  expect(await stub.dispatchOperation(identity.operation_id)).toEqual(before);
+  expect(await stub.freshJob(identity.operation_id)).toEqual(jobBefore);
+});
+
+it.each([false, "true"])("late-terminal negative: rejects corrupt persisted one-use marker %s at the RPC boundary", async marker => {
+  const stub = env.REFRESH_COORDINATOR.getByName(crypto.randomUUID());
+  const begun = await stub.beginFresh(scope, "night", JSON.stringify({ kind: "night", date: "2026-10-14" }), now, false, descriptor);
+  const identity = { operation_id: begun.job!.request_id, owner_key: "targeted:" + scope, owner_token: begun.job!.request_id };
+  await runInDurableObject(stub, (_instance, state) => state.storage.sql.exec(
+    "UPDATE dispatch_operations_v1 SET payload = json_set(payload, '$.terminal_inspection_used', json(?)) WHERE operation_id = ?",
+    JSON.stringify(marker), identity.operation_id).toArray());
+  await evictDurableObject(stub);
+  let rejected = false;
+  let rejection: unknown;
+  try {
+    await stub.claimDispatchRead(identity, "terminal_inspection", "synthetic-actor", now);
+  } catch (error) {
+    rejected = true;
+    rejection = error;
+  }
+  expect(rejected).toBe(true);
+  expect(rejection).toHaveProperty("message", "Unverified dispatch operation contract.");
+  expect(await stub.freshJob(identity.operation_id)).toEqual(begun.job);
+  expect(await stub.activeFreshJob(scope, now)).toEqual(begun.job);
+});
+
 it("preserves a same-operation ACK after a status claim advances and closes its revision", async () => {
   const stub = env.REFRESH_COORDINATOR.getByName(crypto.randomUUID());
   const begun = await stub.beginFresh(scope, "night", JSON.stringify({ kind: "night", date: "2026-10-14" }), now, false, descriptor);

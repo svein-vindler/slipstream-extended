@@ -562,11 +562,13 @@ class FitnessService {
 
       server.registerTool("refresh_status", {
       title: "Check Garmin refresh status",
-      description: "Wait briefly for a general refresh, activity import or night sync without starting a new job. Run-only manual night checks validate the night report and canonical sleep/HRV. Read sync_status for job state, source-check time, completeness, freshness, missing components and required user action; use data_state=ready for readiness. Legacy run-only data_ready is workflow success. Null latency is unknown. Pass request_id from a targeted activity/night request (preferred), or the returned run_id. Targeted jobs permit three short polling windows in total. Stop polling when should_continue_polling is false, even if terminal is false; report the state and retry guidance. Ordinary status checks start no Garmin job.",
+      description: "Wait briefly for a general refresh, activity import or night sync without starting a new job. Run-only manual night checks validate the night report and canonical sleep/HRV. Read sync_status for job state, source-check time, completeness, freshness, missing components and required user action; use data_state=ready for readiness. Legacy run-only data_ready is workflow success. Null latency is unknown. Pass request_id from a targeted activity/night request (preferred), or the returned run_id. Targeted jobs permit three short automatic polling windows in total. Stop polling when should_continue_polling is false, even if terminal is false; report the state and retry guidance. Only when explicitly requested later, pass the same request_id with terminal_inspection=true for at most one additional inspection after those three windows. Never set it automatically. Unknown or failed inspection consumes that opportunity. It starts no new job and does not prove data readiness. Ordinary status checks start no Garmin job.",
       inputSchema: z.object({
         request_id: requestIdSchema.optional(),
         run_id: z.number().int().positive().optional()
           .describe("GitHub Actions run ID returned by refresh_today or sync_latest_activity; omit only for a general latest-status check"),
+        terminal_inspection: z.boolean().optional()
+          .describe("Only for an explicitly requested later inspection of the same request_id after its three automatic windows. One opportunity per job, spent even on unknown/error; never enable for automatic polling."),
       }),
       outputSchema: outputSchemas.refresh_status,
       annotations: {
@@ -579,6 +581,17 @@ class FitnessService {
       const coordinator = this.env.REFRESH_COORDINATOR.getByName("global");
       const dispatch = args.request_id ? await coordinator.dispatchOperation(args.request_id)
         : args.run_id ? await coordinator.dispatchForRun(args.run_id) : null;
+      if (args.terminal_inspection === true) {
+        // Explicit inspection never enters discovery, legacy preparation/adoption or recovery.
+        const job = args.request_id && dispatch ? await coordinator.freshJob(args.request_id) : null;
+        if (!dispatch || !job || !args.request_id || dispatch.origin === "general" || !dispatch.descriptor
+          || !("startup_receipt" in dispatch) || args.run_id !== undefined && args.run_id !== dispatch.candidate_run_id) {
+          return this.text({ available: false, terminal: false, data_ready: false, should_continue_polling: false,
+            message: "Explicit terminal inspection requires the same known modern targeted request_id and matching run. No discovery, legacy recovery or new sync was attempted.",
+            sync_status: { ...syncStatus({ kind: "unknown" }), next_action: "none" }, latency: latency(null) });
+        }
+        return this.text(await this.freshData().status(job, false, "terminal_inspection"));
+      }
       if (dispatch?.origin === "general") return this.text(await this.ownedGeneralStatus(dispatch, "status", false, true));
       const freshJob = dispatch ? await coordinator.freshJob(dispatch.operation_id)
         : args.request_id ? await coordinator.freshJob(args.request_id)

@@ -6,7 +6,7 @@ import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/server/valida
 import workflows from "../../docs/AI_WORKFLOWS.md?raw";
 import prompts from "../../docs/PROMPTS.md?raw";
 import { canonical, checkDocumentationNames, documentationExamples, renderCatalog, requireTool,
-  type CatalogMode } from "../test-support/tool-catalog";
+  type CatalogMode, type ToolContract } from "../test-support/tool-catalog";
 import { confirmedWrite, initialWorkflowCalls, nextFreshStep, WORKFLOW_HEADINGS,
   type Workflow } from "../test-support/ai-workflow-contracts";
 import { syncStatus } from "../src/sync-status";
@@ -96,8 +96,38 @@ it("advertises the D4 scalar metric contract in every registration mode", () => 
   }
 });
 
+// Historical guards normalize only this reviewed additive input/description.
+// Full current snapshots and the explicit metadata test retain the new contract.
+function beforeExplicitInspection(tool: ToolContract): ToolContract {
+  if (tool.name !== "refresh_status") return tool;
+  const previous = structuredClone(tool);
+  delete (previous.inputSchema.properties as Record<string, unknown>).terminal_inspection;
+  previous.description = "Wait briefly for a general refresh, activity import or night sync without starting a new job. Run-only manual night checks validate the night report and canonical sleep/HRV. Read sync_status for job state, source-check time, completeness, freshness, missing components and required user action; use data_state=ready for readiness. Legacy run-only data_ready is workflow success. Null latency is unknown. Pass request_id from a targeted activity/night request (preferred), or the returned run_id. Targeted jobs permit three short polling windows in total. Stop polling when should_continue_polling is false, even if terminal is false; report the state and retry guidance. Ordinary status checks start no Garmin job.";
+  return previous;
+}
+
+it("advertises the explicit terminal inspection input only in refresh registration modes", () => {
+  for (const mode of modes) {
+    const tool = mode.tools.find(item => item.name === "refresh_status");
+    if (!mode.refresh) { expect(tool).toBeUndefined(); continue; }
+    const schema = tool!.inputSchema;
+    expect((schema.properties as Record<string, unknown>).terminal_inspection).toEqual({ type: "boolean",
+      description: "Only for an explicitly requested later inspection of the same request_id after its three automatic windows. One opportunity per job, spent even on unknown/error; never enable for automatic polling." });
+    expect(schema.required ?? []).not.toContain("terminal_inspection");
+    const validate = validator.getValidator(schema);
+    expect(validate({}).valid).toBe(true);
+    expect(validate({ terminal_inspection: false }).valid).toBe(true);
+    expect(validate({ request_id: "11111111-1111-4111-8111-111111111111", terminal_inspection: true }).valid).toBe(true);
+    expect(validate({ terminal_inspection: "true" }).valid).toBe(false);
+    expect(tool!.description).toContain("at most one additional inspection after those three windows");
+    expect(tool!.description).toContain("Never set it automatically");
+    expect(tool!.description).toContain("Unknown or failed inspection consumes that opportunity");
+    expect(tool!.description).toContain("does not prove data readiness");
+  }
+});
+
 it.each([false, true])("preserves catalog bytes apart from D4 metric leaves with writes=%s", async writes => {
-  const tools = structuredClone(modes.find(mode => mode.writes === writes && mode.refresh)!.tools);
+  const tools = structuredClone(modes.find(mode => mode.writes === writes && mode.refresh)!.tools).map(beforeExplicitInspection);
   const schema = requireTool(tools, "strength_session").outputSchema as {
     properties: { session: { properties: { sets: { items: { properties: Record<string, unknown> } } } } };
   };
@@ -124,7 +154,7 @@ it.each([false, true])("preserves previous contracts apart from reviewed optiona
         .map(([name, item]) => [name, previousSchema(item)]))];
     }));
   }
-  const tools = modes.find(mode => mode.writes === writes && mode.refresh)!.tools
+  const tools = modes.find(mode => mode.writes === writes && mode.refresh)!.tools.map(beforeExplicitInspection)
     .filter(tool => tool.name !== "training_history") // Worker 07's one additive read tool.
     .map(tool => {
       // Only these two reviewed detail outputs/descriptions change in Worker 06.
