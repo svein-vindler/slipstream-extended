@@ -38,7 +38,7 @@ cd slipstream-extended
 Run the local bootstrap on macOS/Linux:
 
 ```bash
-./setup.sh
+bash setup.sh
 ```
 
 On Windows PowerShell:
@@ -117,6 +117,9 @@ python scripts/garmin_login.py
 
 Complete Garmin MFA if prompted. The helper stores the refreshable session as
 the encrypted GitHub Actions secret `GARMINTOKENS`; the password is not stored.
+This session is not a Garmin-issued read-only scope. Fitness reads are restricted
+by the application's method/endpoint guard; separate authentication and token
+renewal may use POST. Treat the session as a secret with possible write privileges.
 
 ## 5. Seed summaries and detailed data
 
@@ -184,8 +187,15 @@ From `worker/`:
 ```bash
 npm run typecheck
 npm test
-npm run deploy
+npm run deploy -- --no-upload-source-maps
 ```
+
+Wrangler 4.151 uploads source maps by default. The explicit flag preserves
+non-upload without changing configuration. Use it on a preceding
+`npm run deploy -- --dry-run --no-upload-source-maps` too; local `.map` files and
+a successful dry-run do not prove remote upload behavior or resource readiness.
+For an existing installation, retain its reviewed config, entrypoint and release
+flags; see the [maintainer release boundary](MAINTAINER_WORKFLOW.md#source-maps-and-existing-installations).
 
 The first deploy creates the Worker, rate limiter and RefreshCoordinator Durable
 Object and attaches R2. Copy the base URL; the MCP URL is that URL plus `/mcp`.

@@ -163,11 +163,16 @@ fingerprints instead of unconditional forced downloads. The night job calls
 only `get_sleep_data(wake_date)` and `get_hrv_data(wake_date)`.
 
 Use `refresh_status(request_id=...)` for follow-up. A run ID can also resolve a
-known targeted job. There are at most three short polling windows per job,
+known targeted job. There are at most three short automatic polling windows per job,
 with two GitHub checks and a four-second interval per window. Stop when
 `should_continue_polling=false`, even if `terminal=false`, and report the
-60-second retry guidance. Later status reads can observe completion only while
-the existing status-ticket budget and observation deadline remain.
+retry guidance. Default calls, including `terminal_inspection=false`, do not add
+another window. After all three tickets are spent, only a later expressly
+requested `refresh_status(request_id=..., terminal_inspection=true)` can use one
+additional inspection of that same modern targeted job. Never set this field
+automatically or use it to continue polling. The original request ID is required;
+a run alias alone, general jobs and legacy records without full modern metadata
+cannot use this opportunity. A supplied run ID must match the same operation.
 The two-hour observation deadline stops polling; it never authorizes a
 duplicate dispatch while the existing job is unconfirmed or still active.
 
@@ -179,8 +184,36 @@ running job can likewise continue within that same budget. Neither case claims
 a current source check or a ready package. Invalid/mismatching receipts, failed
 reads, conflicting revisions, unacknowledged POSTs and exhausted tickets still
 stop polling with the duplicate guard held; do not start another sync to test
-them. This waiting correction does not itself add later inspection tickets or
-automatic cleanup after the three-window budget is exhausted.
+them. The one later explicit inspection is durably spent before its reads,
+including unknown, failed or interrupted results. Concurrent callers, aliases,
+other actors, new days, expiry and restarts cannot refund it. It keeps the same
+per-call read bounds and does not reset polls, reservations, daily debits or
+duplicate guards. Only existing fully correlated receipt/run/report evidence
+can release a guard normally. Job completion alone establishes neither a
+successful source check nor TCX/Coach completeness/freshness; read `sync_status`
+and stored data separately. There is no automatic cleanup after exhaustion.
+
+The boolean `terminal_inspection=true` expresses the caller's request; it is not
+server-verifiable proof that a person approved it. The client must obtain the
+later explicit request before setting it. The durable marker and read claim are
+recorded together before external reads, so retrying after an unknown result is
+not another unused opportunity.
+
+### Recovery and reader compatibility
+
+Stopping polling does not repair a job or permit another import. Preserve the
+original request, stored records and spent reservations. If a release using the
+durable inspection marker fails, hold rollback to a reader predating that marker
+or the `terminal_inspection` claim: its strict schema may reject the state even
+after the claim closes. Retaining an old deployment is not proof it can read new
+state, and deploying it does not refund the spent inspection.
+
+Use a reviewed forward-compatible recovery or fix when needed. Do not reset,
+delete, restore over, expire or migrate the records to make an old reader accept
+them. Existing read tools may show stored TCX/Coach availability separately;
+neither that availability nor job completion proves a new Garmin source check.
+R2-only Coach Input repair rebuilds derived data from stored inputs and remains
+subject to the activity budget; it does not bypass this recovery boundary.
 
 When GitHub returns no dispatch receipt, only the request UUID's private R2
 receipt may resolve the run ID. The unrelated latest workflow is never used.
@@ -190,8 +223,10 @@ so corrected requests can retry without leaving the scope permanently active.
 Failure to read run details after an accepted POST still retains correlation.
 An empty dispatch response whose private receipt has not arrived yet also
 returns `dispatch_unconfirmed`, stops immediate polling and retains the same
-reservation. A later explicit `refresh_status(request_id=...)` can bind that
-receipt, even after the short polling windows end. It does not dispatch another
+reservation. A later `refresh_status(request_id=...)` can bind that receipt
+while an ordinary ticket remains; after all three are spent it additionally
+requires the later expressly requested `terminal_inspection=true` opportunity
+described above. It does not dispatch another
 job. Receipt lookup verifies the exact UUID key and scope, and run lookup
 verifies the configured workflow before exposing the run. A successful later
 lookup cannot establish why the original dispatch confirmation was absent:

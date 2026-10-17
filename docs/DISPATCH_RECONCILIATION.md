@@ -45,10 +45,23 @@ it does not establish a particular complete, fresh activity/night package.
 
 ## Budgets and aliases
 
-- Targeted `fresh_jobs.polls` is the sole three-ticket authority. Normal admitted
+- Targeted `fresh_jobs.polls` is the sole three-ticket authority for automatic
+  windows. Normal admitted
   claims allow at most two run GETs; after the original two-hour expiry only an
   explicit status request can spend a remaining ticket, with at most one run GET.
   No automatic work starts after expiry.
+- After all three tickets are spent, a later expressly requested
+  `refresh_status(request_id=..., terminal_inspection=true)` can admit at most
+  one additional inspection for that same modern targeted operation. Omitted
+  or false leaves ordinary admission unchanged. Never enable it automatically.
+  The original request ID and full modern metadata are required; a run alias
+  alone, general jobs and unmarked legacy cannot use it. An optional run ID must
+  match. The same owner/scope/job/run/revision and receipt/effect checks apply.
+  Optional `terminal_inspection_used: true` is persisted in the existing operation
+  payload with its read claim in the same transaction/CAS, before external I/O.
+  Unknown, failed and interrupted observations spend it; no refund/reset/TTL
+  release or legacy adoption. `polls` remains three and the daily debit remains.
+  Existing per-call bounds still apply, including one run GET after expiry.
 - Each claim can reserve one fixed request receipt and one fixed report and
   diagnostics object, each under the existing 64 KiB control-object limit.
   Metadata reads do not create an additional run-GET allowance.
@@ -91,7 +104,12 @@ canonical package reads and active coordinator state; it adds no R2 history scan
 Synthetic operation counts and wall time do not attest live cost, billed CPU or
 production exploitation.
 
-A rollout must check compatibility with older in-flight consumers. Code rollback
+A rollout must check compatibility with older in-flight consumers. New code
+reads older operations without the optional inspection field. Older strict
+operation readers cannot decode a record with the new marker or claim intent;
+rollback can therefore make those jobs fail-closed unavailable even though their
+history and spent opportunity remain. Rolling code back does not undo the
+persisted inspection or make it available again. Code rollback
 that ignores the new owners/claims is unsafe while they exist. Preserve the
 coordinator state and use reviewed forward correction or an explicitly controlled
 quiescent transition. Do not delete rows, reset tickets, repoint R2 or restore data
