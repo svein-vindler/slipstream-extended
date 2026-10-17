@@ -76,7 +76,7 @@ class FullExportTarget:
 @dataclass(frozen=True, repr=False)
 class RestoredSummaries:
     report: dict
-    base: RestoredBaseProof
+    base: RestoredBaseProof | VerifiedEmptyDerivedBaseProof
 
 
 def _scope(store):
@@ -385,11 +385,22 @@ def _publish_initial(pair, *, store, created):
     return manifest
 
 
-def restore_with_base(data_dir, store, *, flow_id):
-    """Proof exists only after the entire verified local pair is materialized."""
+def restore_with_base(data_dir, store, *, flow_id, allow_initial=False):
+    """Restore a verified pair, or explicitly prove a fresh summary target."""
     flow_id = _flow(flow_id)
     snapshot = _optional(store, MANIFEST_KEY, max_bytes=MAX_MANIFEST_BYTES)
     if snapshot is None:
+        if allow_initial:
+            # Only ordinary general refresh opts in. Existing local seeds and
+            # orphan remote summaries are never an implicit initial install.
+            if any((Path(data_dir) / name).exists() for name, _ in FILES):
+                raise SummaryUnverified()
+            _verify_absence(store)
+            seeds = _seed_hashes(data_dir)
+            if seeds != (None, None):
+                raise SummaryUnverified()
+            proof = VerifiedEmptyDerivedBaseProof(_scope(store), flow_id, _root(data_dir), seeds)
+            return RestoredSummaries({"generated_at": None, "files": []}, proof)
         raise SummaryUnverified()
     manifest, pair, stored, selection = _read_selected(store, snapshot, with_selection=True)
     root = Path(data_dir)
