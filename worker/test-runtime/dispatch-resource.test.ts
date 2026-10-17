@@ -127,12 +127,13 @@ it("C8 frozen-sequence resource: explicit POST rejection terminates but preserve
   await report("known_post_rejected", began, { safely_not_accepted: true, cooldown_retained: true, daily_used: await usage() });
 });
 
-it("C8 frozen-sequence resource: accepted compact receipt plus failed GET is not POST rejection", async () => {
+it("C8 frozen-sequence resource: accepted ACK awaits absent startup without reaching the denied GET", async () => {
   const began = performance.now();
   const provider: typeof fetch = async (_input, init) => init?.method === "POST"
     ? Response.json({ workflow_run_id: RUN.id }) : new Response(null, { status: 403 });
   const first = await service(provider).request(REQUEST);
-  expect(first).toMatchObject({ reason: "dispatch_unconfirmed", accepted: true, terminal: false });
+  expect(first).toMatchObject({ reason: "awaiting_startup_receipt", accepted: true, terminal: false,
+    should_continue_polling: true, data_ready: false });
   const late = await service(provider, NOW + 3 * 60 * 60_000).request(REQUEST);
   expect(late.request_id).toBe(first.request_id); expect(record(late.sync_status).job_start_confirmed).toBeNull();
   expect(await coordinator.activeFreshJob(freshScope(REQUEST), NOW + 3 * 60 * 60_000)).toMatchObject({ run_id: RUN.id });

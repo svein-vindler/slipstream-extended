@@ -7,9 +7,9 @@ import { latestNightReportSchema, activityRepairReportSchema, pipelineDiagnostic
   type PipelineDiagnostics } from "./sync-status";
 
 type Json = Record<string, unknown>;
-type Read = (keys: string[]) => Promise<Json>;
+type Read = (keys: string[]) => Promise<Json | null>;
 export type DispatchObservation = { operation: DispatchOperation; run: RefreshRun | null;
-  report: Json; pipeline: PipelineDiagnostics | null; fresh: boolean };
+  report: Json; pipeline: PipelineDiagnostics | null; fresh: boolean; awaiting_receipt: boolean };
 
 /** One admitted claim owns every control read; callbacks never issue I/O. */
 export class DispatchReader {
@@ -23,12 +23,13 @@ export class DispatchReader {
       owner_token: operation.owner_token };
     const claimed = await coordinator.claimDispatchRead(identity, intent, actorKey, this.now());
     const result: DispatchObservation = { operation: claimed.operation ?? operation, run: null,
-      report: {}, pipeline: null, fresh: false };
+      report: {}, pipeline: null, fresh: false, awaiting_receipt: false };
     if (!claimed.acquired || !claimed.claim || !claimed.operation) return result;
     let current = claimed.operation;
     let evidence: DispatchReadEvidence | null = null;
     let committed = false;
     let candidateRun: RefreshRun | null = null;
+    let receiptMissing = false;
     const take = async (kind: "run" | "receipt" | "report" | "diagnostics") => {
       const permitted = await coordinator.takeDispatchRead(identity, claimed.claim!, current.revision, kind, this.now());
       if (!permitted) return false;
@@ -39,6 +40,7 @@ export class DispatchReader {
       let receiptVerified = false;
       if (await take("receipt")) {
         const receipt = await this.read([`refresh/requests/${current.operation_id}.json`]);
+        receiptMissing = receipt === null;
         const recorded = await coordinator.recordDispatchReceipt(identity, claimed.claim, current.revision, receipt, this.now());
         // Never rebase a stale or rejected read onto the returned current revision.
         if (recorded.receipt_verified && recorded.operation) {
@@ -87,10 +89,17 @@ export class DispatchReader {
       }
     } catch {
       // Missing/failed GET evidence cannot become a direct POST rejection.
+      receiptMissing = false;
     } finally {
       const finished = await coordinator.finishDispatchRead(identity, claimed.claim, current.revision, evidence, this.now());
       result.operation = finished.operation ?? current;
       committed = finished.observation_committed;
+      // Only a confirmed absent object from our still-current claim is waitable.
+      // Malformed/failed reads and intervening owner/revision changes stay unknown.
+      result.awaiting_receipt = receiptMissing && finished.operation !== null
+        && finished.operation.revision === current.revision + 1
+        && finished.operation.owner_released_at === null && !finished.operation.evidence_conflict
+        && finished.operation.startup_receipt === null;
     }
     result.fresh = committed
       && result.operation.verified_binding?.run_id === candidateRun?.id && !result.operation.evidence_conflict;
