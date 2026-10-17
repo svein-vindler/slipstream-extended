@@ -31,6 +31,7 @@ from .local_bootstrap import prepare_environment
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2Store
 from .sources.garmin import _login
+from .summary_publication import SummaryUnverified, VerifiedEmptyDerivedBaseProof
 from .training_day import configuration as training_configuration
 
 
@@ -274,7 +275,8 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
     try:
         if request.mode != "night" and not request.repair_only:
             base = stage("restore_summaries", lambda store: summary_restore.restore_with_base(
-                str(data), store, flow_id=flow_id)).base
+                str(data), store, flow_id=flow_id,
+                allow_initial=request.mode == "general" and not request.backfill)).base
         if request.mode == "activity":
             stage("latest_activity", lambda store: latest_activity.run(
                 run_id=request.run_id, data_dir=str(data), lookback_days=7,
@@ -288,8 +290,20 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
                 request_id=request.request_id if startup is None else None, store=store, garmin=provider.get()))
         else:
             if request.include_granular:
-                stage("activity_baseline", lambda _: manual_activity_refresh.snapshot(
-                    data / "activities.csv", baseline), storage=False)
+                def snapshot_baseline(_):
+                    if isinstance(base, VerifiedEmptyDerivedBaseProof):
+                        if (base.flow_id != flow_id or base.local_root != str(data.resolve())
+                                or base.seed_hashes != (None, None)
+                                or any((data / name).exists() for name in ("activities.csv", "health_daily.csv"))):
+                            raise SummaryUnverified()
+                        # Preserve the absent CSV pair bound by the initial
+                        # proof. Only the requested manual import needs IDs.
+                        baseline.parent.mkdir(parents=True, exist_ok=True)
+                        baseline.write_text("[]", encoding="utf-8")
+                    else:
+                        manual_activity_refresh.snapshot(data / "activities.csv", baseline)
+
+                stage("activity_baseline", snapshot_baseline, storage=False)
             if request.backfill:
                 ranges = [(request.health_start, request.health_end)] if request.health_start else [
                     (f"{year:04}-01-01", f"{year:04}-12-31")

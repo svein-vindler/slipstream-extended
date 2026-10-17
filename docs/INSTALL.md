@@ -137,6 +137,13 @@ gh workflow disable scheduled-health-detail-backfill.yml
 
 Then start the bounded summary refresh:
 
+The first ordinary manual or scheduled refresh can create summaries when both
+local summary CSV files are absent and the summary namespace is verified empty.
+Other stored data, such as Coach profiles, is preserved. A missing manifest alone
+does not prove emptiness: partial summaries, unverified publications and storage
+errors stop the refresh rather than replacing existing data. Targeted and
+historical jobs do not use this first-summary bootstrap.
+
 ```bash
 gh workflow run refresh.yml
 gh run watch

@@ -43,10 +43,10 @@ def restore_summaries(data_dir: str, store: Any) -> dict[str, Any]:
     return result
 
 
-def restore_with_base(data_dir: str, store: Any, *, flow_id: str):
+def restore_with_base(data_dir: str, store: Any, *, flow_id: str, allow_initial=False):
     from .summary_publication import restore_with_base as capture
 
-    result = capture(data_dir, store, flow_id=flow_id)
+    result = capture(data_dir, store, flow_id=flow_id, allow_initial=allow_initial)
     log_report("summary_restore", result.report)
     return result
 
