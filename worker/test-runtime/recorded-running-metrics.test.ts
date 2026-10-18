@@ -222,7 +222,8 @@ for (const protocol of protocols) {
     const coach = await call("coach_input", protocol);
     expect(detail.available).toBe(true); expect(coach.available).toBe(true);
     expect(coach.analysis.analyzer_version).toBe("1.1.0");
-    expect(coach.analysis.analysis_id).toBe("79e1d84c1fc96faa5c634d66");
+    // FIT SDK 21.218 writes its profile version into this newly generated FIT source.
+    expect(coach.analysis.analysis_id).toBe("deb436b814332360e4773d6d");
     expect(detail.recorded_running_metrics).toEqual(coach.analysis.recorded_running_metrics);
     expect(detail.recorded_running_metrics).toMatchObject({ activity_id: "42", association: "matched", local_date: "2026-10-08",
       session_start_time_utc: "2026-10-07T23:30:00.000Z", measured_at_utc: "2026-10-08T00:00:00.000Z",
@@ -236,7 +237,7 @@ for (const protocol of protocols) {
     expect([...rows].map(([name, body]) => [name, body instanceof Uint8Array ? Array.from(body) : body])).toEqual(before);
     expect(operations).toEqual(["HEAD summary/activities.csv", "GET summary/activities.csv", `GET ${fitKey}`, `GET ${enduranceKey}`,
       "HEAD summary/activities.csv", "GET activities/2026/42/coach-input/v1/latest-ready.json",
-      "GET activities/2026/42/coach-input/v1/canonical/79e1d84c1fc96faa5c634d66.json"]);
+      "GET activities/2026/42/coach-input/v1/canonical/deb436b814332360e4773d6d.json"]);
   });
   it(`recorded metrics expanded: genuine 1.0.1 Coach selection is read unchanged without adding a block via ${protocol}`, async () => {
     rows.clear();

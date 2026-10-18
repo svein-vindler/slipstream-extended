@@ -157,6 +157,21 @@ Access policies or repository secrets.
 - Keep dependency versions aligned between repositories after validation; do
   not maintain silent long-lived forks.
 
+### Garmin FIT SDK licensing and decoder updates
+
+`garmin-fit-sdk` is an external dependency, not SDK code distributed under this
+project's MIT license. Version 21.218.0 includes Garmin's
+[FIT Protocol License Agreement](https://github.com/garmin/fit-python-sdk/blob/7e4b3132d50de66f5adfcd6c0addeaade41536d4/LICENSE.txt).
+Installers must review that agreement for their intended use, including its
+distribution and SDK-benchmarking restrictions. This project does not vendor or
+relicense the SDK; an installation reference is not a general redistribution
+grant or a legal compatibility guarantee.
+
+Decoder updates must retain the real synthetic FIT field/scaling/sentinel tests,
+Coach identity and historical-byte preservation, encrypted-backup compatibility
+and authenticated JSON/SSE reader checks. An SDK update must not automatically
+regenerate stored analyses or rewrite history.
+
 ### Source maps and existing installations
 
 [Wrangler 4.151](https://github.com/cloudflare/workers-sdk/releases/tag/wrangler%404.151.0)
