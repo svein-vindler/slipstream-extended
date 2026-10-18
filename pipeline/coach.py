@@ -13,8 +13,10 @@ import math
 from datetime import date
 from typing import Any
 
+from .recorded_running_metrics import recorded_running_metrics
+
 COACH_SCHEMA_VERSION = 1
-ANALYZER_VERSION = "1.0.1"
+ANALYZER_VERSION = "1.1.0"
 
 
 def _number(value: Any) -> float | None:
@@ -234,7 +236,7 @@ def _section_summaries(structure: dict[str, Any], summary: dict[str, Any]):
 
 
 def _zone_distribution(seconds_by_bpm: dict[str, Any], profile: dict[str, Any]):
-    buckets = {zone["label"]: 0.0 for zone in profile["zones"]}
+    buckets = [0.0 for _ in profile["zones"]]
     below = 0.0
     above = 0.0
     observed = 0.0
@@ -246,17 +248,16 @@ def _zone_distribution(seconds_by_bpm: dict[str, Any], profile: dict[str, Any]):
         if bpm is None or seconds is None or seconds <= 0:
             continue
         observed += seconds
-        match = next((zone for zone in profile["zones"]
+        match = next((index for index, zone in enumerate(profile["zones"])
                       if zone["min_bpm"] <= bpm <= zone["max_bpm"]), None)
-        if match:
-            buckets[match["label"]] += seconds
+        if match is not None:
+            buckets[match] += seconds
         elif bpm < first_min:
             below += seconds
         elif bpm > last_max:
             above += seconds
     rows = []
-    for zone in profile["zones"]:
-        seconds = buckets[zone["label"]]
+    for zone, seconds in zip(profile["zones"], buckets, strict=True):
         rows.append({**zone, "seconds": round(seconds, 2),
                      "percent": round(100 * seconds / observed, 2) if observed else 0.0})
     return {
@@ -342,6 +343,7 @@ def build_coach_input(
             "references": profile["references"],
         },
         "user_context": context,
+        "recorded_running_metrics": recorded_running_metrics(activity, decoded_fit, endurance),
         "time_basis": "elapsed",
         "summary": {
             "elapsed_seconds": summary.get("duration_seconds"),

@@ -21,6 +21,7 @@ PLAN_KEY = "backfill/coach-input/v1/plan.json"
 PROFILE_PREFIX = "coach/profiles/v1/"
 MAX_ACTIVITIES_PER_RUN = 50
 LEGACY_ANALYZER_VERSION = "1.0.0"
+SUPPORTED_ANALYZER_VERSIONS = (LEGACY_ANALYZER_VERSION, "1.0.1", ANALYZER_VERSION)
 BULK_REUSE_VERSION = 1
 
 
@@ -91,11 +92,32 @@ def _latest_context_keys(all_keys: set[str]) -> dict[str, str]:
     return latest
 
 
-def _activity_context_key(keys: set[str], activity: dict[str, Any]) -> str | None:
+def _activity_context_index(keys: set[str]) -> dict[str, str]:
+    """Keep each exact context namespace's newest direct JSON child."""
+    latest: dict[str, str] = {}
+    for key in keys:
+        parts = key.split("/", 5)
+        if (len(parts) != 6 or parts[0] != "activities" or parts[3:5] != ["context", "v1"]
+                or "/" in parts[5] or not parts[5].endswith(".json")):
+            continue
+        prefix = "/".join(parts[:5]) + "/"
+        previous = latest.get(prefix)
+        if previous is None or parts[5] > previous.rsplit("/", 1)[-1]:
+            latest[prefix] = key
+    # Cross-year ambiguity belongs to the queried activity, not index creation.
+    return latest
+
+
+def _activity_context_key(
+    keys: set[str], activity: dict[str, Any], *, context_index: dict[str, str] | None = None,
+) -> str | None:
     prefixes = [f"activities/{year}/{activity['id']}/context/v1/"
                 for year in activity_calendar_years(activity["date"])]
-    candidates = [key for key in keys if any(key.startswith(prefix) and "/" not in key[len(prefix):]
-                                           for prefix in prefixes) and key.endswith(".json")]
+    if context_index is None:
+        candidates = [key for key in keys if any(key.startswith(prefix) and "/" not in key[len(prefix):]
+                                               for prefix in prefixes) and key.endswith(".json")]
+    else:
+        candidates = [context_index[prefix] for prefix in prefixes if prefix in context_index]
     # Compare append-only timestamp basenames, not namespace years.
     candidates.sort(key=lambda key: key.rsplit("/", 1)[-1], reverse=True)
     if len(candidates) > 1 and candidates[0].rsplit("/", 1)[-1] == candidates[1].rsplit("/", 1)[-1]:
@@ -222,7 +244,7 @@ def _bulk_cached_proof(proof, activity, profile, required, revisions, keys, cont
     if not isinstance(proof, dict) or not profile:
         return False
     engine = proof.get("analyzer_version")
-    if engine not in (LEGACY_ANALYZER_VERSION, ANALYZER_VERSION):
+    if engine not in SUPPORTED_ANALYZER_VERSIONS:
         return False
     key = proof.get("analysis_key")
     canonical = f"activities/{activity['date'][:4]}/{activity['id']}/coach-input/v1/canonical/"
@@ -266,7 +288,7 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
         repair_marker = engine == ANALYZER_VERSION and (not valid_schema or not marked and not unmarked)
         if not repair_marker and (not valid_schema or not marked and not unmarked):
             return "unknown", None
-        if (engine not in (LEGACY_ANALYZER_VERSION, ANALYZER_VERSION)
+        if (engine not in SUPPORTED_ANALYZER_VERSIONS
                 or type(candidate.get("schema_version")) is not int or candidate["schema_version"] != 1
                 or candidate.get("analysis_id") != key[len(canonical):-5]
                 or str(candidate.get("activity_id")) != activity["id"]
@@ -556,6 +578,7 @@ def run(
     else:
         object_revisions = {}
         all_keys = store.list_keys("activities/")
+    context_index = _activity_context_index(all_keys)
     running_ids = {activity["id"] for activity in activities}
     manifest_revisions = _manifest_revisions(
         store, all_keys, object_revisions, running_ids
@@ -642,7 +665,7 @@ def run(
                 proofs.get(activity["id"]), activity, select_profile(profiles, activity["date"]),
                 [f"activities/{activity['date'][:4]}/{activity['id']}/{name}" for name in (
                     "activity.v1.json", "activity.endurance.v1.json", "activity.tcx")],
-                object_revisions, all_keys, _activity_context_key(all_keys, activity),
+                object_revisions, all_keys, _activity_context_key(all_keys, activity, context_index=context_index),
             ) for activity in activities if activity["id"] in processed
         )
         if (previous.get("bulk_reuse_version") == BULK_REUSE_VERSION and proofs_current
@@ -708,7 +731,7 @@ def run(
             )
             processed_sources.pop(activity["id"], None)
             continue
-        context_key = _activity_context_key(all_keys, activity)
+        context_key = _activity_context_key(all_keys, activity, context_index=context_index)
         required = [fit_key, endurance_key, tcx_key]
         cached_proof = reuse_proofs.get(activity["id"])
         cached_engine = cached_proof.get("analyzer_version") if isinstance(cached_proof, dict) else None
@@ -742,7 +765,7 @@ def run(
                     deferred_legacy += 1
                     blocked.append({"activity_id": activity["id"], "reason": "historical_analysis_unverified"})
                     continue
-                context_key = _activity_context_key(all_keys, activity)
+                context_key = _activity_context_key(all_keys, activity, context_index=context_index)
                 clock_revisions[activity["id"]] = {
                     "date": day, "source": date_source, "summary_utc": clocks[activity["id"]]["utc"],
                     "source_key": fit_key, "source_revision": object_revisions.get(fit_key),
@@ -780,17 +803,18 @@ def run(
                 outcome = "changed"
             if outcome == "retained" and activity["id"] in processed_sources:
                 previous_signature = processed_sources[activity["id"]]
-                actual_signature = _source_signature(
-                    activity, profile, context_key=context_key,
-                    manifest_revision=manifest_revisions.get(activity["id"]),
-                    analyzer_version=proof["analyzer_version"],
-                )
-                legacy_signature = _source_signature(
-                    activity, profile, context_key=context_key,
-                    manifest_revision=manifest_revisions.get(activity["id"]),
-                    analyzer_version=LEGACY_ANALYZER_VERSION,
-                )
-                if previous_signature not in (actual_signature, legacy_signature):
+                # Only after the complete retained proof above: an explicit
+                # same-input targeted upgrade can leave an older bulk checkpoint.
+                # Reconstruct each known engine's original signature, not its
+                # analysis content or the new builder output.
+                supported_signatures = {
+                    _source_signature(
+                        activity, profile, context_key=context_key,
+                        manifest_revision=manifest_revisions.get(activity["id"]),
+                        analyzer_version=engine,
+                    ) for engine in SUPPORTED_ANALYZER_VERSIONS
+                }
+                if previous_signature not in supported_signatures:
                     outcome = "changed"
             if outcome == "retained":
                 reuse_proofs[activity["id"]] = proof
@@ -869,7 +893,7 @@ def run(
                 processed_sources.pop(activity["id"], None)
                 clock_blocked += 1
                 continue
-            item["context_key"] = _activity_context_key(all_keys, activity)
+            item["context_key"] = _activity_context_key(all_keys, activity, context_index=context_index)
             item["source_signature"] = _source_signature(
                 activity, item["profile"], context_key=item["context_key"],
                 manifest_revision=manifest_revisions.get(activity["id"]),

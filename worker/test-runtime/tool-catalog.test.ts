@@ -96,9 +96,52 @@ it("advertises the D4 scalar metric contract in every registration mode", () => 
   }
 });
 
-// Historical guards normalize only this reviewed additive input/description.
-// Full current snapshots and the explicit metadata test retain the new contract.
+it("advertises optional recorded running fields without changing the stored session contract", () => {
+  for (const mode of modes) {
+    const schema = requireTool(mode.tools, "endurance_session").outputSchema!;
+    const properties = schema.properties as Record<string, Record<string, unknown>>;
+    expect(schema.required).not.toContain("recorded_running_metrics");
+    expect(properties.recorded_running_metrics.additionalProperties).toBe(false);
+    const validate = validator.getValidator(schema);
+    const block = { schema_version: 1, source: "garmin_fit_session", method: "fit_recorded_measurement", activity_id: "42",
+      association: "matched", local_start_time: null, local_date: null, session_start_time_utc: null,
+      measured_at_utc: null, source_fit_sha256: null,
+      average_power: { status: "available", value: 0, unit: "W", source_field: "avg_power" },
+      average_step_length: { status: "missing", value: null, unit: "mm", source_field: "avg_step_length" },
+      average_ground_contact_time: { status: "invalid", value: null, unit: "ms", source_field: "avg_stance_time" },
+      average_vertical_oscillation: { status: "unavailable", value: null, unit: "mm", source_field: "avg_vertical_oscillation" },
+      average_vertical_ratio: { status: "available", value: 0, unit: "%", source_field: "avg_vertical_ratio" } };
+    expect(validate({ available: true }).valid).toBe(true);
+    expect(validate({ available: true, recorded_running_metrics: block }).valid).toBe(true);
+    for (const invalid of [
+      { ...block, average_power: { ...block.average_power, value: "0" } },
+      { ...block, average_power: { ...block.average_power, value: false } },
+      { ...block, average_power: { ...block.average_power, value: null } },
+      { ...block, average_step_length: { ...block.average_step_length, unit: "cm" } },
+      { ...block, private_source: "not part of the contract" },
+    ]) expect(validate({ available: true, recorded_running_metrics: invalid }).valid).toBe(false);
+  }
+});
+
+// Historical guards remove only explicitly checked additions. Current full
+// snapshots retain the actual new optional measurement schema and descriptions.
 function beforeExplicitInspection(tool: ToolContract): ToolContract {
+  if (tool.name === "endurance_session") {
+    const previous = structuredClone(tool);
+    const schema = previous.outputSchema!;
+    expect((schema.properties as Record<string, unknown>).recorded_running_metrics).toBeDefined();
+    expect(schema.required).not.toContain("recorded_running_metrics");
+    delete (schema.properties as Record<string, unknown>).recorded_running_metrics;
+    expect(previous.description).toBe("Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates and five recorded running measurements (power, step length, ground contact time, vertical oscillation and vertical ratio), reusing one bounded stored FIT JSON read. Missing or unverified optional fields do not change dataset availability.");
+    previous.description = "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates with one bounded stored FIT JSON read; missing context does not change dataset availability.";
+    return previous;
+  }
+  if (tool.name === "coach_input") {
+    const previous = structuredClone(tool);
+    expect(previous.description).toBe("Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. New analyzer 1.1.0 results also include five optional recorded FIT running measurements with source units, identity, clocks and availability; historical analyses remain unchanged.");
+    previous.description = "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context.";
+    return previous;
+  }
   if (tool.name !== "refresh_status") return tool;
   const previous = structuredClone(tool);
   delete (previous.inputSchema.properties as Record<string, unknown>).terminal_inspection;

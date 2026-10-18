@@ -1,6 +1,7 @@
 import { dispatchStatusSchema } from "./dispatch-status";
 import { z } from "zod";
 import { trainingContextSchema } from "./training-context";
+import { recordedRunningMetricsSchema } from "./recorded-running-metrics";
 import { detailClock, hrvReadingSchema, hrvSummarySchema,
   sleepDetailSummarySchema, sleepDetailScoreSchema, sleepDetailStageSchema,
   strengthSessionSchema, enduranceSessionSchema } from "./detail-projection";
@@ -442,6 +443,7 @@ export const outputSchemas = {
     message: z.string().optional(),
     session: enduranceSessionSchema.optional(),
     training_context: trainingContextSchema.optional(),
+    recorded_running_metrics: recordedRunningMetricsSchema.optional(),
   }),
   coach_profile: z.object({
     available: z.boolean(),

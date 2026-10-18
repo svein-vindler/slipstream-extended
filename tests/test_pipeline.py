@@ -1874,6 +1874,37 @@ def test_coach_profile_selection_preserves_historical_effective_dates():
     assert select_profile([old, new], "2026-09-01")["profile_id"] == "new"
 
 
+def test_coach_input_keeps_duplicate_zone_labels_separate(record_property):
+    profile = _coach_profile()
+    profile["zones"] = [
+        {"label": "Easy", "min_bpm": 100, "max_bpm": 120},
+        {"label": "Easy", "min_bpm": 121, "max_bpm": 140},
+    ]
+    result = build_coach_input(
+        activity={"id": "123", "date": "2026-09-21", "type": "Run"},
+        decoded_fit={"source_fit_sha256": "synthetic-fit", "messages": {}},
+        endurance={
+            "summary": {"duration_seconds": 120},
+            "heart_rate_seconds_by_bpm": {"110": 60, "130": 60},
+        },
+        profile=profile, tcx_sha256="synthetic-tcx",
+    )
+    distribution = result["heart_rate"]["zones_total"]
+    record_property("zone_distribution", json.dumps(distribution, sort_keys=True))
+    assert result["profile"]["zones"] == profile["zones"]
+    assert distribution["zones"] == [
+        {"label": "Easy", "min_bpm": 100, "max_bpm": 120,
+         "seconds": 60.0, "percent": 50.0},
+        {"label": "Easy", "min_bpm": 121, "max_bpm": 140,
+         "seconds": 60.0, "percent": 50.0},
+    ]
+    assert distribution["observed_seconds"] == 120.0
+    assert sum(zone["seconds"] for zone in distribution["zones"]) == 120.0
+    assert sum(zone["percent"] for zone in distribution["zones"]) == 100.0
+    assert distribution["below_first_zone_seconds"] == 0.0
+    assert distribution["above_last_zone_seconds"] == 0.0
+
+
 def test_coach_input_uses_elapsed_hr_zones_and_keeps_plan_separate_from_execution():
     decoded = {
         "source_fit_sha256": "fit-hash",

@@ -456,11 +456,85 @@ def _analysis_shape(value):
         raise BackupError("invalid_analysis_limitations")
 
 
+def _recorded_running_metrics_shape(block, analysis):
+    metrics = {
+        "average_power": ("W", "avg_power"),
+        "average_step_length": ("mm", "avg_step_length"),
+        "average_ground_contact_time": ("ms", "avg_stance_time"),
+        "average_vertical_oscillation": ("mm", "avg_vertical_oscillation"),
+        "average_vertical_ratio": ("%", "avg_vertical_ratio"),
+    }
+    _record(block, {
+        "schema_version": (int,), "source": (str,), "method": (str,),
+        "activity_id": (str,), "association": (str,),
+        **{name: _TEXT for name in (
+            "local_start_time", "local_date", "session_start_time_utc", "measured_at_utc",
+            "source_fit_sha256",
+        )},
+        **{name: (dict,) for name in metrics},
+    })
+    if (block["schema_version"] != 1 or block["source"] != "garmin_fit_session"
+            or block["method"] != "fit_recorded_measurement"
+            or block["activity_id"] != analysis["activity_id"]
+            or block["association"] not in (
+                "matched", "source_missing", "invalid_schema", "decode_errors", "id_mismatch",
+                "time_mismatch", "sessions_missing", "sessions_ambiguous", "unsupported_sport",
+            )):
+        raise BackupError("invalid_recorded_running_metrics")
+    digest = block["source_fit_sha256"]
+    if digest is not None and (not re.fullmatch(r"[a-f0-9]{64}", digest)
+                               or digest != analysis["source"]["fit_sha256"]):
+        raise BackupError("invalid_recorded_running_source")
+    local = block["local_start_time"]
+    if local is not None:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?", local):
+            raise BackupError("invalid_recorded_running_time")
+        try:
+            datetime.fromisoformat(local)
+        except ValueError:
+            raise BackupError("invalid_recorded_running_time") from None
+    if block["local_date"] != (local[:10] if local else None):
+        raise BackupError("invalid_recorded_running_time")
+    for name in ("session_start_time_utc", "measured_at_utc"):
+        stamp = block[name]
+        if stamp is not None:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", stamp):
+                raise BackupError("invalid_recorded_running_time")
+            _timestamp(stamp)
+    start, measured = block["session_start_time_utc"], block["measured_at_utc"]
+    matched = block["association"] == "matched"
+    if (matched and (start is None or local is not None
+                     and block["local_date"] != analysis["activity"]["date"])
+            or not matched and (start is not None or measured is not None)
+            or measured is not None and (start is None or measured < start)):
+        raise BackupError("invalid_recorded_running_time")
+    for name, (unit, field) in metrics.items():
+        metric = block[name]
+        _record(metric, {"status": (str,), "value": _NUMBER, "unit": (str,),
+                         "source_field": (str,)})
+        status, number = metric["status"], metric["value"]
+        if (metric["unit"] != unit or metric["source_field"] != field
+                or status not in (("available", "missing", "invalid") if matched
+                                  else ("unavailable",))):
+            raise BackupError("invalid_recorded_running_metric")
+        if status == "available":
+            try:
+                valid = number is not None and math.isfinite(number)
+            except OverflowError:
+                valid = False
+            if not valid:
+                raise BackupError("invalid_recorded_running_metric")
+        elif number is not None:
+            raise BackupError("invalid_recorded_running_metric")
+
+
 def _validate_value(key: str, value: Any):
     kind, parts = key_info(key)
     fields = {"profile": _PROFILE_FIELDS, "context": _CONTEXT_FIELDS, "analysis": _ANALYSIS_FIELDS}[
         kind
     ]
+    if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") == "1.1.0":
+        fields = fields | {"recorded_running_metrics"}
     _exact(value, fields)
     if type(value["schema_version"]) is not int or value["schema_version"] != 1:
         raise BackupError("unsupported_object_version")
@@ -522,6 +596,8 @@ def _validate_value(key: str, value: Any):
             if not (name == "fit_sha256" and digest is None):
                 if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
                     raise BackupError("invalid_analysis_source_hash")
+        if value["analyzer_version"] == "1.1.0":
+            _recorded_running_metrics_shape(value["recorded_running_metrics"], value)
 
 
 def _references(values: dict[str, dict]) -> list[dict]:

@@ -126,10 +126,14 @@ result that bypasses numeric normalization. An addressed legacy pointer is
 checked/rebuilt on its next ordinary targeted request; this is not a history
 sweep. Most existing content-hash IDs remain identical. A legacy targeted
 integer moving-time representation can acquire a new ID with normalized content;
-its earlier bytes remain stored. Analyzer/schema versions and consumer payload
-fields are unchanged.
+its earlier bytes remain stored. Numeric normalization alone does not change
+the schema or key versions. The separately versioned recorded-field addition
+is described below.
 
 ## Offline verification
+
+The selection-fix comparisons in this section predate recorded running fields.
+They do not measure the engine `1.1.0` payload or the context-index composition.
 
 `tests/test_coach_versions.py` exercises the actual bulk and targeted entry
 points through `R2Store` with a synthetic S3 boundary: stable identity, metadata
@@ -236,6 +240,44 @@ the generation queue. A smaller batch or priority ordering is not authority to
 regenerate the rest of history. Explicit historical engine upgrades require
 separate authorization. Limits, schedules and conditional publication stay intact.
 
+## Recorded running measurements (engine 1.1.0)
+
+New analyses add optional `recorded_running_metrics` (block schema 1; the outer
+Coach schema and v1 storage paths remain unchanged). It reports only recorded
+FIT session values: `average_power` in W, `average_step_length` in mm,
+`average_ground_contact_time` in ms, `average_vertical_oscillation` in mm and
+`average_vertical_ratio` in %. The pinned FIT decoder already applies scaling;
+the projection does not rescale, infer stride/cadence, or estimate missing data.
+Each field has `status`, `value`, `unit` and `source_field`. Zero is available;
+absent/null fields are missing, and nonnumeric/nonfinite values are invalid.
+
+The block binds the numeric Garmin activity ID, source FIT hash, exact UTC FIT
+session start, validated Garmin-local clock/date and an optional recorded
+measurement time. Exactly one session must match the decoded activity's GMT
+start; its local calendar must agree with the producer's selected activity date
+when a local clock is declared. A later TCX first trackpoint is not a mismatch.
+At least one caller/decoded activity type must identify running, and no declared
+activity/session sport may contradict it. Missing session sport alone is not a
+blocker. Failed association makes only these optional fields unavailable, not
+the existing Coach analysis. No source is fetched just to project the fields.
+
+Verified unchanged `1.0.0` and `1.0.1` analyses keep their original content,
+identity, selection and engine label. Their absent block is not filled in while
+reading or verifying history. Only normal new/changed inputs or a separately
+authorized selected calculation generate `1.1.0`; changing the engine alone
+does not create a historical recalculation queue. After a complete retained
+selection proof, a same-input older bulk checkpoint can recognize an explicitly
+updated selection without calculating it again. Historical corruption is held,
+not given the current engine's narrow repair permission. New canonical data is
+still create-only and committed before the ready pointer and bulk checkpoint.
+
+The same already-stored FIT can support recorded fields in a new endurance
+detail read while an older selected Coach analysis still omits the block. This
+does not authorize regenerating that analysis. Old producers may not recognize
+`1.1.0` proofs and may hold them instead of reusing them. Prefer a compatible
+forward fix after checking producer/reader compatibility; do not blindly revert
+the producer, overwrite history or turn a hold into automatic recalculation.
+
 ## Bulk profile snapshot
 
 Each bulk invocation lists the complete profile namespace once. The same local
@@ -252,3 +294,16 @@ used by shared write guards remain complete. This does not change capacity,
 write limits or schedules. Synthetic caller tests compare no-op, new/changed,
 input-invalidation and 99-to-100-profile workloads; removing a repeated LIST is
 not a claim about live latency, provider billing or total account consumption.
+
+The effective profile is the maximum `(effective_from, created_at)` eligible
+for the requested date, with missing creation time treated as empty. A full
+metadata tie retains the first canonical key, hence the smallest profile ID.
+The MCP `coach_profile` reader follows the same choice, including without a
+date. New profiles do not rewrite existing analyses or user thresholds.
+
+Bulk context lookup builds one invocation-local index from the same complete
+activity keyset. It retains the newest direct JSON child per exact namespace
+and compares timestamp basenames across only the activity's allowed calendar
+years. Selected top ties remain ambiguous; unrelated ties do not block index
+creation. Targeted lookup and the full fingerprint keyset stay unchanged.
+There is no persistent context cache or additional inventory/provider call.
