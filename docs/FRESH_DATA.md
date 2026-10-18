@@ -163,8 +163,14 @@ fingerprints instead of unconditional forced downloads. The night job calls
 only `get_sleep_data(wake_date)` and `get_hrv_data(wake_date)`.
 
 Use `refresh_status(request_id=...)` for follow-up. A run ID can also resolve a
-known targeted job. There are at most three short automatic polling windows per job,
-with two GitHub checks and a four-second interval per window. Stop when
+known targeted job. There are at most three short automatic polling windows per job.
+For modern targeted requests, the coordinator spaces admitted observations by
+25 seconds using its existing durable lease table. An early follow-up waits
+server-side for the remaining delay without spending another ticket or issuing
+control reads. Admission is rechecked after waiting, including concurrent callers;
+each call waits at most twice and cannot exceed the same three-ticket budget.
+This is not a retry of a failed control read and does not confirm startup by itself.
+Legacy requests and the separate general-refresh contract are unchanged. Stop when
 `should_continue_polling=false`, even if `terminal=false`, and report the
 retry guidance. Default calls, including `terminal_inspection=false`, do not add
 another window. After all three tickets are spent, only a later expressly

@@ -50,7 +50,7 @@ function service(fetcher: typeof fetch, now = NOW) {
     return fetcher(input, init);
   };
   return new FreshDataService(testEnv, { getActivities: async () => [], getR2Json: read,
-    getCoachProfiles: async () => ({ keys: [], profiles: [] }) }, CONFIG, () => now, observed, async () => {});
+    getCoachProfiles: async () => ({ keys: [], profiles: [] }) }, CONFIG, () => now, observed, async ms => { now += ms; });
 }
 async function usage() {
   return runInDurableObject(coordinator, (_instance, state) => state.storage.sql.exec<{ used: number }>(

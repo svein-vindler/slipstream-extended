@@ -277,7 +277,7 @@ export class DispatchOperations {
 
   claim(identity: DispatchIdentity, intent: DispatchClaim["intent"], actorKey: string, nowMs: number,
     reserveStatus: (key: string, now: number, ttl: number) => boolean):
-    { acquired: boolean; operation: DispatchOperation | null; claim?: DispatchClaim } {
+    { acquired: boolean; operation: DispatchOperation | null; claim?: DispatchClaim; retryAfterMs?: number } {
     if (!Number.isFinite(nowMs) || !["initial", "shared", "status", "terminal_inspection"].includes(intent)) throw new Error("Invalid dispatch claim.");
     const op = this.current(identity);
     if (!op || !this.owns(op) || op.read_claim || op.evidence_conflict || !("startup_receipt" in op)) return { acquired: false, operation: op };
@@ -305,8 +305,8 @@ export class DispatchOperations {
       }
     } else {
       const job = this.storage.sql.exec<{ polls: number; expires_at: number; state: string;
-        scope: string; kind: string; run_id: number | null }>(
-        "SELECT polls, expires_at, state, scope, kind, run_id FROM fresh_jobs WHERE request_id = ?", op.operation_id).toArray()[0];
+        scope: string; kind: string; run_id: number | null; request: string }>(
+        "SELECT polls, expires_at, state, scope, kind, run_id, request FROM fresh_jobs WHERE request_id = ?", op.operation_id).toArray()[0];
       if (!job || job.state !== "active") return { acquired: false, operation: op };
       if (intent === "terminal_inspection") {
         if (job.polls !== 3 || op.terminal_inspection_used || !actorKey || actorKey.length > 128
@@ -320,6 +320,20 @@ export class DispatchOperations {
         op.terminal_inspection_used = true;
       } else {
         if (job.polls >= 3 || nowMs >= job.expires_at && intent !== "status") return { acquired: false, operation: op };
+        // Modern targeted requests identify themselves with requestedAt. Use
+        // the existing lease table to space actual observations, even when the
+        // dispatch itself was slow. Early callers spend no ticket/start no I/O.
+        // No new operation schema; legacy requests retain existing admission.
+        let requestedAt: unknown;
+        try { requestedAt = JSON.parse(job.request)?.requestedAt; } catch { /* Legacy request. */ }
+        if (typeof requestedAt === "number" && Number.isSafeInteger(requestedAt) && requestedAt >= 0) {
+          const key = "targeted-poll:" + op.operation_id;
+          const lease = this.storage.sql.exec<{ expires_at: number }>(
+            "SELECT expires_at FROM refresh_leases WHERE lease_key = ?", key).toArray()[0];
+          if (lease && lease.expires_at > nowMs) return { acquired: false, operation: op,
+            retryAfterMs: Math.min(25_000, lease.expires_at - nowMs) };
+          if (!reserveStatus(key, nowMs, 25_000)) throw new Error("Targeted status admission changed.");
+        }
         this.storage.sql.exec("UPDATE fresh_jobs SET polls = polls + 1 WHERE request_id = ? AND polls < 3", op.operation_id);
       }
       limit = nowMs >= job.expires_at ? 1 : 2;

@@ -505,8 +505,17 @@ export class FreshDataService {
       return this.response(await this.snapshot(request), "This legacy operation has no verified dispatch record. Keep its correlation for maintainer inspection.",
         { accepted, request_id: job.request_id, terminal: false, should_continue_polling: false });
     }
-    const observed = await new DispatchReader(this.env, this.config, keys => this.jsonNullable(keys, true), this.now, this.fetcher)
-      .observe(operation, intent, this.actorKey);
+    const dispatchReader = new DispatchReader(this.env, this.config, keys => this.jsonNullable(keys, true), this.now, this.fetcher);
+    let observed = await dispatchReader.observe(operation, intent, this.actorKey);
+    // Only an early admission can wait: never retry failed/unknown control I/O.
+    // The coordinator atomically keeps the same three observation tickets.
+    for (let waits = 0; waits < 2 && observed.retryAfterMs !== undefined; waits++) {
+      if (!Number.isSafeInteger(observed.retryAfterMs) || observed.retryAfterMs <= 0 || observed.retryAfterMs > 25_000) break;
+      await this.sleeper(observed.retryAfterMs);
+      const current = await coordinator.dispatchOperation(job.request_id);
+      if (!current || current.owner_key !== operation.owner_key || current.owner_token !== operation.owner_token) break;
+      observed = await dispatchReader.observe(current, intent, this.actorKey);
+    }
     const snapshot = await this.snapshot(request);
     if (observed.report.source_checked === false && observed.report.kind !== "activity-repair") {
       snapshot.source_fresh = false; snapshot.source_freshness_reason = "current_check_failed";
