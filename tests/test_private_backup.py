@@ -1,5 +1,6 @@
 """Synthetic-only backup and adversarial import tests; no external services."""
 
+import base64
 import copy
 import gzip
 import hashlib
@@ -25,6 +26,7 @@ from pipeline.backup_source import (
     SourceChanged,
 )
 from pipeline.coach import build_coach_input, validate_profile
+from scripts.build_recorded_running_metrics_contract import build as build_recorded_fixture
 
 PASSWORD = b"synthetic-test-password-only"
 SCOPE = Scope((("2026", "900001"),))
@@ -127,12 +129,85 @@ def test_round_trip_all_versions_exact_bytes_and_references(archive, tmp_path):
     assert not (target / "RESTORE-INCOMPLETE").exists()
 
 
+def test_current_recorded_analysis_backup_verify_restore_preserves_producer_bytes(tmp_path):
+    fixture = build_recorded_fixture()  # Real synthetic FIT -> decoder -> run_one -> canonical.
+    objects = {}
+    for key, encoded in fixture["objects_base64"].items():
+        body = base64.b64decode(encoded)
+        if "/canonical/" in key:
+            objects[key] = body
+            analysis = json.loads(gzip.decompress(body))
+        elif key.startswith("coach/profiles/"):
+            # The reader fixture uses minimal input; backup stores validated profiles.
+            profile = validate_profile({**json.loads(body), "created_at": "2026-01-01T00:00:00Z"})
+            objects[f"coach/profiles/v1/{profile['effective_from']}/{profile['profile_id']}.json"] = (
+                backup._json_bytes(profile)
+            )
+    assert analysis["analyzer_version"] == "1.1.0"
+    assert analysis["recorded_running_metrics"]["association"] == "matched"
+    assert analysis["recorded_running_metrics"]["average_power"]["value"] == 250
+    path = tmp_path / "recorded.slbk"
+    backup.create_backup(MemorySource(objects), Scope((("2026", "42"),)), path, PASSWORD)
+    assert backup.verify_backup(path, PASSWORD).objects == objects
+    target = tmp_path / "recorded-restore"
+    backup.restore_local(path, PASSWORD, target)
+    restored = {
+        path.relative_to(target / "objects").as_posix(): path.read_bytes()
+        for path in (target / "objects").rglob("*.json")
+    }
+    assert restored == objects
+    assert not list(target.rglob("latest-ready.json"))
+
+
 def test_plan_is_read_only(archive, tmp_path):
     before = sorted(str(path) for path in tmp_path.rglob("*"))
     result = backup.restore_plan(archive, PASSWORD, tmp_path / "preview")
     assert result["would_write_objects"] == 6
     assert result["derived_pointers_created"] == 0
     assert sorted(str(path) for path in tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize(
+    ("path", "bad"),
+    [
+        (("unexpected",), "not-in-analysis-contract"),
+        (("recorded_running_metrics", "unexpected"), "not-in-block-contract"),
+        (("recorded_running_metrics", "average_power", "unexpected"), "not-in-metric-contract"),
+        (("analyzer_version",), "1.0.1"),  # An old version cannot carry the new extension.
+        (("analyzer_version",), "9.9.9"),
+        (("recorded_running_metrics",), None),
+        (("recorded_running_metrics", "schema_version"), True),
+        (("recorded_running_metrics", "activity_id"), "999"),
+        (("recorded_running_metrics", "association"), "guessed"),
+        (("recorded_running_metrics", "source_fit_sha256"), "0" * 64),
+        (("recorded_running_metrics", "local_date"), "2026-01-02"),
+        (("recorded_running_metrics", "session_start_time_utc"), "2026-01-01T10:00:00"),
+        (("recorded_running_metrics", "average_power", "unit"), "kW"),
+        (("recorded_running_metrics", "average_power", "source_field"), "estimated_power"),
+        (("recorded_running_metrics", "average_power", "status"), "missing"),
+        (("recorded_running_metrics", "average_power", "value"), True),
+        (("recorded_running_metrics", "average_power", "value"), None),
+        (("recorded_running_metrics", "average_power", "value"), float("inf")),
+    ],
+)
+def test_invalid_recorded_analysis_is_rejected_before_archive_publication(tmp_path, path, bad):
+    fixture = build_recorded_fixture()
+    key, encoded = next(
+        (key, body) for key, body in fixture["objects_base64"].items() if "/canonical/" in key
+    )
+    analysis = json.loads(gzip.decompress(base64.b64decode(encoded)))
+    target = analysis
+    for name in path[:-1]:
+        target = target[name]
+    target[path[-1]] = bad
+    body = gzip.compress(json.dumps(analysis, allow_nan=True).encode(), mtime=0)
+    destination = tmp_path / "invalid.slbk"
+    with pytest.raises(BackupError, match="invalid_|excluded_object_field"):
+        backup.create_backup(
+            MemorySource({key: body}), Scope((("2026", "42"),)), destination, PASSWORD
+        )
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".slbk-part-*"))
 
 
 @pytest.mark.parametrize("operation", ["create", "plan", "restore"])

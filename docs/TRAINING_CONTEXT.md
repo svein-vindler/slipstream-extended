@@ -1,4 +1,4 @@
-# Training Effect from existing activity data
+# Training Effect and recorded running measurements
 
 Daily Readiness and Recovery Time are a separate default-off additive source;
 see [stored training days](TRAINING_READINESS.md). Training Effect below continues
@@ -18,7 +18,7 @@ coverage: no Garmin, R2, personal exports or raw historical files were inspected
 | `messages.session_mesgs[].training_load_peak` (session 18, field 168) | Same existing ORIGINAL path | Retained when present in decoded messages | FIT sint32, scale 65536, offset 0; profile provides no unit or sufficiently precise activity-load definition | Not projected. Not relabelled as activity load, CTL, ATL or TSB |
 | Activity DTO `activityTrainingLoad` candidate | Existing activity DTO fetches | Not retained in summary or decoded activity metadata | SDK references a removable field but does not define its meaning/unit | Not projected; unknown load does not block TE |
 | Normalized TCX `activity.endurance.v1.json` | Existing TCX download → `normalize_endurance_session` | Explicit summary/laps/splits/HR/time series | No Training Effect source in this normalizer | TCX metrics cannot reconstruct Garmin TE |
-| Existing Coach Input | Existing stored FIT + endurance + TCX read by Python coach preparation | Explicit allowlisted analysis; no TE | Analyzer/version/fingerprint unchanged by this delivery | Immutable historical analyses are neither rewritten nor augmented |
+| Existing Coach Input | Existing stored FIT + endurance + TCX read by Python coach preparation | Explicit allowlisted analysis; no TE | Recorded running measurements use engine 1.1.0 as described below; TE is not added to Coach Input | Immutable historical analyses retain their original bytes and engine |
 
 Garmin's [Training Effect manual](https://www8.garmin.com/manuals/webhelp/forerunner935/EN-US/GUID-7275629E-743A-4658-A284-C84F42A66AE5.html)
 documents the aerobic/anaerobic interpretation and 0–5 scale. The conventional
@@ -40,10 +40,10 @@ finite 0–5 values, fixed provenance and validated clocks. Raw messages, GPS,
 DTOs and source text do not enter this object. Existing names, inputs, session
 objects, availability and payload limits are retained.
 
-Strength reads reuse the FIT object they already loaded. Endurance reads use
-the existing bounded JSON reader for the activity's canonical FIT JSON after
-the existing TCX-derived object is found: normally one extra GET, at most two
-GET attempts for the `.json` / `.json.gz` aliases when absent. No new HEAD,
+Strength reads reuse the FIT object they already loaded. Endurance reads resolve
+the activity clock and read canonical FIT JSON before the TCX-derived object.
+Both optional FIT projections share that bounded read: normally one GET, at
+most two GET attempts for the `.json` / `.json.gz` aliases when absent. No new HEAD,
 LIST, PUT, Garmin calls or stored bytes. No list-row reads, index, dependency,
 migration, scheduled job or importer change. Optional FIT read/parse/size errors
 are reported as `source_unreadable`; they do not fail the TCX dataset or log
@@ -76,9 +76,8 @@ Old objects containing these session fields gain context by pure reading. Old
 objects without them return missing/unknown support; unknown schema, malformed
 objects and ambiguous associations are distinct failures. No re-decoding,
 backfill or regeneration is required or performed. New ordinary imports use
-the unchanged storage format. A future Coach Input addition must use a reviewed
-analyzer/input version and existing immutable fingerprint mechanism; adding
-that now would create avoidable historical revision pressure.
+the unchanged storage format. The separate recorded running measurements below
+use versioned Coach identities; they do not add Training Effect to old analyses.
 
 The method is `fit_recorded_estimate`: these values are estimates recorded in
 the FIT session, not directly measured physiology or a Slipstream calculation.
@@ -89,7 +88,58 @@ Training Effect is for training discussion, not a diagnosis or a recovery
 guarantee. It does not modify user thresholds, profiles, RPE,
 source freshness, completeness, polling, TTLs, deduplication or budgets.
 
+## Recorded running measurements
+
+`endurance_session` exposes an optional `recorded_running_metrics` sibling of
+the existing TCX-derived session and Training Effect context. Newly generated
+Coach Input uses the same block with analyzer version `1.1.0`; outer schema and
+v1 storage paths remain unchanged. The normalized TCX dataset and its stored
+bytes also remain unchanged.
+
+| Field | Recorded FIT session field | Unit |
+| --- | --- | --- |
+| `average_power` | `avg_power` | W |
+| `average_step_length` | `avg_step_length` | mm |
+| `average_ground_contact_time` | `avg_stance_time` | ms |
+| `average_vertical_oscillation` | `avg_vertical_oscillation` | mm |
+| `average_vertical_ratio` | `avg_vertical_ratio` | % |
+
+The decoder has already applied FIT scaling. These are recorded means, with no
+second scaling, cadence-to-stride conversion, inferred values or new thresholds.
+Each field includes `status`, `value`, `unit` and `source_field`: a finite number
+is `available`, including zero; absent/null is `missing`; strings, booleans and
+other malformed/nonfinite values are `invalid`; failed source association makes
+it `unavailable`. Every nonavailable value is null. Missing values never become
+zero.
+
+The block binds the numeric Garmin activity ID, source FIT hash, exact session
+UTC start and available validated Garmin-local clock/date. Measurement time is
+the recorded session timestamp when valid, never object upload time or now.
+One running activity/session must match the identity and clocks; conflicting
+sports, decode failures and ambiguous sessions stay explicit. A missing local
+clock stays null rather than being inferred from UTC. The TCX first trackpoint
+need not equal FIT session start. Failure of these optional fields does not
+invalidate the existing TCX session or Coach analysis. Any declared TCX activity
+ID must also agree. The block includes no raw messages or GPS.
+
+Supported values already present in stored FIT can appear in endurance reads
+without a new download or historical regeneration. Absence does not prove that
+the device cannot supply them. Existing `1.0.0`/`1.0.1` Coach analyses retain
+their original bytes, identities and engine labels and may omit this block.
+Reading them never injects fields; upgrading the engine alone does not queue
+historical recalculation. See [Coach versioning](COACH_INPUT_VERSIONING.md).
+
+Both endurance projections reuse the same bounded canonical FIT JSON read.
+Extraction adds no separate provider/storage operation, while response and new
+analysis payloads contain additional bytes. No total cost or runtime guarantee
+is implied. New canonical/pointer publication retains its normal write and byte
+cost under existing budgets. Reads do not start a sync or write stored analyses.
+
 ## Reproduce local validation
+
+The historical Training Effect-only measurements below predate the recorded
+running block. They do not measure engine `1.1.0`, its larger payloads or the
+combined feature set.
 
 With the unchanged locked dependencies installed, run `pytest`, `ruff check .`,
 then from `worker` run `npm run typecheck` and `npm test`. Runtime tests generate

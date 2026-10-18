@@ -311,7 +311,7 @@ Read all Garmin body-composition measurements stored for one date, including wei
 
 ### `coach_input`
 
-Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context.
+Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. New analyzer 1.1.0 results also include five optional recorded FIT running measurements with source units, identity, clocks and availability; historical analyses remain unchanged.
 
 **Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
 
@@ -422,7 +422,7 @@ Check the fitness data is connected; returns count, date range, sources.
 
 ### `endurance_session`
 
-Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates with one bounded stored FIT JSON read; missing context does not change dataset availability.
+Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates and five recorded running measurements (power, step length, ground contact time, vertical oscillation and vertical ratio), reusing one bounded stored FIT JSON read. Missing or unverified optional fields do not change dataset availability.
 
 **Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
 

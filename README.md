@@ -30,6 +30,9 @@ and prepared analyses remain available between refreshes.
 - Endurance laps, kilometre splits, heart-rate distribution and drift
 - Optional [aerobic/anaerobic Training Effect](docs/TRAINING_CONTEXT.md) from
   verified stored FIT sessions in activity detail reads
+- Optional [recorded running measurements](docs/TRAINING_CONTEXT.md#recorded-running-measurements):
+  average power, step length, ground contact time, vertical oscillation and
+  vertical ratio in endurance details and newly generated Coach Input
 - Versioned coach profiles, append-only RPE/context and prepared coach-input JSON
 - Optional [encrypted local backup and isolated recovery testing](docs/PRIVATE_BACKUP.md)
   of user-owned profile/context history and immutable coach inputs; see the
