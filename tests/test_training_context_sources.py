@@ -15,7 +15,7 @@ from scripts.build_training_context_contract import DTO, build, synthetic_fit
 
 
 def test_pinned_session_fields_and_decoder_scale():
-    assert version("garmin-fit-sdk") == "21.217.0"
+    assert version("garmin-fit-sdk") == "21.218.0"
     session = Profile["messages"][18]
     assert session["messages_key"] == "session_mesgs"
     for number, name in [(24, "total_training_effect"), (137, "total_anaerobic_training_effect")]:
