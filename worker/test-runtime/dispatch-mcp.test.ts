@@ -73,12 +73,73 @@ beforeEach(async () => {
     return response;
   });
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 async function writeStartup(id: string, runId: number) {
   const operation = (await coordinator.dispatchOperation(id))!;
   await env.SLIPSTREAM_DATA.put("refresh/requests/" + id + ".json", JSON.stringify(syntheticStartupReceipt(operation, runId)));
 }
+
+it.each(["2025-03-26", "2026-07-28"])("startup polling: waits for delayed real-format receipt within three windows through %s", async protocol => {
+  // Synthetic startup receipt publication is delayed until 31 seconds.
+  // Immediate follow-ups must preserve the three observation windows.
+  // Only time and the outer GitHub/storage boundaries are controlled here.
+  vi.mocked(Date.now).mockRestore();
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  vi.setSystemTime(NOW);
+  const timers = vi.spyOn(globalThis, "setTimeout");
+  startupOnAck = false;
+  provider = async (_input, init) => init?.method === "POST"
+    ? Response.json({ workflow_run_id: 55 })
+    : Response.json({ id: 55, status: "completed", conclusion: "success", event: "workflow_dispatch",
+      path: ".github/workflows/refresh.yml", repository: { full_name: "synthetic/slipstream" },
+      head_repository: { full_name: "synthetic/slipstream" }, head_branch: "main", head_sha: "a".repeat(40),
+      created_at: new Date(NOW).toISOString(), updated_at: new Date(NOW + 43_000).toISOString(),
+      html_url: "https://github.com/synthetic/slipstream/actions/runs/55" });
+  const first = await call("sync_latest_night", { wake_date: DAY }, protocol);
+  expect(first).toMatchObject({ should_continue_polling: true, data_ready: false });
+
+  let settled = false;
+  const secondPending = call("refresh_status", { request_id: first.request_id }, protocol)
+    .then(value => { settled = true; return value; });
+  await vi.waitFor(() => expect(settled || timers.mock.calls.some(([, delay]) =>
+    Number(delay) > 10_000 && Number(delay) <= 25_000)).toBe(true));
+  if (!settled) await vi.advanceTimersByTimeAsync(25_000);
+  const second = await secondPending;
+  expect(second).toMatchObject({ should_continue_polling: true, data_ready: false,
+    dispatch_status: { state: "candidate", duplicate_guard_held: true } });
+  expect(Date.now()).toBeGreaterThanOrEqual(NOW + 25_000);
+  expect(counts.github_get).toBe(0);
+  expect(await coordinator.freshJob(first.request_id)).toMatchObject({ polls: 2 });
+
+  timers.mockClear(); settled = false;
+  const thirdPending = call("refresh_status", { request_id: first.request_id }, protocol)
+    .then(value => { settled = true; return value; });
+  await vi.waitFor(() => expect(settled || timers.mock.calls.some(([, delay]) =>
+    Number(delay) > 10_000 && Number(delay) <= 25_000)).toBe(true));
+  await vi.advanceTimersByTimeAsync(6_000);
+  // Independent literal matches the actual Python receipt format, not a
+  // receipt computed from the coordinator's private implementation.
+  await env.SLIPSTREAM_DATA.put("refresh/requests/" + first.request_id + ".json", JSON.stringify({
+    schema_version: 1, kind: "refresh-dispatch-receipt", request_id: first.request_id, run_id: 55,
+    source: { repository: "synthetic/slipstream", workflow_path: ".github/workflows/refresh.yml",
+      event: "workflow_dispatch", ref: "refs/heads/main", source_sha: "a".repeat(40) },
+    request: { mode: "night", scope: `night/${DAY}`, date: DAY, activity_id: null,
+      new_expected: false, repair_only: false, include_granular: false, components: ["sleep", "hrv"] },
+  }));
+  await env.SLIPSTREAM_DATA.put("refresh/reports/55.json", JSON.stringify({ schema_version: 1,
+    kind: "latest-night", wake_date: DAY, scope: `night/${DAY}`,
+    checked_at: new Date(NOW + 43_000).toISOString(), source_checked: false,
+    status: "pending", sleep_status: "not_checked", hrv_status: "not_checked" }));
+  await vi.advanceTimersByTimeAsync(19_000);
+  const third = await thirdPending;
+  expect(third).toMatchObject({ terminal: true, should_continue_polling: false, data_ready: false,
+    sync_status: { job_state: "completed", job_start_confirmed: true, current_job_source_checked: false },
+    dispatch_status: { state: "verified_terminal", duplicate_guard_held: false } });
+  expect(Date.now()).toBeGreaterThanOrEqual(NOW + 50_000);
+  expect(await coordinator.freshJob(first.request_id)).toMatchObject({ polls: 3, state: "completed" });
+  expect(counts.github_post).toBe(1); expect(counts.github_get).toBe(1);
+});
 
 for (const kind of ["night", "activity"] as const) {
 it.each(["2025-03-26", "2026-07-28"])(`keeps a newly acknowledged targeted job pollable while its ${kind} startup receipt is delayed through %s`, async protocol => {
@@ -254,6 +315,11 @@ async function call(name: string, values: unknown, protocol: string, expectedErr
   else expect(message.result.isError).not.toBe(true);
   expect(JSON.parse(message.result.content[0].text)).toEqual(message.result.structuredContent);
   expect(body).not.toContain("SYNTHETIC_PROVIDER_TEXT");
+  // Existing scenarios model a caller waiting between targeted responses.
+  // The startup-polling regressions above use a separately driven fake clock
+  // instead, so their immediate calls exercise the server's real wait path.
+  if (typeof message.result.structuredContent?.request_id === "string" && vi.isMockFunction(Date.now))
+    vi.mocked(Date.now).mockReturnValue(Date.now() + 25_000);
   return message.result.structuredContent;
 }
 
@@ -754,18 +820,18 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     const pending = call("sync_latest_night", { wake_date: DAY }, protocol);
     await started;
     const job = (await coordinator.activeFreshJob(`night/${DAY}`, NOW))!;
-    let during;
+    let during, postReplyAt = NOW;
     try {
       const status = await call("refresh_status", { request_id: job.request_id }, protocol);
       expect(status.sync_status.job_state).toBe("unknown");
       during = await coordinator.dispatchOperation(job.request_id);
       expect(during!.revision).toBeGreaterThan(0);
-    } finally { release(); }
+    } finally { postReplyAt = Date.now(); release(); }
     const completed = await pending;
     const saved = await coordinator.dispatchOperation(job.request_id);
     expect(saved!.revision).toBeGreaterThan(during!.revision);
     expect(saved).toMatchObject(outcome === "ack" ? { dispatch_state: "candidate", candidate_run_id: 55, owner_released_at: null }
-      : { dispatch_state: "post_rejected", owner_released_at: NOW });
+      : { dispatch_state: "post_rejected", owner_released_at: postReplyAt });
     expect(completed.dispatch_status.state).toBe(outcome === "ack" ? "candidate" : "post_rejected");
     expect(counts.github_post).toBe(1); expect(counts.github_get).toBe(outcome === "ack" ? 1 : 0);
   });

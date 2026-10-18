@@ -53,7 +53,7 @@ const fetcher: typeof fetch = async (_url, init) => {
 function service(customFetch = fetcher, getActivities = async () => [] as import("../src/lib").Activity[], now = NOW) {
   return new FreshDataService(testEnv, { getActivities, getR2Json: json,
     getCoachProfiles: async () => ({ keys: ["test-profile"], profiles: [PROFILE] }) },
-  CONFIG, () => now, customFetch, async () => {});
+  CONFIG, () => now, customFetch, async ms => { now += ms; });
 }
 async function completedReport(request: FreshRequest) {
   await put("refresh/reports/" + RUN.id + ".json", request.kind === "night"

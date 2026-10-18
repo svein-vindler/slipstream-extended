@@ -20,6 +20,58 @@ const descriptor = { repository: "synthetic/slipstream", workflow: "refresh.yml"
   mode: "night" as const, scope, date: "2026-10-14", activity_id: null,
   new_expected: false, repair_only: false, include_granular: false, components: ["sleep", "hrv"] };
 
+it("startup polling: spaces automatic windows without spending a ticket on an early caller", async () => {
+  const stub = env.REFRESH_COORDINATOR.getByName(crypto.randomUUID());
+  const begun = await stub.beginFresh(scope, "night",
+    JSON.stringify({ kind: "night", date: "2026-10-14", requestedAt: now }), now, false, descriptor);
+  const identity = { operation_id: begun.job!.request_id, owner_key: "targeted:" + scope,
+    owner_token: begun.job!.request_id };
+  await stub.mergeDispatchPost(identity, { kind: "ack_candidate", run_id: 55 }, now);
+  const initial = await stub.claimDispatchRead(identity, "initial", "synthetic-actor", now);
+  expect(initial.acquired).toBe(true);
+  await stub.finishDispatchRead(identity, initial.claim!, initial.operation!.revision, null, now);
+  await evictDurableObject(stub);
+
+  const early = await stub.claimDispatchRead(identity, "status", "synthetic-actor", now + 1);
+  expect(early).toMatchObject({ acquired: false, retryAfterMs: 24_999 });
+  expect(await stub.freshJob(identity.operation_id)).toMatchObject({ polls: 1, state: "active" });
+
+  const second = await stub.claimDispatchRead(identity, "status", "synthetic-actor", now + 25_000);
+  expect(second.acquired).toBe(true);
+  await stub.finishDispatchRead(identity, second.claim!, second.operation!.revision, null, now + 25_000);
+  expect(await stub.claimDispatchRead(identity, "shared", "other-actor", now + 25_001))
+    .toMatchObject({ acquired: false, retryAfterMs: 24_999 });
+  expect(await stub.freshJob(identity.operation_id)).toMatchObject({ polls: 2, state: "active" });
+
+  const simultaneous = await Promise.all([
+    stub.claimDispatchRead(identity, "status", "synthetic-actor", now + 50_000),
+    stub.claimDispatchRead(identity, "status", "other-actor", now + 50_000),
+  ]);
+  expect(simultaneous.filter(value => value.acquired)).toHaveLength(1);
+  const third = simultaneous.find(value => value.acquired)!;
+  await stub.finishDispatchRead(identity, third.claim!, third.operation!.revision, null, now + 50_000);
+  await evictDurableObject(stub);
+  expect(await stub.freshJob(identity.operation_id)).toMatchObject({ polls: 3, state: "active" });
+  expect((await stub.claimDispatchRead(identity, "status", "synthetic-actor", now + 75_000)).acquired).toBe(false);
+});
+
+it("startup polling: starts the delay at the admitted observation, not before a slow dispatch", async () => {
+  const stub = env.REFRESH_COORDINATOR.getByName(crypto.randomUUID());
+  const begun = await stub.beginFresh(scope, "night",
+    JSON.stringify({ kind: "night", date: "2026-10-14", requestedAt: now }), now, false, descriptor);
+  const identity = { operation_id: begun.job!.request_id, owner_key: "targeted:" + scope,
+    owner_token: begun.job!.request_id };
+  const delayed = now + 60_000;
+  await stub.mergeDispatchPost(identity, { kind: "ack_candidate", run_id: 55 }, delayed);
+  const first = await stub.claimDispatchRead(identity, "initial", "synthetic-actor", delayed);
+  expect(first.acquired).toBe(true);
+  await stub.finishDispatchRead(identity, first.claim!, first.operation!.revision, null, delayed);
+  await evictDurableObject(stub);
+  expect(await stub.claimDispatchRead(identity, "status", "other-actor", delayed + 1))
+    .toMatchObject({ acquired: false, retryAfterMs: 24_999 });
+  expect(await stub.freshJob(identity.operation_id)).toMatchObject({ polls: 1, state: "active" });
+});
+
 it("allows exactly one explicit later terminal inspection without refunding automatic tickets even when the result is unknown", async () => {
   const stub = env.REFRESH_COORDINATOR.getByName(crypto.randomUUID());
   const begun = await stub.beginFresh(scope, "night", JSON.stringify({ kind: "night", date: "2026-10-14" }), now, false, descriptor);

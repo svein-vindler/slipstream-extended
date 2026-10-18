@@ -219,6 +219,8 @@ for (const outcome of ["targeted_unconfirmed", "targeted_rejected"]) {
       ? { accepted: true, reason: "dispatch_unconfirmed", terminal: false, should_continue_polling: false }
       : { reason: "dispatch_rejected", retry_after_seconds: 300 });
     if (outcome === "targeted_unconfirmed") {
+      // This follow-up occurs after the required interval, not 25 seconds of wall time in CI.
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 25_000);
       const again = await call("refresh_status", { request_id: value.request_id });
       expect(again.body + JSON.stringify(logs)).not.toContain("SYNTHETIC_PRIVATE");
       expect(again.message.result.structuredContent).toMatchObject({
