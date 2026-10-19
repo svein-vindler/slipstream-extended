@@ -47,11 +47,11 @@ def entry(monkeypatch, tmp_path, record_property):
     phases = []
     path = tmp_path / "diagnostic.json"
 
-    def invoke():
+    def invoke(*, run_id="0"):
         started = perf_counter()
         try:
             return refresh.run(
-                refresh.RefreshRequest(),
+                refresh.RefreshRequest(run_id=run_id),
                 data_dir=str(tmp_path),
                 store_factory=lambda: R2Store(client=client, bucket="synthetic-health"),
                 login=lambda: source,
@@ -95,6 +95,44 @@ def test_wrong_date_does_not_confirm_a_new_successful_health_source_check(entry)
     assert all(client.objects[key] == value for key, value in old.items())
     assert not any(key in client.writes for key in keys)
     assert report["status"] == "partial"
+    assert report["health_validation_rejections"] == [
+        {"stream": "hrv", "date": DAY, "category": "wrong_date"},
+    ]
+
+
+def test_private_refresh_diagnostics_identify_rejected_day_without_hosted_log_details(entry, capsys):
+    client, source, invoke = entry
+    invoke()
+    keys = [
+        f"health/hrv/2026/09/{DAY}.json",
+        f"refresh/checks/v1/health/hrv/{DAY}.json",
+        f"refresh/checks/v1/night/{DAY}.json",
+    ]
+    before = {key: client.objects[key].copy() for key in keys}
+    source.responses["hrv", DAY] = {
+        "hrvSummary": {"calendarDate": "2026-09-29", "lastNightAvg": "PRIVATE_RESPONSE_MARKER"},
+        "hrvReadings": [],
+    }
+    source.calls.clear()
+    client.reset()
+    capsys.readouterr()
+
+    report = invoke(run_id="19")
+
+    expected = [{"stream": "hrv", "date": DAY, "category": "wrong_date"}]
+    assert report.get("health_validation_rejections") == expected
+    assert json.loads(invoke.diagnostics_file.read_text()) == report
+    saved = json.loads(client.objects["refresh/diagnostics/v1/19.json"]["Body"])
+    assert saved["health_validation_rejections"] == expected
+    assert report["status"] == "partial" and len(source.calls) == 6
+    assert all(client.objects[key] == value for key, value in before.items())
+    assert not any(key in client.writes for key in keys)
+    assert "PRIVATE_RESPONSE_MARKER" not in json.dumps(report)
+    hosted = capsys.readouterr().out
+    assert "recent-health-sync" in hosted and "refresh-diagnostics" in hosted
+    assert all(value not in hosted for value in (
+        DAY, "2026-09-29", "wrong_date", "health_validation_rejections", "PRIVATE_RESPONSE_MARKER",
+    ))
 
 
 def test_unknown_sleep_shape_is_not_a_verified_empty_response(entry):
@@ -103,6 +141,9 @@ def test_unknown_sleep_shape_is_not_a_verified_empty_response(entry):
     report = invoke()
     sleep = next(item for item in report["source_checks"] if item["scope"] == "sleep")
     assert sleep["checked"] is False and sleep["checked_at"] is None
+    assert report["health_validation_rejections"] == [
+        {"stream": "sleep", "date": DAY, "category": "invalid_response"},
+    ]
 
 
 @pytest.mark.parametrize(
@@ -163,6 +204,10 @@ def test_unverified_source_shapes_preserve_good_data_and_check_times(entry, stre
     assert len(source.calls) == 6 and report["status"] == "partial"
     assert all(client.objects[k] == v for k, v in before.items())
     assert all(k not in client.writes for k in keys)
+    category = "wrong_date" if case in {"wrong_date", "conflicting_date", "invalid_date"} else "invalid_response"
+    assert report["health_validation_rejections"] == [
+        {"stream": stream, "date": DAY, "category": category},
+    ]
 
 
 @pytest.mark.parametrize(
@@ -199,6 +244,9 @@ def test_validated_pending_response_is_a_successful_check_without_replacing_good
     )
     assert report["status"] == "partial" and len(source.calls) == 6
     assert all(client.objects[k] == v for k, v in before.items())
+    assert report["health_validation_rejections"] == [
+        {"stream": stream, "date": DAY, "category": "garmin_not_ready"},
+    ]
 
 
 def test_valid_unchanged_source_still_confirms_checks_and_preserves_canonical_bytes(entry):
@@ -212,6 +260,7 @@ def test_valid_unchanged_source_still_confirms_checks_and_preserves_canonical_by
     assert all(v["checked"] is True and v["outcome"] == "checked" for v in report["source_checks"])
     assert all(client.objects[k]["Body"] == v for k, v in old.items())
     assert all(k.startswith("refresh/checks/") for k in client.writes)
+    assert report["health_validation_rejections"] == []
 
 
 @pytest.mark.parametrize("kind", ["auth", "transport", "other"])
@@ -225,7 +274,8 @@ def test_source_failures_never_confirm_a_new_check_or_advance_failed_scope(entry
     ]
     before = {k: client.objects[k].copy() for k in keys}
     error = (
-        TimeoutError("synthetic secret") if kind == "transport" else ValueError("synthetic secret")
+        TimeoutError("synthetic secret") if kind == "transport" else
+        ValueError("wrong_date garmin_not_ready invalid_response synthetic secret")
     )
     if kind == "auth":
         error.response = SimpleNamespace(status_code=401)
@@ -244,6 +294,30 @@ def test_source_failures_never_confirm_a_new_check_or_advance_failed_scope(entry
         )
     assert "synthetic secret" not in json.dumps(report)
     assert all(client.objects[k] == v for k, v in before.items())
+    assert report.get("health_validation_rejections", []) == []
+
+
+def test_validation_rejections_are_bounded_by_existing_overlap_and_streams():
+    days = ["2026-09-30", "2026-09-29", "2026-09-28", "2026-09-27", "2026-09-26",
+            "2026-09-25", "2026-09-24", "2026-09-23", "2026-09-22", "2026-09-21",
+            "2026-09-20", "2026-09-19", "2026-09-18", "2026-09-17"]
+    client, source = HealthClient(), SyntheticGarmin()
+    for stream in ("sleep", "hrv"):
+        for day in days:
+            source.responses[stream, day] = {"unexpected": "PRIVATE_RESPONSE_MARKER"}
+
+    report = recent_health.run(
+        days=14, streams=("sleep", "hrv", "sleep"), today=date(2026, 9, 30),
+        store=R2Store(client=client, bucket="synthetic-health"), garmin=source,
+    )
+
+    assert report["health_validation_rejections"] == [
+        {"stream": stream, "date": day, "category": "invalid_response"}
+        for stream in ("sleep", "hrv") for day in days
+    ]
+    assert len(report["health_validation_rejections"]) == len(source.calls) == 28
+    assert all(value == 0 for value in client.counts.values())
+    assert "PRIVATE_RESPONSE_MARKER" not in json.dumps(report)
 
 
 def test_actual_r2_only_activity_repair_never_confirms_a_garmin_check(

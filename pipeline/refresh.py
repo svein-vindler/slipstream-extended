@@ -201,6 +201,7 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
                 checked = window["source_checked"]
                 add(f"{stream}_summary", checked, "checked" if checked else "failed")
         elif kind == "recent-health-sync":
+            report["health_validation_rejections"] = result.get("health_validation_rejections", [])
             for stream, value in result["streams"].items():
                 checked = value["source_errors"] == 0
                 add(stream, checked, "failed" if not checked else

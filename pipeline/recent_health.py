@@ -30,6 +30,7 @@ def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
     end = today or date.today()
     results = {}
     all_records = {}
+    validation_rejections = []
     for stream in selected:
         records = []
         failures = 0
@@ -48,6 +49,8 @@ def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
                 records.append(store_day(store, stream, day, raw))
             except HealthNotReady as exc:
                 not_ready += 1
+                if exc.status in ("invalid_response", "wrong_date", "garmin_not_ready"):
+                    validation_rejections.append({"stream": stream, "date": day, "category": exc.status})
                 if exc.status != "garmin_not_ready":
                     failures += 1
         # Storage/auth/budget/index failures propagate; failed scopes keep their
@@ -64,7 +67,7 @@ def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
     report = {"schema_version": 1, "kind": "recent-health-sync",
               "status": "complete" if all(item["days_ready"] == days for item in results.values()) else "partial",
               "night_checkpoints_written": publish_completed_nights(store, all_records),
-              "streams": results}
+              "streams": results, "health_validation_rejections": validation_rejections}
     log_report("recent_health", report)
     return report
 
