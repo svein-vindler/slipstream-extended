@@ -10,7 +10,13 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from .coach import ANALYZER_VERSION, build_coach_input, select_profile
+from .coach import (
+    ANALYZER_VERSION,
+    STORED_CONTEXT_ANALYZER_VERSION,
+    build_coach_input,
+    select_profile,
+)
+from .coach_context_sources import assemble_stored_context, valid_source_proof
 from .granular import gzip_json, sha256
 from .measurements import measured_component
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
@@ -21,7 +27,9 @@ PLAN_KEY = "backfill/coach-input/v1/plan.json"
 PROFILE_PREFIX = "coach/profiles/v1/"
 MAX_ACTIVITIES_PER_RUN = 50
 LEGACY_ANALYZER_VERSION = "1.0.0"
-SUPPORTED_ANALYZER_VERSIONS = (LEGACY_ANALYZER_VERSION, "1.0.1", ANALYZER_VERSION)
+SUPPORTED_ANALYZER_VERSIONS = (
+    LEGACY_ANALYZER_VERSION, "1.0.1", "1.1.0", ANALYZER_VERSION, STORED_CONTEXT_ANALYZER_VERSION,
+)
 BULK_REUSE_VERSION = 1
 
 
@@ -222,7 +230,7 @@ def _source_signature(
 def _single_input_signature(
     activity: dict[str, Any], profile: dict[str, Any],
     required: list[str], revisions: dict[str, str], context_key: str | None,
-    *, analyzer_version: str | None = None,
+    *, analyzer_version: str | None = None, input_source_revisions: dict | None = None,
 ) -> str | None:
     """Reuse only when every selected input has a revision, including context."""
     selected = [*required, *([context_key] if context_key else [])]
@@ -230,13 +238,18 @@ def _single_input_signature(
         return None
     metadata = ({**activity, "moving_seconds": _float(activity["moving_seconds"])}
                 if "moving_seconds" in activity else activity)
-    return sha256(json.dumps({
+    value = {
         "signature_version": 2,
         "analyzer_version": analyzer_version or ANALYZER_VERSION,
         "activity": metadata,
         "profile": profile,
         "revisions": {key: revisions[key] for key in selected},
-    }, sort_keys=True, separators=(",", ":")).encode())
+    }
+    if (analyzer_version or ANALYZER_VERSION) == STORED_CONTEXT_ANALYZER_VERSION:
+        if not valid_source_proof(input_source_revisions, activity["date"]):
+            return None
+        value["input_source_revisions"] = input_source_revisions
+    return sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
 
 
 def _bulk_cached_proof(proof, activity, profile, required, revisions, keys, context_key):
@@ -255,6 +268,7 @@ def _bulk_cached_proof(proof, activity, profile, required, revisions, keys, cont
     pointer = f"activities/{activity['date'][:4]}/{activity['id']}/coach-input/v1/latest-ready.json"
     signature = _single_input_signature(
         activity, profile, required, revisions, context_key, analyzer_version=engine,
+        input_source_revisions=proof.get("input_source_revisions"),
     )
     return bool(signature and signature == proof.get("input_signature")
                 and isinstance(key, str) and key in keys
@@ -303,6 +317,13 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
             "profile_id": str(effective["profile_id"]),
             "context_revision": str(context.get("context_id")) if context else None,
         }
+        context_sources = pointer.get("input_source_revisions")
+        if engine == STORED_CONTEXT_ANALYZER_VERSION:
+            snapshot = candidate.get("stored_context_snapshot")
+            if (pointer.get("analyzer_version") != engine or not isinstance(snapshot, dict)
+                    or not valid_source_proof(context_sources, activity["date"])):
+                return "unknown", None
+            seed["stored_context_snapshot"] = snapshot
         seed_id = sha256(json.dumps(seed, sort_keys=True, separators=(",", ":")).encode())[:24]
         checked = {**candidate, "summary": dict(candidate["summary"]), "analysis_id": seed_id}
         _identify_coach_input(checked)
@@ -317,6 +338,7 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
             return "unknown", None
         expected = _single_input_signature(
             activity, profile, required, revisions, context_key, analyzer_version=engine,
+            input_source_revisions=context_sources,
         )
         if expected is None or not revisions.get(key) or not revisions.get(pointer_key):
             return "unknown", None
@@ -349,6 +371,7 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
                 _single_input_signature(
                     old_activity, normalized, required, old_revisions, old_context_key,
                     analyzer_version=engine,
+                    input_source_revisions=context_sources,
                 ) for normalized in old_profiles if normalized
                 and {name: normalized.get(name) for name in (
                     "profile_id", "name", "effective_from", "zones", "references")} == effective
@@ -366,6 +389,7 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
             "analyzer_version": engine, "input_signature": expected, "analysis_key": key,
             "canonical_revision": revisions[key], "pointer_revision": revisions[pointer_key],
             "selection_kind": "unmarked" if unmarked else "marked",
+            **({"input_source_revisions": context_sources} if engine == STORED_CONTEXT_ANALYZER_VERSION else {}),
         }
     except (KeyError, TypeError, ValueError, AttributeError):
         return "unknown", None
@@ -407,6 +431,7 @@ def _publish_current_analysis(
     previous_pointer: dict[str, Any] | None = None,
     input_signature: str | None = None,
     context_key: str | None = None,
+    input_source_revisions: dict | None = None,
 ) -> str | None:
     """Commit current selection after immutable content, before bulk progress."""
     pointer_key = f"{prefix}/coach-input/v1/latest-ready.json"
@@ -427,6 +452,8 @@ def _publish_current_analysis(
     signature = input_signature
     if signature is not None:
         pointer["input_signature"] = signature
+    if input_source_revisions is not None:
+        pointer["input_source_revisions"] = input_source_revisions
     if json.dumps(previous_pointer, sort_keys=True) != json.dumps(pointer, sort_keys=True):
         store.put(pointer_key, json.dumps(pointer, separators=(",", ":")).encode(), "application/json")
         keys.add(pointer_key)
@@ -503,9 +530,20 @@ def run_one(*, activity: dict[str, Any], store: R2Store, force: bool = False) ->
     context_key = _activity_context_key(keys, activity)
     pointer_key = f"{prefix}/coach-input/v1/latest-ready.json"
     previous_pointer = _json(store, pointer_key) if pointer_key in keys else {}
+    endurance = _json(store, required[1])
+    if endurance.get("available") is False:
+        return {"processed_sources": {}, "blocked_activities": [
+            {"activity_id": activity_id, "reason": "endurance_data_unavailable"},
+        ]}
+    decoded = _json(store, required[0])
+    stored_context, context_sources = assemble_stored_context(store, activity, decoded, endurance)
     # Fingerprint the caller's metadata before an R2-only repair restores a known
     # moving time. Repeated calls with the same metadata reuse that successful result.
-    signature = _single_input_signature(activity, profile, required, revisions, context_key)
+    signature = _single_input_signature(
+        activity, profile, required, revisions, context_key,
+        analyzer_version=STORED_CONTEXT_ANALYZER_VERSION if stored_context is not None else ANALYZER_VERSION,
+        input_source_revisions=context_sources,
+    )
     previous_key = previous_pointer.get("analysis_key")
     canonical_prefix = f"{prefix}/coach-input/v1/canonical/"
     if (not force and signature is not None
@@ -521,12 +559,6 @@ def run_one(*, activity: dict[str, Any], store: R2Store, force: bool = False) ->
             print(json.dumps({"event": "targeted_coach_input", "analysis_reused": True}))
             return {"processed_sources": {activity_id: identifier}, "blocked_activities": [],
                     "skipped_this_run": [], "reused_sources": {activity_id: identifier}}
-    endurance = _json(store, required[1])
-    if endurance.get("available") is False:
-        return {"processed_sources": {}, "blocked_activities": [
-            {"activity_id": activity_id, "reason": "endurance_data_unavailable"},
-        ]}
-    decoded = _json(store, required[0])
     tcx_hash = sha256(store.get(required[2]))
     # An R2-only repair has no Garmin summary. Preserve an already known moving
     # time only when both source files are unchanged; never infer it from elapsed time.
@@ -542,6 +574,7 @@ def run_one(*, activity: dict[str, Any], store: R2Store, force: bool = False) ->
         endurance=endurance, profile=profile,
         tcx_sha256=tcx_hash,
         context=_json(store, context_key) if context_key else None,
+        stored_context_snapshot=stored_context,
     )
     _identify_coach_input(coach)
     key = f"{prefix}/coach-input/v1/canonical/{coach['analysis_id']}.json"
@@ -550,6 +583,7 @@ def run_one(*, activity: dict[str, Any], store: R2Store, force: bool = False) ->
         store, prefix=prefix, key=key, profile=profile, coach=coach,
         revisions=revisions, keys=keys, previous_pointer=previous_pointer,
         input_signature=signature, context_key=context_key,
+        input_source_revisions=context_sources,
     )
     print(json.dumps({"event": "targeted_coach_input", "analysis_reused": False}))
     return {"processed_sources": {activity_id: coach["analysis_id"]},
@@ -859,6 +893,7 @@ def run(
 
     completed = []
     skipped = []
+    context_source_cache = {}
     inspected = selection_adoptions
     clock_blocked = 0
     # One canonical attempt + one current-selection attempt per activity, and
@@ -929,6 +964,9 @@ def run(
         decoded_fit = decoded_fit if decoded_fit is not None else _json(store, item["fit_key"])
         tcx = store.get(item["tcx_key"])
         context = _json(store, item["context_key"]) if item["context_key"] else None
+        stored_context, context_sources = assemble_stored_context(
+            store, activity, decoded_fit, endurance, cache=context_source_cache,
+        )
         coach = build_coach_input(
             activity=activity,
             decoded_fit=decoded_fit,
@@ -936,6 +974,7 @@ def run(
             profile=item["profile"],
             tcx_sha256=sha256(tcx),
             context=context,
+            stored_context_snapshot=stored_context,
         )
         _identify_coach_input(coach)
         key = f"{item['prefix']}/coach-input/v1/canonical/{coach['analysis_id']}.json"
@@ -949,19 +988,27 @@ def run(
             context_key=item["context_key"],
             input_signature=_single_input_signature(
                 activity, item["profile"], required, object_revisions, item["context_key"],
+                analyzer_version=coach["analyzer_version"], input_source_revisions=context_sources,
             ),
+            input_source_revisions=context_sources,
         )
         reuse_proofs[activity["id"]] = {
-            "analyzer_version": ANALYZER_VERSION,
+            "analyzer_version": coach["analyzer_version"],
             "input_signature": _single_input_signature(
                 activity, item["profile"], required, object_revisions, item["context_key"],
+                analyzer_version=coach["analyzer_version"], input_source_revisions=context_sources,
             ),
             "analysis_key": key, "canonical_revision": canonical_revision,
             "pointer_revision": selection_revision,
+            **({"input_source_revisions": context_sources} if context_sources is not None else {}),
         }
         selection_revisions[activity["id"]] = selection_revision
         legacy_selection_revisions.pop(activity["id"], None)
-        processed_sources[activity["id"]] = item["source_signature"]
+        processed_sources[activity["id"]] = _source_signature(
+            activity, item["profile"], context_key=item["context_key"],
+            manifest_revision=manifest_revisions.get(activity["id"]),
+            analyzer_version=coach["analyzer_version"],
+        )
         completed.append(
             {
                 "activity_id": coach["activity_id"],

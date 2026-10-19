@@ -13,10 +13,12 @@ import math
 from datetime import date
 from typing import Any
 
-from .recorded_running_metrics import recorded_running_metrics
+from .coach_stored_context import stored_context_snapshot as project_stored_context
+from .recorded_running_metrics import expanded_recorded_running_metrics
 
 COACH_SCHEMA_VERSION = 1
-ANALYZER_VERSION = "1.1.0"
+ANALYZER_VERSION = "1.2.0"
+STORED_CONTEXT_ANALYZER_VERSION = "1.3.0"
 
 
 def _number(value: Any) -> float | None:
@@ -281,15 +283,18 @@ def _threshold_times(seconds_by_bpm: dict[str, Any], thresholds: list[int]):
 def analysis_id(
     *, activity_id: str, fit_sha256: str | None, tcx_sha256: str,
     profile_id: str, context_revision: str | None,
+    stored_context_snapshot: dict[str, Any] | None = None,
 ) -> str:
     value = {
         "activity_id": activity_id,
-        "analyzer_version": ANALYZER_VERSION,
+        "analyzer_version": STORED_CONTEXT_ANALYZER_VERSION if stored_context_snapshot is not None else ANALYZER_VERSION,
         "fit_sha256": fit_sha256,
         "tcx_sha256": tcx_sha256,
         "profile_id": profile_id,
         "context_revision": context_revision,
     }
+    if stored_context_snapshot is not None:
+        value["stored_context_snapshot"] = stored_context_snapshot
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(canonical).hexdigest()[:24]
 
@@ -298,16 +303,21 @@ def build_coach_input(
     *, activity: dict[str, Any], decoded_fit: dict[str, Any],
     endurance: dict[str, Any], profile: dict[str, Any], tcx_sha256: str,
     context: dict[str, Any] | None = None,
+    stored_context_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile = validate_profile(profile)
     activity_id = str(activity.get("id") or endurance.get("activity", {}).get("id") or "")
     context_revision = str(context.get("context_id")) if context else None
+    metrics = expanded_recorded_running_metrics(activity, decoded_fit, endurance)
+    stored_context = (project_stored_context(stored_context_snapshot, metrics)
+                      if stored_context_snapshot is not None else None)
     identifier = analysis_id(
         activity_id=activity_id,
         fit_sha256=decoded_fit.get("source_fit_sha256"),
         tcx_sha256=tcx_sha256,
         profile_id=str(profile.get("profile_id")),
         context_revision=context_revision,
+        stored_context_snapshot=stored_context,
     )
     summary = endurance.get("summary") if isinstance(endurance.get("summary"), dict) else {}
     bpm_seconds = endurance.get("heart_rate_seconds_by_bpm")
@@ -327,7 +337,7 @@ def build_coach_input(
     structure = workout_structure(decoded_fit)
     return {
         "schema_version": COACH_SCHEMA_VERSION,
-        "analyzer_version": ANALYZER_VERSION,
+        "analyzer_version": STORED_CONTEXT_ANALYZER_VERSION if stored_context is not None else ANALYZER_VERSION,
         "analysis_id": identifier,
         "activity_id": activity_id,
         "activity": {
@@ -343,7 +353,8 @@ def build_coach_input(
             "references": profile["references"],
         },
         "user_context": context,
-        "recorded_running_metrics": recorded_running_metrics(activity, decoded_fit, endurance),
+        "recorded_running_metrics": metrics,
+        **({"stored_context_snapshot": stored_context} if stored_context is not None else {}),
         "time_basis": "elapsed",
         "summary": {
             "elapsed_seconds": summary.get("duration_seconds"),

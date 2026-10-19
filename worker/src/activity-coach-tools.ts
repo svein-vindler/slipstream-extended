@@ -16,6 +16,7 @@ import { R2Storage, COACH_CONFIG_R2_LIMITS } from "./r2-storage";
 import { exactDate, dateRange, sport, PRIVATE_READ_TOOL_ANNOTATIONS } from "./tool-contracts";
 import { trainingContext } from "./training-context";
 import { recordedRunningMetrics } from "./recorded-running-metrics";
+import { storedRunningMeasurements } from "./recorded-running-segments";
 import { strengthSessionSchema, enduranceSessionSchema } from "./detail-projection";
 
 const COACH_PROFILE_PREFIX = "coach/profiles/v1/";
@@ -299,7 +300,7 @@ export class ActivityCoachTools {
     });
 
     server.registerTool("endurance_session", {
-      description: "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates and five recorded running measurements (power, step length, ground contact time, vertical oscillation and vertical ratio), reusing one bounded stored FIT JSON read. Missing or unverified optional fields do not change dataset availability.",
+      description: "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates and recorded running measurements. New stored datasets also include raw ground-contact balance with unknown side semantics, recorded lap measurements, and producer-computed distance-split/half measurements with coverage. Existing datasets retain their five-field fallback. No new FIT fetch or segment computation is performed here, and missing or unverified optional fields do not change dataset availability.",
       inputSchema: z.object({
         activity_id: z.string().regex(/^(garmin-)?\d{1,20}$/)
           .describe('Activity ID from list_activities, for example "garmin-24444691902"'),
@@ -350,7 +351,8 @@ export class ActivityCoachTools {
         activity: toSummary(activity),
         session: enduranceSessionSchema.parse(stored.data),
         training_context: context,
-        recorded_running_metrics: recordedRunningMetrics(activity, decodedFit, stored.data, fitReadFailure),
+        recorded_running_metrics: storedRunningMeasurements(
+          recordedRunningMetrics(activity, decodedFit, stored.data, fitReadFailure), stored.data),
       });
     });
 
@@ -521,7 +523,7 @@ export class ActivityCoachTools {
 
     server.registerTool("coach_input", {
       title: "Read coach input",
-      description: "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. New analyzer 1.1.0 results also include five optional recorded FIT running measurements with source units, identity, clocks and availability; historical analyses remain unchanged.",
+      description: "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. Analyzer 1.1.0 includes five optional recorded FIT running measurements. Analyzer 1.2.0 adds raw ground-contact balance with unknown side semantics, recorded lap measurements and producer-computed distance-split/half measurements with source units, identity, clocks and coverage. Historical analyses remain unchanged.",
       inputSchema: z.object({
         activity_id: z.string().regex(/^(garmin-)?\d{1,20}$/),
       }),

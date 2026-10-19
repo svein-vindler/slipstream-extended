@@ -49,7 +49,9 @@ def test_unchanged_inputs_skip_artifact_downloads_analysis_and_writes(store, bui
     assert second["reused_sources"] == first["processed_sources"]
     assert second["skipped_this_run"] == []
     assert len(builds) == 1
-    assert (store.counts["get"], store.counts["list"], store.counts["put"]) == (2, 2, 0)
+    # Known-day context selection also verifies the stored FIT/endurance clocks;
+    # unchanged replay still skips the large TCX and immutable publication.
+    assert (store.counts["get"], store.counts["list"], store.counts["put"]) == (4, 2, 0)
     assert store.counts["download_bytes"] < 1024
     assert _coach_status(store, _activity("1", 9), second) == "ready"
     assert [json.loads(line) for line in capsys.readouterr().out.splitlines()] == [

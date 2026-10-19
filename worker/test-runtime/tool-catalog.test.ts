@@ -96,12 +96,18 @@ it("advertises the D4 scalar metric contract in every registration mode", () => 
   }
 });
 
-it("advertises optional recorded running fields without changing the stored session contract", () => {
+const approvedEnduranceDescription = "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates and recorded running measurements. New stored datasets also include raw ground-contact balance with unknown side semantics, recorded lap measurements, and producer-computed distance-split/half measurements with coverage. Existing datasets retain their five-field fallback. No new FIT fetch or segment computation is performed here, and missing or unverified optional fields do not change dataset availability.";
+const approvedCoachDescription = "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. Analyzer 1.1.0 includes five optional recorded FIT running measurements. Analyzer 1.2.0 adds raw ground-contact balance with unknown side semantics, recorded lap measurements and producer-computed distance-split/half measurements with source units, identity, clocks and coverage. Historical analyses remain unchanged.";
+
+it("advertises optional strict v1-or-v2 running fields without changing the stored session contract", () => {
   for (const mode of modes) {
     const schema = requireTool(mode.tools, "endurance_session").outputSchema!;
     const properties = schema.properties as Record<string, Record<string, unknown>>;
     expect(schema.required).not.toContain("recorded_running_metrics");
-    expect(properties.recorded_running_metrics.additionalProperties).toBe(false);
+    const versions = properties.recorded_running_metrics.anyOf as Array<Record<string, unknown>>;
+    expect(versions).toHaveLength(2);
+    expect(versions.map(version => (version.properties as Record<string, Record<string, unknown>>).schema_version.const)).toEqual([1, 2]);
+    for (const version of versions) expect(version.additionalProperties).toBe(false);
     const validate = validator.getValidator(schema);
     const block = { schema_version: 1, source: "garmin_fit_session", method: "fit_recorded_measurement", activity_id: "42",
       association: "matched", local_start_time: null, local_date: null, session_start_time_utc: null,
@@ -111,14 +117,32 @@ it("advertises optional recorded running fields without changing the stored sess
       average_ground_contact_time: { status: "invalid", value: null, unit: "ms", source_field: "avg_stance_time" },
       average_vertical_oscillation: { status: "unavailable", value: null, unit: "mm", source_field: "avg_vertical_oscillation" },
       average_vertical_ratio: { status: "available", value: 0, unit: "%", source_field: "avg_vertical_ratio" } };
+    const distanceGroup = { status: "missing", reason: "no_recorded_samples", method: "fit_record_time_weighted_mean",
+      interval_policy: "left_sample_hold_distance_progressing_max_30s", distance_allocation: "linear_between_record_distances",
+      balance_aggregation: "not_computed_without_verified_side_semantics", items: [] };
+    const expanded = { ...block, schema_version: 2,
+      average_ground_contact_balance: { status: "available", value: 49.25, unit: "%", source_field: "avg_stance_time_balance", side_semantics: "unknown" },
+      laps: { status: "missing", reason: "no_recorded_laps", method: "fit_recorded_measurement", items: [] },
+      kilometer_splits: distanceGroup, distance_halves: distanceGroup };
     expect(validate({ available: true }).valid).toBe(true);
-    expect(validate({ available: true, recorded_running_metrics: block }).valid).toBe(true);
+    for (const version of [block, expanded]) {
+      expect(validate({ available: true, recorded_running_metrics: version }).valid).toBe(true);
+      for (const invalid of [
+        { ...version, average_power: { ...version.average_power, value: "0" } },
+        { ...version, average_power: { ...version.average_power, value: false } },
+        { ...version, average_power: { ...version.average_power, value: null } },
+        { ...version, average_step_length: { ...version.average_step_length, unit: "cm" } },
+        { ...version, private_source: "not part of the contract" },
+        { ...version, average_power: { ...version.average_power, private_source: "not part of a metric" } },
+      ]) expect(validate({ available: true, recorded_running_metrics: invalid }).valid).toBe(false);
+    }
     for (const invalid of [
-      { ...block, average_power: { ...block.average_power, value: "0" } },
-      { ...block, average_power: { ...block.average_power, value: false } },
-      { ...block, average_power: { ...block.average_power, value: null } },
-      { ...block, average_step_length: { ...block.average_step_length, unit: "cm" } },
-      { ...block, private_source: "not part of the contract" },
+      { ...block, average_ground_contact_balance: expanded.average_ground_contact_balance },
+      { ...expanded, schema_version: 3 },
+      { ...expanded, laps: { ...expanded.laps, lap_mesgs: [] } },
+      { ...expanded, kilometer_splits: { ...distanceGroup, record_mesgs: [] } },
+      { ...expanded, average_ground_contact_balance: { ...expanded.average_ground_contact_balance, side_semantics: "left" } },
+      { ...expanded, average_ground_contact_balance: { ...expanded.average_ground_contact_balance, left_percent: 49.25 } },
     ]) expect(validate({ available: true, recorded_running_metrics: invalid }).valid).toBe(false);
   }
 });
@@ -132,13 +156,13 @@ function beforeExplicitInspection(tool: ToolContract): ToolContract {
     expect((schema.properties as Record<string, unknown>).recorded_running_metrics).toBeDefined();
     expect(schema.required).not.toContain("recorded_running_metrics");
     delete (schema.properties as Record<string, unknown>).recorded_running_metrics;
-    expect(previous.description).toBe("Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates and five recorded running measurements (power, step length, ground contact time, vertical oscillation and vertical ratio), reusing one bounded stored FIT JSON read. Missing or unverified optional fields do not change dataset availability.");
+    expect(previous.description).toBe(approvedEnduranceDescription);
     previous.description = "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates with one bounded stored FIT JSON read; missing context does not change dataset availability.";
     return previous;
   }
   if (tool.name === "coach_input") {
     const previous = structuredClone(tool);
-    expect(previous.description).toBe("Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. New analyzer 1.1.0 results also include five optional recorded FIT running measurements with source units, identity, clocks and availability; historical analyses remain unchanged.");
+    expect(previous.description).toBe(approvedCoachDescription);
     previous.description = "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context.";
     return previous;
   }

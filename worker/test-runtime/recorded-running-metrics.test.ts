@@ -214,7 +214,7 @@ for (const protocol of protocols) {
     expect(output.recorded_running_metrics).toMatchObject({ association: "matched", local_start_time: "2026-10-08T14:00:00.100",
       session_start_time_utc: "2026-10-08T12:00:00.100Z", average_power: { value: 250 } });
   });
-  it(`recorded metrics expanded: genuine FIT producer and new immutable Coach analysis agree via ${protocol}`, async () => {
+  it(`recorded metrics expanded: retained genuine 1.1.0 FIT and immutable Coach analysis agree via ${protocol}`, async () => {
     rows.clear();
     for (const [name, body] of Object.entries(produced.objects_base64)) rows.set(name, Uint8Array.from(atob(body), character => character.charCodeAt(0)));
     const before = [...rows].map(([name, body]) => [name, body instanceof Uint8Array ? Array.from(body) : body]);

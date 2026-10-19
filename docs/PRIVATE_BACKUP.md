@@ -46,6 +46,16 @@ are not a backup of their source telemetry. Free-text notes are preserved as
 data; never put credentials into them. Schema checks cannot identify every
 secret or coordinate somebody might type into an allowed text field.
 
+Engine `1.3.0` analyses can also contain a frozen `stored_context_snapshot` of
+allowlisted sleep/HRV and optional Readiness/Recovery summaries, units, statuses
+and observation/check/snapshot provenance. These embedded values are encrypted
+and preserved as part of the immutable analysis, not fetched again or updated
+to today's state. The underlying health objects and raw telemetry remain
+excluded. Missing external sources still mean `ready: false`; restoring context
+does not establish current Garmin freshness or regenerate older analyses.
+The standalone backup dependency set remains `requirements-backup.txt`; this
+format extension does not require the hosted pipeline's provider dependencies.
+
 ## Format and password handling
 
 Format v1: fixed `SLIPSTREAM-BACKUP-1` header, 16-byte random salt, and one standard

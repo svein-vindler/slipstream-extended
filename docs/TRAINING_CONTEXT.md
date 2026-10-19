@@ -1,13 +1,16 @@
-# Training Effect and recorded running measurements
+# Training Effect, running measurements and stored Coach context
 
 Daily Readiness and Recovery Time are a separate default-off additive source;
 see [stored training days](TRAINING_READINESS.md). Training Effect below continues
 to use the existing activity/FIT path without new fetching or reinterpretation.
+The [Coach snapshot](#stored-pre-activity-context-in-coach-input) can use these
+training days only when they are already stored; it does not enable collection.
 
 ## Source inventory
 
-This inventory is based on the current code and the installed, pinned Garmin
-Connect 0.3.17 / FIT SDK 21.217.0. It does not establish personal historical
+This Training Effect inventory was established with Garmin Connect 0.3.17 /
+FIT SDK 21.217.0; current dependency pins are in `requirements.txt`.
+It does not establish personal historical
 coverage: no Garmin, R2, personal exports or raw historical files were inspected.
 
 | Raw field / location | Existing fetch path | Actually retained today | Meaning / scale | Association and limitation |
@@ -18,7 +21,7 @@ coverage: no Garmin, R2, personal exports or raw historical files were inspected
 | `messages.session_mesgs[].training_load_peak` (session 18, field 168) | Same existing ORIGINAL path | Retained when present in decoded messages | FIT sint32, scale 65536, offset 0; profile provides no unit or sufficiently precise activity-load definition | Not projected. Not relabelled as activity load, CTL, ATL or TSB |
 | Activity DTO `activityTrainingLoad` candidate | Existing activity DTO fetches | Not retained in summary or decoded activity metadata | SDK references a removable field but does not define its meaning/unit | Not projected; unknown load does not block TE |
 | Normalized TCX `activity.endurance.v1.json` | Existing TCX download → `normalize_endurance_session` | Explicit summary/laps/splits/HR/time series | No Training Effect source in this normalizer | TCX metrics cannot reconstruct Garmin TE |
-| Existing Coach Input | Existing stored FIT + endurance + TCX read by Python coach preparation | Explicit allowlisted analysis; no TE | Recorded running measurements use engine 1.1.0 as described below; TE is not added to Coach Input | Immutable historical analyses retain their original bytes and engine |
+| Existing Coach Input | Existing stored FIT + endurance + TCX read by Python coach preparation | Explicit allowlisted analysis; no TE | Engine 1.2.0 adds recorded laps/distance segments; engine 1.3.0 adds a [stored health-context snapshot](#stored-pre-activity-context-in-coach-input), not TE | Immutable historical analyses retain their original bytes and engine |
 
 Garmin's [Training Effect manual](https://www8.garmin.com/manuals/webhelp/forerunner935/EN-US/GUID-7275629E-743A-4658-A284-C84F42A66AE5.html)
 documents the aerobic/anaerobic interpretation and 0–5 scale. The conventional
@@ -90,9 +93,13 @@ source freshness, completeness, polling, TTLs, deduplication or budgets.
 
 ## Recorded running measurements
 
+The session-only block below remains the historical schema-1 contract. New
+engine `1.2.0` analyses and newly exported stored details can additionally expose
+recorded laps and source-covered distance segments; see the [schema-2 policy](COACH_INPUT_VERSIONING.md#recorded-laps-and-distance-segments-engine-120).
+
 `endurance_session` exposes an optional `recorded_running_metrics` sibling of
-the existing TCX-derived session and Training Effect context. Newly generated
-Coach Input uses the same block with analyzer version `1.1.0`; outer schema and
+the existing TCX-derived session and Training Effect context. The initial Coach
+addition used the same block with analyzer version `1.1.0`; outer schema and
 v1 storage paths remain unchanged. The normalized TCX dataset and its stored
 bytes also remain unchanged.
 
@@ -135,10 +142,78 @@ analysis payloads contain additional bytes. No total cost or runtime guarantee
 is implied. New canonical/pointer publication retains its normal write and byte
 cost under existing budgets. Reads do not start a sync or write stored analyses.
 
+## Stored pre-activity context in Coach Input
+
+Engine `1.3.0` adds `stored_context_snapshot` when generation can bind a running
+activity to its verified FIT session start and Garmin-local activity date. It
+reads existing normalized sleep, HRV and optional training-day objects for that
+exact date. It does not fetch Garmin, search neighbouring nights, enable
+Readiness/Recovery or choose a historical training window. Without a verified
+activity clock, generation retains the engine `1.2.0` path without this block.
+
+The snapshot is neutral input for an external coach, not a Slipstream analysis
+or recommendation. Recorded sleep duration, score, respiration, SpO2 and stress
+and the known HRV summary fields retain explicit units and per-field status.
+There are no raw sleep stages, HRV readings, provider DTOs or device IDs in this
+block. Garmin estimates do not replace the user's confirmed zones or thresholds;
+the separately stored `user_context` remains the user's own RPE, notes and context.
+Training Effect is still a detail-read field, not newly included in Coach Input.
+
+### Which clocks mean what
+
+| Clock | Meaning | Not evidence of |
+| --- | --- | --- |
+| Observation or completed-night clocks | When the stored value was observed, or the local night began/ended | When Slipstream checked Garmin |
+| `source_checked_at` | A verified check for the selected stored source; retained fields keep their own check | A new observation, current device state or analysis creation time |
+| `snapshot_at` | Explicit, stable provenance clock for the selected snapshot, or null when unknown | Data being known before the workout, execution-now or a live source check |
+
+`semantics: retrospective_pre_activity` describes attribution, not historical
+foreknowledge. Sleep/HRV must have the workout's local wake-date and a completed
+night ending no later than verified activity start. Paired Garmin-local clocks
+take precedence; explicit configured timezone is a fallback only when both local
+clocks are absent. Wrong dates, missing/unknown clocks and nights ending later
+remain distinct unavailable states instead of being backdated or filled with zero.
+A source checked after the workout can still describe the preceding night;
+the later check time stays visible.
+
+For an already-stored training day, only its selected device is considered.
+The latest eligible stored `latest` or `morning` observation before the activity
+is used and its slot is labelled. This does not reconstruct every intraday value.
+Multiple-device ambiguity never merges complementary fields from different
+devices. Readiness and Recovery retain their own observation, check, retention
+flag and local-time provenance. A retained value with unknown or post-activity
+time is suppressed, not assigned the newer field's clock. Recovery zero remains
+valid; recovery minutes are not a server-side countdown.
+
+Missing, invalid, unavailable and not-collected values remain separate. None is
+proof that a watch lacks a feature: no watch-model capability registry is used.
+Sparse devices remain readable alongside richer devices, without inventing values.
+Readiness activation remains a separate installer decision. VO2max, Garmin
+thresholds, Training Status/Load Focus and a training-history context window are
+not delivered by this snapshot.
+
+### Generation, reading and bounded work
+
+Legitimate new/pending calculations and an explicitly requested regeneration
+of one activity can select these stored sources into a new immutable version.
+Ordinary completed historical bulk work does not regenerate analyses merely
+because a later sleep/HRV receipt or context source appears. Old analyses are
+not enriched during a `coach_input` read; JSON/SSE returns the selected stored
+version. See [identity and history preservation](COACH_INPUT_VERSIONING.md#stored-context-snapshots-engine-130).
+
+Generation reads at most five exact-day keys: the training day, sleep, HRV and
+the two sleep/HRV check receipts. This is bounded per-generation read work, not
+a new provider call or full-bucket scan. A bulk invocation can share that result
+between new activities on the same local date; the cache does not survive into
+another invocation. Existing read/byte/write budgets still apply, and unknown
+storage, authorization or budget failures stop publication instead of becoming
+absence. Additional source reads and snapshot bytes are not free, and these
+bounds do not guarantee total backfill cost, live latency or device coverage.
+
 ## Reproduce local validation
 
 The historical Training Effect-only measurements below predate the recorded
-running block. They do not measure engine `1.1.0`, its larger payloads or the
+running block. They do not measure engines `1.1.0`–`1.3.0`, their larger payloads or the
 combined feature set.
 
 With the unchanged locked dependencies installed, run `pytest`, `ruff check .`,

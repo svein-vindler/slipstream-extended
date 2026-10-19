@@ -40,11 +40,18 @@ from .backup_source import (
     safe_path,
 )
 from .coach import validate_profile
+from .coach_stored_context import HRV_METRICS, SLEEP_METRICS
 
 MAGIC = b"SLIPSTREAM-BACKUP-1\n"
 FORMAT = "slipstream-user-backup"
 VERSION = 1
 MAX_RETRIES = 1
+# Frozen statuses of the version-1.3 archived projection. The offline reader
+# must not import provider/parser modules to interpret this data-only enum.
+_STORED_TRAINING_ATTEMPT_STATUSES = frozenset({
+    "available", "partial", "no_observation", "auth_required", "source_error",
+    "timeout", "oversize", "schema_unverified", "wrong_date",
+})
 
 
 def _digest(data: bytes) -> str:
@@ -528,13 +535,342 @@ def _recorded_running_metrics_shape(block, analysis):
             raise BackupError("invalid_recorded_running_metric")
 
 
+def _running_segments_shape(block, analysis):
+    if not isinstance(block, dict):
+        raise BackupError("invalid_running_segments")
+    extras = {"average_ground_contact_balance", "laps", "kilometer_splits", "distance_halves"}
+    base = {key: value for key, value in block.items() if key not in extras}
+    _recorded_running_metrics_shape({**base, "schema_version": 1}, analysis)
+    if type(block["schema_version"]) is not int or block["schema_version"] != 2:
+        raise BackupError("invalid_running_segments")
+    fields = {
+        "average_power": ("W", "power"), "average_step_length": ("mm", "step_length"),
+        "average_ground_contact_time": ("ms", "stance_time"),
+        "average_vertical_oscillation": ("mm", "vertical_oscillation"),
+        "average_vertical_ratio": ("%", "vertical_ratio"),
+        "average_ground_contact_balance": ("%", "stance_time_balance"),
+    }
+
+    def is_finite(number):
+        try:
+            return type(number) in (int, float) and math.isfinite(number)
+        except OverflowError:
+            return False
+
+    def metric(value, unit, field, *, aggregate=False):
+        shape = {"status": (str,), "value": _NUMBER, "unit": (str,), "source_field": (str,)}
+        balance = field in ("stance_time_balance", "avg_stance_time_balance")
+        if balance:
+            shape["side_semantics"] = (str,)
+        if aggregate:
+            shape["coverage"] = (dict,)
+        _record(value, shape)
+        if (value["unit"] != unit or value["source_field"] != field
+                or value["status"] not in ("available", "missing", "invalid", "unavailable")
+                or balance and value["side_semantics"] != "unknown"):
+            raise BackupError("invalid_running_segment_metric")
+        number = value["value"]
+        try:
+            finite = number is not None and math.isfinite(number)
+        except OverflowError:
+            finite = False
+        if (value["status"] == "available") != finite or value["status"] != "available" and number is not None:
+            raise BackupError("invalid_running_segment_metric")
+        if aggregate:
+            cover = value["coverage"]
+            _record(cover, {"valid_seconds": _NUMBER, "eligible_seconds": _NUMBER,
+                            "excluded_gap_seconds": _NUMBER, "contributing_intervals": (int,),
+                            "status": (str,)})
+            for key in ("valid_seconds", "eligible_seconds", "excluded_gap_seconds"):
+                if not is_finite(cover[key]) or cover[key] < 0:
+                    raise BackupError("invalid_running_segment_coverage")
+            valid = cover["valid_seconds"]
+            if (valid > cover["eligible_seconds"] + 0.001 or cover["contributing_intervals"] < 0
+                    or (cover["status"] == "none") != (cover["contributing_intervals"] == 0)
+                    or cover["status"] == "none" and valid != 0
+                    or cover["status"] not in ("none", "partial", "complete")
+                    or cover["status"] == "complete" and
+                    (cover["excluded_gap_seconds"] != 0 or abs(valid - cover["eligible_seconds"]) > 0.001)
+                    or (value["status"] == "available") != (cover["status"] != "none")
+                    or balance and value["status"] != "unavailable"):
+                raise BackupError("invalid_running_segment_coverage")
+
+    metric(block["average_ground_contact_balance"], "%", "avg_stance_time_balance")
+    matched = block["association"] == "matched"
+    if (block["average_ground_contact_balance"]["status"] == "unavailable") == matched:
+        raise BackupError("invalid_running_segment_metric")
+    for name in ("laps", "kilometer_splits", "distance_halves"):
+        group = block[name]
+        group_shape = {"status": (str,), "reason": _TEXT, "method": (str,), "items": (list,)}
+        distance = name != "laps"
+        if distance:
+            group_shape.update(interval_policy=(str,), distance_allocation=(str,), balance_aggregation=(str,))
+        _record(group, group_shape)
+        if (group["status"] not in ("available", "missing", "invalid", "unavailable")
+                or (group["status"] == "available") != bool(group["items"])
+                or (group["reason"] is None) != (group["status"] == "available")
+                or group["items"] and not matched
+                or group["method"] != ("fit_record_time_weighted_mean" if distance else "fit_recorded_measurement")):
+            raise BackupError("invalid_running_segment_group")
+        if distance and (group["interval_policy"] != "left_sample_hold_distance_progressing_max_30s"
+                         or group["distance_allocation"] != "linear_between_record_distances"
+                         or group["balance_aggregation"] != "not_computed_without_verified_side_semantics"):
+            raise BackupError("invalid_running_segment_policy")
+        previous = 0 if distance else block["session_start_time_utc"]
+        for ordinal, row in enumerate(group["items"], start=1):
+            row_shape = {key: (dict,) for key in fields}
+            if distance:
+                row_shape.update(start_distance_m=_NUMBER, end_distance_m=_NUMBER, distance_m=_NUMBER)
+                row_shape["split" if name == "kilometer_splits" else "segment"] = (int,) if name == "kilometer_splits" else (str,)
+            else:
+                row_shape.update(lap=(int,), start_time_utc=(str,), end_time_utc=(str,), distance_m=_NUMBER)
+            _record(row, row_shape)
+            if distance:
+                start, end, length = row["start_distance_m"], row["end_distance_m"], row["distance_m"]
+                if (any(not is_finite(value) for value in (start, end, length))
+                        or start != previous or end <= start or abs(end - start - length) > 0.001
+                        or name == "kilometer_splits" and row["split"] != ordinal
+                        or name == "distance_halves" and (ordinal > 2 or row["segment"] != ("first" if ordinal == 1 else "second"))):
+                    raise BackupError("invalid_running_segment_bounds")
+                previous = end
+            else:
+                start, end = row["start_time_utc"], row["end_time_utc"]
+                for stamp in (start, end):
+                    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", stamp):
+                        raise BackupError("invalid_running_segment_time")
+                    _timestamp(stamp)
+                if (row["lap"] != ordinal or previous is None or start < previous or end < start
+                        or block["measured_at_utc"] is None or end > block["measured_at_utc"]
+                        or row["distance_m"] is not None and
+                        (not is_finite(row["distance_m"]) or row["distance_m"] < 0)):
+                    raise BackupError("invalid_running_segment_time")
+                previous = end
+            for key, (unit, field) in fields.items():
+                metric(row[key], unit, field if distance else "avg_" + field, aggregate=distance)
+        if name == "distance_halves" and group["items"]:
+            if (len(group["items"]) != 2
+                    or any(abs(row["distance_m"] - previous / 2) > 0.000500001 for row in group["items"])):
+                raise BackupError("invalid_running_segment_bounds")
+
+
+def _context_clock(value, *, local=False, nullable=True):
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str) or not 1 <= len(value) <= 40:
+        raise BackupError("invalid_stored_context_clock")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise BackupError("invalid_stored_context_clock") from None
+    if (parsed.tzinfo is not None if local else
+            parsed.tzinfo is None or parsed.utcoffset().total_seconds() != 0):
+        raise BackupError("invalid_stored_context_clock")
+    return parsed
+
+
+def _context_digest(value, *, nullable=True):
+    if value is None and nullable:
+        return
+    if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
+        raise BackupError("invalid_stored_context_source")
+
+
+def _context_metric(value, unit, *, available, integral=False, low=0, high=None):
+    _record(value, {"status": (str,), "value": _NUMBER, "unit": (str,)})
+    if value["unit"] != unit or value["status"] not in (
+            ("available", "missing", "invalid") if available else ("unavailable",)):
+        raise BackupError("invalid_stored_context_metric")
+    number = value["value"]
+    if value["status"] != "available":
+        if number is not None:
+            raise BackupError("invalid_stored_context_metric")
+        return
+    try:
+        valid = (type(number) in ((int,) if integral else (int, float)) and math.isfinite(number)
+                 and number >= low and (high is None or number <= high))
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise BackupError("invalid_stored_context_metric")
+
+
+def _stored_health_shape(value, kind, clock, reference, checked_clocks):
+    fields = {
+        "status": (str,), "source": (str,), "source_revision": _TEXT,
+        "source_checked_at": _TEXT, "wake_date": _TEXT, "night_of": _TEXT,
+        "local_time_source": (str,), "observation_start_utc": _TEXT,
+        "observation_end_utc": _TEXT, "metrics": (dict,),
+    }
+    detailed = isinstance(value, dict) and "sleep_start_local" in value
+    if detailed:
+        fields.update(sleep_start_local=_TEXT, sleep_end_local=_TEXT)
+    _record(value, fields)
+    empty = {"not_collected", "source_error", "oversize", "invalid_schema"}
+    if value["source"] != "garmin" or value["status"] not in (
+            {"available", "wrong_date", "time_unknown", "local_time_unknown", "after_activity"}
+            if detailed else empty):
+        raise BackupError("invalid_stored_health_context")
+    _context_digest(value["source_revision"])
+    checked = _context_clock(value["source_checked_at"])
+    if checked is not None:
+        checked_clocks.append(checked)
+    start = _context_clock(value["observation_start_utc"])
+    end = _context_clock(value["observation_end_utc"])
+    for name in ("wake_date", "night_of"):
+        if value[name] is not None:
+            _date(value[name])
+    if not detailed:
+        if (value["wake_date"] != clock["local_date"] or value["night_of"] is not None
+                or value["source_revision"] is not None or checked is not None
+                or start is not None or end is not None or value["local_time_source"] != "unavailable"):
+            raise BackupError("invalid_stored_health_context")
+    else:
+        local_clocks = []
+        for name, utc in (("sleep_start_local", start), ("sleep_end_local", end)):
+            local = value[name]
+            if local is not None:
+                if not isinstance(local, str) or len(local) > 40:
+                    raise BackupError("invalid_stored_context_clock")
+                try:
+                    local = datetime.fromisoformat(local)
+                    valid = (local.tzinfo is not None and abs(local.utcoffset().total_seconds()) <= 14 * 3600
+                                 and utc is not None)
+                    if valid and value["local_time_source"] in {"garmin_local", "unavailable"}:
+                        # The producer infers a minute offset but preserves
+                        # Garmin's original wall clock, even for a partial pair.
+                        minutes = (local.replace(tzinfo=None) - utc.replace(tzinfo=None)).total_seconds() / 60
+                        offset = round(minutes)
+                        valid = (local.utcoffset().total_seconds() == offset * 60
+                                 and abs(minutes - offset) <= 0.5)
+                    elif valid:
+                        valid = abs((local - utc).total_seconds()) < 0.001
+                except ValueError:
+                    valid = False
+                if not valid:
+                    raise BackupError("invalid_stored_context_clock")
+            local_clocks.append(local)
+        local_start, local_end = local_clocks
+        both_local = local_start is not None and local_end is not None
+        if (value["local_time_source"] not in {"unavailable", "garmin_local", "configured_timezone"}
+                or (value["local_time_source"] != "unavailable") != both_local
+                or value["night_of"] != (local_start.date().isoformat() if local_start else None)):
+            raise BackupError("invalid_stored_health_context")
+        expected = ("time_unknown" if clock["local_date"] is None
+                    else "wrong_date" if value["wake_date"] != clock["local_date"]
+                    else "time_unknown" if reference is None or start is None or end is None or end <= start
+                    else "local_time_unknown" if not both_local
+                    else "wrong_date" if local_end.date().isoformat() != value["wake_date"]
+                    else "after_activity" if end > reference else "available")
+        if value["status"] != expected:
+            raise BackupError("invalid_stored_health_attribution")
+    names = SLEEP_METRICS if kind == "sleep" else {name: "ms" for name in HRV_METRICS}
+    _exact(value["metrics"], set(names))
+    for name, unit in names.items():
+        _context_metric(value["metrics"][name], unit, available=value["status"] == "available",
+                        high=100 if unit in {"score_0_100", "%"} else None)
+
+
+def _stored_training_shape(value, day, reference, checked_clocks):
+    fields = {"status": (str,), "selection_status": (str,), "selected_slot": _TEXT,
+              "temporal_status": (str,), "readiness": (dict,), "recovery": (dict,)}
+    stored = isinstance(value, dict) and value.get("status") == "stored"
+    if stored:
+        fields.update({
+            "source": (str,), "sdk_version": (str,), "normalizer_revision": (int,),
+            "source_revision": (str,), "date": (str,), "timezone": (str,),
+            "input_context": _TEXT, "last_attempt": (dict,), "source_checked_at": _TEXT,
+            "time_provenance": (dict,),
+        })
+    _record(value, fields)
+    temporal = value["temporal_status"]
+    if stored:
+        _date(value["date"])
+        _context_digest(value["source_revision"], nullable=False)
+        if (value["source"] != "garmin-connect" or value["sdk_version"] != "0.3.17"
+                or value["normalizer_revision"] != 1 or value["date"] != day
+                or value["selection_status"] not in {
+                    "available", "ambiguous", "no_observation", "selected_device_unavailable", "unknown"}
+                or temporal not in {"before_activity", "after_activity", "time_unknown", "selection_unavailable"}
+                or value["selected_slot"] not in {None, "morning", "latest"}
+                or (value["selected_slot"] is None) != (temporal == "selection_unavailable")
+                or value["selected_slot"] is not None and value["selection_status"] != "available"
+                or value["input_context"] not in {None, "AFTER_WAKEUP_RESET"}
+                or not 1 <= len(value["timezone"]) <= 128
+                or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.+-]*(?:/[A-Za-z][A-Za-z0-9_.+-]*)*",
+                                    value["timezone"])):
+            raise BackupError("invalid_stored_training_context")
+        # This is archived provenance, not a request to resolve a timezone.
+        # Offline verification must not require the producer's local tz database.
+        _record(value["last_attempt"], {"status": (str,), "attempted_at": (str,)})
+        if value["last_attempt"]["status"] not in _STORED_TRAINING_ATTEMPT_STATUSES:
+            raise BackupError("invalid_stored_training_context")
+        _context_clock(value["last_attempt"]["attempted_at"], nullable=False)
+        checked = _context_clock(value["source_checked_at"])
+        if checked is not None:
+            checked_clocks.append(checked)
+        _exact(value["time_provenance"], {"readiness", "recovery"})
+    elif (value["status"] not in {"not_collected", "source_error", "oversize", "invalid_schema"}
+            or value["selection_status"] != "unknown" or value["selected_slot"] is not None
+            or temporal != "selection_unavailable"):
+        raise BackupError("invalid_stored_training_context")
+    for name, unit, low, high in (("readiness", "score_1_100", 1, 100), ("recovery", "minutes", 0, 2**31 - 1)):
+        metric = value[name]
+        _record(metric, {"value": _NUMBER, "status": (str,), "unit": (str,),
+                         "observation_at": _TEXT, "source_checked_at": _TEXT, "retained_previous": (bool,)})
+        observed = _context_clock(metric["observation_at"])
+        checked = _context_clock(metric["source_checked_at"])
+        if checked is not None:
+            checked_clocks.append(checked)
+        available = metric["status"] in {"available", "conflicting"}
+        if (metric["status"] not in {"available", "conflicting", "invalid", "no_observation", "unavailable"}
+                or metric["unit"] != unit or metric["status"] == "conflicting" and name != "recovery"
+                or available and (temporal != "before_activity" or reference is None or observed is None
+                                  or observed > reference or checked is None)
+                or metric["status"] in {"invalid", "no_observation"} and checked is not None):
+            raise BackupError("invalid_stored_training_attribution")
+        _context_metric({"unit": unit, "value": metric["value"],
+                         "status": "available" if available else "missing"},
+                        unit, available=True, integral=True, low=low, high=high)
+        if not stored:
+            if (metric["status"] != "unavailable" or observed is not None or checked is not None
+                    or metric["retained_previous"]):
+                raise BackupError("invalid_stored_training_context")
+        else:
+            provenance = value["time_provenance"][name]
+            _record(provenance, {"observation_local": _TEXT, "time_source": (str,)})
+            local = _context_clock(provenance["observation_local"], local=True)
+            if (provenance["time_source"] not in {
+                    "garmin_offset", "configured_timezone", "unavailable", "timezone_conflict"}
+                    or local is not None and local.date().isoformat() != day):
+                raise BackupError("invalid_stored_training_context")
+
+
+def _stored_context_shape(value, analysis):
+    _record(value, {"schema_version": (int,), "snapshot_at": _TEXT, "reference_time_utc": _TEXT,
+                    "semantics": (str,), "sleep": (dict,), "hrv": (dict,), "training_day": (dict,)})
+    clock = analysis["recorded_running_metrics"]
+    if (value["schema_version"] != 1 or value["semantics"] != "retrospective_pre_activity"
+            or value["reference_time_utc"] != clock["session_start_time_utc"]):
+        raise BackupError("invalid_stored_context")
+    snapshot = _context_clock(value["snapshot_at"])
+    reference = _context_clock(value["reference_time_utc"])
+    checked_clocks = []
+    for kind in ("sleep", "hrv"):
+        _stored_health_shape(value[kind], kind, clock, reference, checked_clocks)
+    _stored_training_shape(value["training_day"], analysis["activity"]["date"], reference, checked_clocks)
+    if snapshot is not None and any(checked > snapshot for checked in checked_clocks):
+        raise BackupError("invalid_stored_context_clock")
+
+
 def _validate_value(key: str, value: Any):
     kind, parts = key_info(key)
     fields = {"profile": _PROFILE_FIELDS, "context": _CONTEXT_FIELDS, "analysis": _ANALYSIS_FIELDS}[
         kind
     ]
-    if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") == "1.1.0":
+    if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") in ("1.1.0", "1.2.0", "1.3.0"):
         fields = fields | {"recorded_running_metrics"}
+        if value["analyzer_version"] == "1.3.0":
+            fields = fields | {"stored_context_snapshot"}
     _exact(value, fields)
     if type(value["schema_version"]) is not int or value["schema_version"] != 1:
         raise BackupError("unsupported_object_version")
@@ -598,6 +934,10 @@ def _validate_value(key: str, value: Any):
                     raise BackupError("invalid_analysis_source_hash")
         if value["analyzer_version"] == "1.1.0":
             _recorded_running_metrics_shape(value["recorded_running_metrics"], value)
+        elif value["analyzer_version"] in ("1.2.0", "1.3.0"):
+            _running_segments_shape(value["recorded_running_metrics"], value)
+            if value["analyzer_version"] == "1.3.0":
+                _stored_context_shape(value["stored_context_snapshot"], value)
 
 
 def _references(values: dict[str, dict]) -> list[dict]:
