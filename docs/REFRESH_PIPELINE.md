@@ -120,12 +120,26 @@ and uses the established backfill entrypoints.
 ## Diagnostics
 
 Each run writes ignored `.granular/refresh-diagnostics.json` atomically and emits
-a compact `refresh-diagnostics` JSON line. It contains a random correlation ID,
-mode, stage names/statuses, elapsed milliseconds, Garmin `connectapi` attempts
+a compact, separately projected `refresh-diagnostics` JSON line. The private
+report includes a correlation ID; the log contains mode, stage names/statuses,
+elapsed milliseconds, Garmin `connectapi` attempts
 and errors, and per-stage R2 SDK operations. It excludes fitness values, source dates,
 activity IDs, object keys, request arguments, credentials and exception text.
-The existing importer reports can contain operational details and belong only
-in the private installation; they are separate from this sanitized report.
+The private local and stored diagnostic reports can contain operational details
+and must remain in the private installation; they are not the sanitized log.
+
+After a completed recent-health stage, their additive
+`health_validation_rejections` list identifies each rejected sleep/HRV request
+using only `stream`, requested ISO `date`, and `category`. Categories come from
+the existing validator: `invalid_response`, `wrong_date`, or
+`garmin_not_ready`; provider exception text never selects a category. There are
+at most two streams times the existing 14-day overlap limit (28 records; normally
+six requests). A valid dated pending response remains a successful source check;
+an invalid response still preserves the previous successful check and good data.
+No list member contains measurements, provider messages, object keys or raw input.
+The list is absent when the recent-health result was not available, not proof
+that no rejection occurred. Hosted logs and the existing MCP diagnostic projection
+exclude the list and its dates. This adds no fetch, retry, acceptance rule or PUT.
 
 Garmin counts cover the SDK's `connectapi` calls, including failed attempts;
 `garmin_connectapi_available` distinguishes missing instrumentation from zero
@@ -175,9 +189,9 @@ therefore have unknown pipeline timings. Publication is also skipped after
 interruption. There is at most one extra small PUT, no extra inventory, and
 unchanged write/object/byte limits and schedules. Failed publication propagates
 when there was no prior failure; it never replaces an existing source failure.
-This object contains UTC start/finish and successful source-check receipt times,
-not Garmin-local activity/sleep dates. Existing targeted reports and receipts
-keep their keys and schemas. The final diagnostics PUT itself is outside the
+This private object contains UTC start/finish and successful source-check receipt
+times plus the bounded requested dates described above. Existing targeted reports
+and receipts keep their keys and schemas. The final diagnostics PUT itself is outside the
 stored stage counters/timings and pipeline duration.
 
 One compact `refresh-diagnostics-publication` JSON event per cloud run records

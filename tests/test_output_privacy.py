@@ -231,6 +231,9 @@ def test_shared_projection_rejects_unknown_nested_fields_and_non_aggregate_value
     from pipeline.output_privacy import log_report
     report = {"status": MARKER, "elapsed_ms": 1, "activities_checked": 2.5,
               "days": True, "source_errors": float("nan"), "unknown": MARKER,
+              "health_validation_rejections": [
+                  {"stream": "sleep", "date": "2041-02-03", "category": "wrong_date"},
+              ],
               "results": {"hrv": {"months_written": [{"month": "2041-02", "error": MARKER}]}, MARKER: MARKER},
               "stages": [{"stage": "recent_health", "status": "complete", "elapsed_ms": 2.5, "unknown": MARKER},
                          {"stage": MARKER, "error": MARKER}]}
@@ -238,6 +241,7 @@ def test_shared_projection_rejects_unknown_nested_fields_and_non_aggregate_value
     output = capsys.readouterr()
     assert "SYNTHETIC_PRIVATE" not in output.out + output.err
     assert "2041-" not in output.out
+    assert "health_validation_rejections" not in output.out and "wrong_date" not in output.out
     value = json.loads(output.out)
     assert value["elapsed_ms"] == 1 and value["status"] == "unknown"
     assert value["stages"] == [{"stage": "recent_health", "status": "complete", "elapsed_ms": 2.5}]
