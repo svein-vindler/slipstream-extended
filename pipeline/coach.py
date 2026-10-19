@@ -14,6 +14,7 @@ from datetime import date
 from typing import Any
 
 from .coach_stored_context import stored_context_snapshot as project_stored_context
+from .gct_sides import ground_contact_sides
 from .recorded_running_metrics import expanded_recorded_running_metrics
 from .training_effect import recorded_training_effect
 
@@ -21,6 +22,7 @@ COACH_SCHEMA_VERSION = 1
 ANALYZER_VERSION = "1.2.0"
 STORED_CONTEXT_ANALYZER_VERSION = "1.3.0"
 TRAINING_EFFECT_ANALYZER_VERSION = "1.4.0"
+GCT_SIDES_ANALYZER_VERSION = "1.5.0"
 
 
 def _number(value: Any) -> float | None:
@@ -297,10 +299,12 @@ def analysis_id(
     profile_id: str, context_revision: str | None,
     stored_context_snapshot: dict[str, Any] | None = None,
     training_effect: dict[str, Any] | None = None,
+    gct_sides: dict[str, Any] | None = None,
 ) -> str:
     value = {
         "activity_id": activity_id,
-        "analyzer_version": (TRAINING_EFFECT_ANALYZER_VERSION if training_effect is not None
+        "analyzer_version": (GCT_SIDES_ANALYZER_VERSION if gct_sides is not None
+                             else TRAINING_EFFECT_ANALYZER_VERSION if training_effect is not None
                              else STORED_CONTEXT_ANALYZER_VERSION if stored_context_snapshot is not None
                              else ANALYZER_VERSION),
         "fit_sha256": fit_sha256,
@@ -312,6 +316,8 @@ def analysis_id(
         value["stored_context_snapshot"] = stored_context_snapshot
     if training_effect is not None:
         value["training_effect"] = training_effect
+    if gct_sides is not None:
+        value["ground_contact_sides"] = gct_sides
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(canonical).hexdigest()[:24]
 
@@ -327,6 +333,7 @@ def build_coach_input(
     context_revision = str(context.get("context_id")) if context else None
     metrics = expanded_recorded_running_metrics(activity, decoded_fit, endurance)
     training_effect = recorded_training_effect(activity, decoded_fit, endurance)
+    sides = ground_contact_sides(metrics, context)
     stored_context = (project_stored_context(stored_context_snapshot, metrics)
                       if stored_context_snapshot is not None else None)
     identifier = analysis_id(
@@ -337,6 +344,7 @@ def build_coach_input(
         context_revision=context_revision,
         stored_context_snapshot=stored_context,
         training_effect=training_effect,
+        gct_sides=sides,
     )
     summary = endurance.get("summary") if isinstance(endurance.get("summary"), dict) else {}
     bpm_seconds = endurance.get("heart_rate_seconds_by_bpm")
@@ -356,7 +364,7 @@ def build_coach_input(
     structure = workout_structure(decoded_fit)
     return {
         "schema_version": COACH_SCHEMA_VERSION,
-        "analyzer_version": TRAINING_EFFECT_ANALYZER_VERSION,
+        "analyzer_version": GCT_SIDES_ANALYZER_VERSION,
         "analysis_id": identifier,
         "activity_id": activity_id,
         "activity": {
@@ -374,6 +382,7 @@ def build_coach_input(
         "user_context": context,
         "recorded_running_metrics": metrics,
         "training_effect": training_effect,
+        "ground_contact_sides": sides,
         **({"stored_context_snapshot": stored_context} if stored_context is not None else {}),
         "time_basis": "elapsed",
         "summary": {

@@ -75,7 +75,7 @@ def test_verify_backup_preserves_real_wired_current_and_v2_running_fields_exactl
     objects = context_objects()
     analysis_key = next(key for key in objects if "/canonical/" in key)
     original = json.loads(gzip.decompress(objects[analysis_key]))
-    assert original["analyzer_version"] == "1.4.0"
+    assert original["analyzer_version"] == "1.5.0"
     assert original["recorded_running_metrics"]["schema_version"] == 2
     assert original["stored_context_snapshot"]["training_day"]["recovery"]["value"] == 0
     verified = backup.verify_backup(_write_document(tmp_path, document(objects)), PASSWORD)
@@ -202,6 +202,7 @@ def test_allowed_legacy_backup_schema_without_new_extensions_is_still_accepted(t
     del analysis['stored_context_snapshot']
     del analysis['recorded_running_metrics']
     del analysis['training_effect']
+    del analysis['ground_contact_sides']
     objects[key] = gzip.compress(backup._json_bytes(analysis), mtime=0)
     assert backup.verify_backup(_write_document(tmp_path, document(objects)), PASSWORD).objects == objects
 
@@ -216,7 +217,7 @@ def test_current_public_builder_remains_backup_compatible_without_context_inject
     analysis = build_coach_input(activity=ACTIVITY, decoded_fit=decoded, endurance=endurance,
                                 profile=profile, tcx_sha256=hashlib.sha256(
                                     client.objects['activities/2026/42/activity.tcx']).hexdigest())
-    assert analysis['analyzer_version'] == '1.4.0'
+    assert analysis['analyzer_version'] == '1.5.0'
     assert 'stored_context_snapshot' not in analysis
     objects = {
         f"activities/2026/42/coach-input/v1/canonical/{analysis['analysis_id']}.json": gzip.compress(backup._json_bytes(analysis), mtime=0),
@@ -284,7 +285,7 @@ def test_verify_backup_preserves_known_garmin_clock_when_local_pair_is_incomplet
     objects = context_objects(stored_snapshot=snapshot)
     key = next(key for key in objects if "/canonical/" in key)
     analysis = json.loads(gzip.decompress(objects[key]))
-    assert analysis["analyzer_version"] == "1.4.0"
+    assert analysis["analyzer_version"] == "1.5.0"
     assert analysis["summary"]["distance_m"] == 5000
     for kind in ("sleep", "hrv"):
         context = analysis["stored_context_snapshot"][kind]

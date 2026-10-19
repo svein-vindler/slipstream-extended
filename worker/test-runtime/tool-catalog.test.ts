@@ -97,7 +97,7 @@ it("advertises the D4 scalar metric contract in every registration mode", () => 
 });
 
 const approvedEnduranceDescription = "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates and recorded running measurements. New stored datasets also include raw ground-contact balance with unknown side semantics, recorded lap measurements, and producer-computed distance-split/half measurements with coverage. Existing datasets retain their five-field fallback. No new FIT fetch or segment computation is performed here, and missing or unverified optional fields do not change dataset availability.";
-const approvedCoachDescription = "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. Analyzer 1.1.0 includes five optional recorded FIT running measurements. Analyzer 1.2.0 adds raw ground-contact balance with unknown side semantics, recorded lap measurements and producer-computed distance-split/half measurements with source units, identity, clocks and coverage. Analyzer 1.4.0 adds neutral recorded aerobic/anaerobic Training Effect, eligible frozen stored health context, and explicit coverage/nulls for incomplete structured lap totals. Historical analyses remain unchanged.";
+const approvedCoachDescription = "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. Analyzer 1.1.0 includes five optional recorded FIT running measurements. Analyzer 1.2.0 adds raw ground-contact balance with unknown side semantics, recorded lap measurements and producer-computed distance-split/half measurements with source units, identity, clocks and coverage. Analyzer 1.4.0 adds neutral recorded aerobic/anaerobic Training Effect, eligible frozen stored health context, and explicit coverage/nulls for incomplete structured lap totals. Analyzer 1.5.0 adds activity/FIT-scoped declared ground-contact sides and a calculated complement for the session and actual laps; raw values and historical analyses remain unchanged.";
 
 it("advertises optional strict v1-or-v2 running fields without changing the stored session contract", () => {
   for (const mode of modes) {
@@ -151,7 +151,49 @@ const approvedStatsDescription = "Totals (distance, time, elevation, calories) r
 
 // Historical guards reconstruct only explicitly checked changes. Current full
 // snapshots retain the actual schemas and descriptions.
+const approvedGctContextDescription = "Append explicit user context to one activity. gct_balance_side declares the raw session/recorded-lap percentage's side for this exact stored FIT digest, not a device-wide convention. Call only on explicit user request. Side-only additions retain existing RPE/notes; historical contexts are never overwritten.";
+const historicalContextDescription = "Append user-supplied RPE, conditions, note or workout correction to one activity. Call only when the user explicitly asks to record this information. The values are never inferred and existing context is never overwritten.";
+
+function expectScopedGctInput(tool: ToolContract) {
+  expect(tool.description).toBe(approvedGctContextDescription);
+  expect((tool.inputSchema.properties as Record<string, unknown>).gct_balance_side).toEqual({
+    type: "object", properties: { source_fit_sha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
+      raw_side: { type: "string", enum: ["left", "right"] } },
+    required: ["source_fit_sha256", "raw_side"], additionalProperties: false,
+  });
+  expect(tool.inputSchema.required ?? []).not.toContain("gct_balance_side");
+}
+
+it("GCT catalog: exposes activity-scoped side input and Coach 1.5 in actual registrations", () => {
+  for (const mode of modes) {
+    expect(requireTool(mode.tools, "coach_input").description).toBe(approvedCoachDescription);
+    if (!mode.writes) {
+      expect(mode.tools.some(tool => tool.name === "add_activity_context")).toBe(false);
+      continue;
+    }
+    const tool = requireTool(mode.tools, "add_activity_context");
+    expectScopedGctInput(tool);
+    const validate = validator.getValidator(tool.inputSchema);
+    const input = { activity_id: "garmin-42", gct_balance_side: { source_fit_sha256: "a".repeat(64), raw_side: "left" } };
+    expect(validate(input).valid).toBe(true);
+    for (const declaration of [
+      { ...input.gct_balance_side, raw_side: "all_activities" },
+      { ...input.gct_balance_side, source_fit_sha256: "unbound" },
+      { ...input.gct_balance_side, source: "manufacturer" },
+    ]) expect(validate({ ...input, gct_balance_side: declaration }).valid).toBe(false);
+  }
+});
+
 function beforeExplicitInspection(tool: ToolContract): ToolContract {
+  if (tool.name === "add_activity_context") {
+    // Only the reviewed side field/description are removed for OLD digests.
+    // Current full snapshots and the deterministic catalog retain them.
+    const previous = structuredClone(tool);
+    expectScopedGctInput(previous);
+    delete (previous.inputSchema.properties as Record<string, unknown>).gct_balance_side;
+    previous.description = historicalContextDescription;
+    return previous;
+  }
   if (tool.name === "activity_stats") {
     const previous = structuredClone(tool);
     expect(previous.description).toBe(approvedStatsDescription);

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from garmin_fit_sdk import Encoder
 
-from pipeline.coach import TRAINING_EFFECT_ANALYZER_VERSION, build_coach_input
+from pipeline.coach import GCT_SIDES_ANALYZER_VERSION, build_coach_input
 from pipeline.granular import decode_fit, json_bytes
 
 START = datetime(2026, 10, 7, 23, 30, tzinfo=timezone.utc)
@@ -65,7 +65,7 @@ def test_real_fit_measurements_reach_coach_without_rescaling():
     assert block["session_start_time_utc"] == "2026-10-07T23:30:00.000Z"
     assert block["measured_at_utc"] == "2026-10-08T00:00:00.000Z"
     assert block["source_fit_sha256"] == decoded_source()["source_fit_sha256"]
-    assert analyze()["analyzer_version"] == TRAINING_EFFECT_ANALYZER_VERSION
+    assert analyze()["analyzer_version"] == GCT_SIDES_ANALYZER_VERSION
 
 
 @pytest.mark.parametrize("value,status,expected", [
@@ -193,7 +193,7 @@ def test_portable_reader_fixture_contains_real_produced_measurements():
     canonical = json.loads(gzip.decompress(base64.b64decode(
         fixture["objects_base64"][pointer["analysis_key"]])))
     assert canonical["analysis_id"] == fixture["analysis_id"]
-    assert canonical["analyzer_version"] == TRAINING_EFFECT_ANALYZER_VERSION
+    assert canonical["analyzer_version"] == GCT_SIDES_ANALYZER_VERSION
     assert canonical["stored_context_snapshot"]["reference_time_utc"] == "2026-10-07T23:30:00.000Z"
     block = canonical["recorded_running_metrics"]
     assert block["association"] == "matched" and block["activity_id"] == "42"

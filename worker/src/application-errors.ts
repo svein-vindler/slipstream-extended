@@ -2,6 +2,7 @@
 import type { McpServer, RequestId, ServerContext, CallToolResult } from "@modelcontextprotocol/server";
 
 const MESSAGES = {
+  gct_declaration: "The side declaration must match one verified running session and its exact stored FIT hash. Read the stored activity and confirm the source before retrying.",
   profile_in_progress: "This immutable profile write is already reserved. Read coach_profile to check whether it completed; do not create another version to bypass the reservation.",
   profile_capacity: "Coach profile capacity of 100 has been reached. Existing immutable profiles remain available.",
   calendar_date: "Invalid calendar date. Use YYYY-MM-DD with a valid calendar day.",
