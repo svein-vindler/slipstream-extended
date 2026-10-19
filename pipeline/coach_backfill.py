@@ -13,6 +13,7 @@ from typing import Any
 from .coach import (
     ANALYZER_VERSION,
     STORED_CONTEXT_ANALYZER_VERSION,
+    TRAINING_EFFECT_ANALYZER_VERSION,
     build_coach_input,
     select_profile,
 )
@@ -29,6 +30,7 @@ MAX_ACTIVITIES_PER_RUN = 50
 LEGACY_ANALYZER_VERSION = "1.0.0"
 SUPPORTED_ANALYZER_VERSIONS = (
     LEGACY_ANALYZER_VERSION, "1.0.1", "1.1.0", ANALYZER_VERSION, STORED_CONTEXT_ANALYZER_VERSION,
+    TRAINING_EFFECT_ANALYZER_VERSION,
 )
 BULK_REUSE_VERSION = 1
 
@@ -245,7 +247,8 @@ def _single_input_signature(
         "profile": profile,
         "revisions": {key: revisions[key] for key in selected},
     }
-    if (analyzer_version or ANALYZER_VERSION) == STORED_CONTEXT_ANALYZER_VERSION:
+    if ((analyzer_version or ANALYZER_VERSION) == STORED_CONTEXT_ANALYZER_VERSION
+            or analyzer_version == TRAINING_EFFECT_ANALYZER_VERSION and input_source_revisions is not None):
         if not valid_source_proof(input_source_revisions, activity["date"]):
             return None
         value["input_source_revisions"] = input_source_revisions
@@ -294,12 +297,13 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
         candidate = _json(store, key)
         engine = candidate.get("analyzer_version")
         stored = pointer.get("input_signature")
-        if engine is None and pointer.get("analyzer_version") == ANALYZER_VERSION:
+        current_engine = engine in (ANALYZER_VERSION, TRAINING_EFFECT_ANALYZER_VERSION)
+        if engine is None and pointer.get("analyzer_version") in (ANALYZER_VERSION, TRAINING_EFFECT_ANALYZER_VERSION):
             return "conflict", None
         marked = type(pointer.get("selection_version")) is int and pointer["selection_version"] == 1
         unmarked = "selection_version" not in pointer
         valid_schema = type(pointer.get("schema_version")) is int and pointer["schema_version"] == 1
-        repair_marker = engine == ANALYZER_VERSION and (not valid_schema or not marked and not unmarked)
+        repair_marker = current_engine and (not valid_schema or not marked and not unmarked)
         if not repair_marker and (not valid_schema or not marked and not unmarked):
             return "unknown", None
         if (engine not in SUPPORTED_ANALYZER_VERSIONS
@@ -318,17 +322,29 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
             "context_revision": str(context.get("context_id")) if context else None,
         }
         context_sources = pointer.get("input_source_revisions")
-        if engine == STORED_CONTEXT_ANALYZER_VERSION:
+        has_context = (engine == STORED_CONTEXT_ANALYZER_VERSION
+                       or engine == TRAINING_EFFECT_ANALYZER_VERSION and "stored_context_snapshot" in candidate)
+        if has_context:
             snapshot = candidate.get("stored_context_snapshot")
             if (pointer.get("analyzer_version") != engine or not isinstance(snapshot, dict)
                     or not valid_source_proof(context_sources, activity["date"])):
                 return "unknown", None
             seed["stored_context_snapshot"] = snapshot
+        elif engine == TRAINING_EFFECT_ANALYZER_VERSION and context_sources is not None:
+            return "unknown", None
+        if engine == TRAINING_EFFECT_ANALYZER_VERSION:
+            if pointer.get("analyzer_version") != engine or not isinstance(candidate.get("training_effect"), dict):
+                return "unknown", None
+            seed["training_effect"] = candidate["training_effect"]
         seed_id = sha256(json.dumps(seed, sort_keys=True, separators=(",", ":")).encode())[:24]
         checked = {**candidate, "summary": dict(candidate["summary"]), "analysis_id": seed_id}
         _identify_coach_input(checked)
         if checked["analysis_id"] != candidate["analysis_id"]:
-            if engine == ANALYZER_VERSION:
+            if engine == TRAINING_EFFECT_ANALYZER_VERSION and has_context:
+                # As with1.3, damaged retrospective snapshots are unknown. They
+                # cannot authorize repair, historical regeneration or writes.
+                return "unknown", None
+            if current_engine:
                 return ("repair", None) if candidate["analysis_id"] == seed_id else ("conflict", None)
             return "unknown", None
         if repair_marker:
@@ -389,7 +405,7 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
             "analyzer_version": engine, "input_signature": expected, "analysis_key": key,
             "canonical_revision": revisions[key], "pointer_revision": revisions[pointer_key],
             "selection_kind": "unmarked" if unmarked else "marked",
-            **({"input_source_revisions": context_sources} if engine == STORED_CONTEXT_ANALYZER_VERSION else {}),
+            **({"input_source_revisions": context_sources} if has_context else {}),
         }
     except (KeyError, TypeError, ValueError, AttributeError):
         return "unknown", None
@@ -541,7 +557,7 @@ def run_one(*, activity: dict[str, Any], store: R2Store, force: bool = False) ->
     # moving time. Repeated calls with the same metadata reuse that successful result.
     signature = _single_input_signature(
         activity, profile, required, revisions, context_key,
-        analyzer_version=STORED_CONTEXT_ANALYZER_VERSION if stored_context is not None else ANALYZER_VERSION,
+        analyzer_version=TRAINING_EFFECT_ANALYZER_VERSION,
         input_source_revisions=context_sources,
     )
     previous_key = previous_pointer.get("analysis_key")

@@ -261,14 +261,24 @@ export function activityFilterWarning(
 }
 
 export function summarize(acts: Activity[]) {
-  const sum = (f: (a: Activity) => number | undefined) => acts.reduce((t, a) => t + (f(a) ?? 0), 0);
+  const sum = (f: (a: Activity) => number | undefined, scale = 1) => {
+    let total = 0;
+    for (const activity of acts) {
+      const value = f(activity);
+      if (value == null || !Number.isFinite(value)) return null;
+      total += value;
+    }
+    const rounded = Math.round(total * scale) / scale;
+    return Number.isFinite(rounded) ? rounded : null;
+  };
+  const movingTime = sum((a) => a.movingS);
   const hrs = acts.map((a) => a.avgHr).filter((x): x is number => x != null);
   return {
     activities: acts.length,
-    total_distance_km: Math.round(sum((a) => a.distanceKm) * 100) / 100,
-    total_moving_time: fmtDuration(sum((a) => a.movingS)) ?? "0:00",
-    total_elevation_gain_m: Math.round(sum((a) => a.elevGain) * 10) / 10,
-    total_calories: Math.round(sum((a) => a.calories)) || null,
+    total_distance_km: sum((a) => a.distanceKm, 100),
+    total_moving_time: movingTime === null ? null : fmtDuration(movingTime) ?? null,
+    total_elevation_gain_m: sum((a) => a.elevGain, 10),
+    total_calories: sum((a) => a.calories),
     avg_hr: hrs.length ? Math.round((hrs.reduce((t, x) => t + x, 0) / hrs.length) * 10) / 10 : null,
   };
 }

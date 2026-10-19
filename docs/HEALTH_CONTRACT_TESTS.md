@@ -113,6 +113,17 @@ tool catalog with coach writes enabled and disabled. Its pre-refactor snapshots
 cover tool order, descriptions, input/output schemas and safety annotations,
 so moving domain registrations cannot silently change client contracts.
 
+`worker/test-runtime/activity-local-date.test.ts` also checks `activity_stats`
+through authenticated modern JSON and legacy SSE with invented stored CSV.
+Each distance, moving-time, elevation and calorie total requires finite values
+for every matched activity; any missing or invalid value makes that total null
+instead of reporting a known subtotal as a full total. Recorded zero is retained.
+An empty selection has `activities: 0` and zero totals, distinct from a nonempty
+selection with unknown totals. Average HR remains the mean of known HR values.
+The same completeness rule applies to each group. Tests check independent
+partial fields, zero, empty/complete selections, nonfinite input, groups, matching
+text/structured output and output-schema validation without changing stored CSV.
+
 The same generation command also runs `scripts/build_weight_contract.py`.
 `worker/test-runtime/weight-index.test.ts` loads exact Python canonical/index
 bytes into real local R2 and verifies all weighings, alternative morning windows,

@@ -46,7 +46,7 @@ are not a backup of their source telemetry. Free-text notes are preserved as
 data; never put credentials into them. Schema checks cannot identify every
 secret or coordinate somebody might type into an allowed text field.
 
-Engine `1.3.0` analyses can also contain a frozen `stored_context_snapshot` of
+Engine `1.3.0` and eligible `1.4.0` analyses can also contain a frozen `stored_context_snapshot` of
 allowlisted sleep/HRV and optional Readiness/Recovery summaries, units, statuses
 and observation/check/snapshot provenance. These embedded values are encrypted
 and preserved as part of the immutable analysis, not fetched again or updated
@@ -55,6 +55,16 @@ excluded. Missing external sources still mean `ready: false`; restoring context
 does not establish current Garmin freshness or regenerate older analyses.
 The standalone backup dependency set remains `requirements-backup.txt`; this
 format extension does not require the hosted pipeline's provider dependencies.
+
+New engine `1.4.0` also preserves neutral recorded FIT `training_effect` values,
+status, source-field and activity/clock/digest provenance. Structured sections
+retain strict heart-rate coverage and per-quantity `measurement_coverage`:
+incomplete elapsed/distance totals stay null, while genuinely recorded zero is
+kept. Valid versioned heart-rate coverage in old structured analyses is accepted
+without removing it or rewriting history. Unknown nested fields, invalid
+Training Effect values, conflicting clocks/source identity and inconsistent
+coverage still reject the archive. Historical 1.0–1.3 bytes/IDs are unchanged;
+verification neither regenerates analyses nor fetches their source data.
 
 ## Format and password handling
 

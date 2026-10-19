@@ -20,6 +20,12 @@ execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
   "scripts/build_coach_stored_context_contract.py", "worker/test-runtime/generated/coach-stored-context.json",
 ], { cwd: root, stdio: "inherit" });
 execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_coach_training_effect_contract.py", "worker/test-runtime/generated/coach-training-effect.json",
+], { cwd: root, stdio: "inherit" });
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_coach_training_effect_matrix.py", "worker/test-runtime/generated/coach-training-effect-matrix.json",
+], { cwd: root, stdio: "inherit" });
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
   "scripts/build_health_contract.py", "--output",
   "worker/test-runtime/generated/health-contract.json",
 ], { cwd: root, stdio: "inherit" });

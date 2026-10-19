@@ -441,6 +441,12 @@ def _analysis_shape(value):
         if not isinstance(section, dict):
             raise BackupError("invalid_analysis_sections")
         extension = {"laps": (int,)} if "laps" in section else {"note": (str,)}
+        coverage = (("heart_rate_coverage" in section or value["analyzer_version"] == "1.4.0") and "laps" in section
+                    and value["analyzer_version"] in ("1.0.1", "1.1.0", "1.2.0", "1.3.0", "1.4.0"))
+        if coverage:
+            extension["heart_rate_coverage"] = (dict,)
+        if value["analyzer_version"] == "1.4.0" and "laps" in section:
+            extension["measurement_coverage"] = (dict,)
         _record(
             section,
             {
@@ -452,6 +458,48 @@ def _analysis_shape(value):
                 **extension,
             },
         )
+        if coverage:
+            heart = section["heart_rate_coverage"]
+            _record(heart, {"basis": (str,), "covered_seconds": (int, float),
+                            "contributing_laps": (int,), "status": (str,)})
+            seconds, laps = heart["covered_seconds"], heart["contributing_laps"]
+            try:
+                finite_seconds = math.isfinite(seconds)
+            except OverflowError:
+                finite_seconds = False
+            if (heart["basis"] != "lap_elapsed"
+                    or heart["status"] not in {"complete", "partial", "none", "unknown"}
+                    or not finite_seconds or seconds < 0
+                    or not 0 <= laps <= section["laps"] or (seconds == 0) != (laps == 0)
+                    or (heart["status"] == "none" and seconds != 0)):
+                raise BackupError("invalid_section_hr_coverage")
+            elapsed = section["elapsed_seconds"]
+            try:
+                finite_elapsed = type(elapsed) in (int, float) and math.isfinite(elapsed) and elapsed >= 0
+            except OverflowError:
+                finite_elapsed = False
+            if (heart["status"] in {"complete", "partial"}
+                    and (not laps or not finite_elapsed
+                         or (heart["status"] == "complete" and abs(seconds - elapsed) > 0.001)
+                         or (heart["status"] == "partial" and not 0 < seconds < elapsed))):
+                raise BackupError("invalid_section_hr_coverage")
+        if value["analyzer_version"] == "1.4.0" and "laps" in section:
+            totals = section["measurement_coverage"]
+            _record(totals, {"elapsed_seconds": (dict,), "distance_m": (dict,)})
+            for name, total in totals.items():
+                _record(total, {"status": (str,), "observed_laps": (int,), "total_laps": (int,)})
+                observed, count = total["observed_laps"], total["total_laps"]
+                status = "complete" if observed == count else "partial" if observed else "unknown"
+                number = section[name]
+                try:
+                    finite = type(number) in (int, float) and math.isfinite(number) and number >= 0
+                except OverflowError:
+                    finite = False
+                if (not 0 <= observed <= count or count < 1 or count != section["laps"]
+                        or total["status"] != status
+                        or (status == "complete" and not finite)
+                        or (status != "complete" and number is not None)):
+                    raise BackupError("invalid_section_measurement_coverage")
     if value["distance_halves"] is not None:
         _record(value["distance_halves"], {"first": (dict,), "second": (dict,)})
         for half in value["distance_halves"].values():
@@ -461,6 +509,66 @@ def _analysis_shape(value):
         not isinstance(item, str) for item in value["limitations"]
     ):
         raise BackupError("invalid_analysis_limitations")
+
+
+def _training_effect_shape(block, analysis):
+    _record(block, {"schema_version": (int,), "source": (str,), "method": (str,), "scale": (str,),
+                    "activity_id": (str,), "association": (str,), "aerobic": (dict,), "anaerobic": (dict,),
+                    **{name: _TEXT for name in ("local_start_time", "local_date", "session_start_time_utc",
+                                                "measured_at_utc", "source_fit_sha256")}})
+    if (block["schema_version"] != 1 or block["source"] != "fit_session"
+            or block["method"] != "fit_recorded_estimate" or block["scale"] != "0_to_5"
+            or block["activity_id"] != analysis["activity_id"]
+            or block["association"] not in {"matched", "source_missing", "source_unreadable", "invalid_schema",
+                                            "decode_errors", "id_mismatch", "time_mismatch",
+                                            "sessions_missing", "sessions_ambiguous"}):
+        raise BackupError("invalid_training_effect")
+    digest = block["source_fit_sha256"]
+    if digest is not None and (not re.fullmatch(r"[a-f0-9]{64}", digest)
+                               or digest != analysis["source"]["fit_sha256"]):
+        raise BackupError("invalid_training_effect_source")
+    local = block["local_start_time"]
+    if local is not None:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?", local):
+            raise BackupError("invalid_training_effect_time")
+        try:
+            datetime.fromisoformat(local)
+        except ValueError:
+            raise BackupError("invalid_training_effect_time") from None
+    if block["local_date"] != (local[:10] if local else None):
+        raise BackupError("invalid_training_effect_time")
+    for name in ("session_start_time_utc", "measured_at_utc"):
+        if block[name] is not None:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", block[name]):
+                raise BackupError("invalid_training_effect_time")
+            _timestamp(block[name])
+    start, measured = block["session_start_time_utc"], block["measured_at_utc"]
+    matched = block["association"] == "matched"
+    if (matched and (start is None or local is not None and block["local_date"] != analysis["activity"]["date"])
+            or not matched and (start is not None or measured is not None)
+            or measured is not None and (start is None or measured < start)):
+        raise BackupError("invalid_training_effect_time")
+    recorded = analysis["recorded_running_metrics"]
+    if any(block[name] is not None and recorded[name] is not None and block[name] != recorded[name]
+           for name in ("session_start_time_utc", "measured_at_utc", "local_start_time", "local_date")):
+        raise BackupError("invalid_training_effect_time")
+    for name, field in (("aerobic", "total_training_effect"), ("anaerobic", "total_anaerobic_training_effect")):
+        metric = block[name]
+        _record(metric, {"status": (str,), "value": _NUMBER, "source_field": (str,)})
+        number, status = metric["value"], metric["status"]
+        if metric["source_field"] != field or status not in (
+                {"available", "missing", "invalid"} if matched else {"unavailable"}):
+            raise BackupError("invalid_training_effect_value")
+        if status == "available":
+            try:
+                valid = (number is not None and math.isfinite(number) and 0 <= number <= 5
+                         and abs(number * 10 - round(number * 10)) <= 1e-9)
+            except OverflowError:
+                valid = False
+            if not valid:
+                raise BackupError("invalid_training_effect_value")
+        elif number is not None:
+            raise BackupError("invalid_training_effect_value")
 
 
 def _recorded_running_metrics_shape(block, analysis):
@@ -867,10 +975,14 @@ def _validate_value(key: str, value: Any):
     fields = {"profile": _PROFILE_FIELDS, "context": _CONTEXT_FIELDS, "analysis": _ANALYSIS_FIELDS}[
         kind
     ]
-    if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") in ("1.1.0", "1.2.0", "1.3.0"):
+    if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") in ("1.1.0", "1.2.0", "1.3.0", "1.4.0"):
         fields = fields | {"recorded_running_metrics"}
         if value["analyzer_version"] == "1.3.0":
             fields = fields | {"stored_context_snapshot"}
+        if value["analyzer_version"] == "1.4.0":
+            fields = fields | {"training_effect"}
+            if "stored_context_snapshot" in value:
+                fields = fields | {"stored_context_snapshot"}
     _exact(value, fields)
     if type(value["schema_version"]) is not int or value["schema_version"] != 1:
         raise BackupError("unsupported_object_version")
@@ -934,10 +1046,12 @@ def _validate_value(key: str, value: Any):
                     raise BackupError("invalid_analysis_source_hash")
         if value["analyzer_version"] == "1.1.0":
             _recorded_running_metrics_shape(value["recorded_running_metrics"], value)
-        elif value["analyzer_version"] in ("1.2.0", "1.3.0"):
+        elif value["analyzer_version"] in ("1.2.0", "1.3.0", "1.4.0"):
             _running_segments_shape(value["recorded_running_metrics"], value)
-            if value["analyzer_version"] == "1.3.0":
+            if value["analyzer_version"] == "1.3.0" or "stored_context_snapshot" in value:
                 _stored_context_shape(value["stored_context_snapshot"], value)
+            if value["analyzer_version"] == "1.4.0":
+                _training_effect_shape(value["training_effect"], value)
 
 
 def _references(values: dict[str, dict]) -> list[dict]:

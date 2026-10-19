@@ -13,7 +13,7 @@ from test_recorded_running_metrics import DTO, START, analyze, decoded_source
 from pipeline import coach_backfill
 from pipeline import private_backup as backup
 from pipeline.backup_source import Scope
-from pipeline.coach import STORED_CONTEXT_ANALYZER_VERSION, validate_profile
+from pipeline.coach import TRAINING_EFFECT_ANALYZER_VERSION, validate_profile
 from pipeline.granular import normalize_endurance_session
 from scripts.benchmark_coach_reuse import CountingStore
 from scripts.build_running_segments_contract import build_case, synthetic_tcx
@@ -48,7 +48,7 @@ def test_new_running_segments_encrypted_backup_preserves_exact_producer_bytes(tm
             profile = validate_profile({**json.loads(body), "created_at": "2026-01-01T00:00:00Z"})
             objects[f"coach/profiles/v1/{profile['effective_from']}/{profile['profile_id']}.json"] = backup._json_bytes(profile)
     analysis = json.loads(gzip.decompress(next(body for key, body in objects.items() if "/canonical/" in key)))
-    assert analysis["analyzer_version"] == STORED_CONTEXT_ANALYZER_VERSION
+    assert analysis["analyzer_version"] == TRAINING_EFFECT_ANALYZER_VERSION
     assert analysis["stored_context_snapshot"]["reference_time_utc"] == "2026-10-07T23:30:00.000Z"
     assert analysis["recorded_running_metrics"]["kilometer_splits"]["items"][0]["average_power"]["value"] == 150
     target = tmp_path / "synthetic-segments.slbk"

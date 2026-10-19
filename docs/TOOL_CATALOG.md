@@ -35,7 +35,7 @@ See [AI workflows](AI_WORKFLOWS.md), [prompt ideas](PROMPTS.md), [fresh data](FR
 
 ### `activity_stats`
 
-Totals (distance, time, elevation, calories, avg HR). Optionally group_by sport/month/year.
+Totals (distance, time, elevation, calories) require a valid recorded value for every matched activity; a missing or invalid field makes that total null. Recorded zero stays zero. Empty results have activities=0 and zero totals. Average HR uses known values. Optionally group_by sport/month/year.
 
 **Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
 
@@ -311,7 +311,7 @@ Read all Garmin body-composition measurements stored for one date, including wei
 
 ### `coach_input`
 
-Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. Analyzer 1.1.0 includes five optional recorded FIT running measurements. Analyzer 1.2.0 adds raw ground-contact balance with unknown side semantics, recorded lap measurements and producer-computed distance-split/half measurements with source units, identity, clocks and coverage. Historical analyses remain unchanged.
+Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. Analyzer 1.1.0 includes five optional recorded FIT running measurements. Analyzer 1.2.0 adds raw ground-contact balance with unknown side semantics, recorded lap measurements and producer-computed distance-split/half measurements with source units, identity, clocks and coverage. Analyzer 1.4.0 adds neutral recorded aerobic/anaerobic Training Effect, eligible frozen stored health context, and explicit coverage/nulls for incomplete structured lap totals. Historical analyses remain unchanged.
 
 **Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
 

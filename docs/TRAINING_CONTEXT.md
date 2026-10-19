@@ -21,7 +21,7 @@ coverage: no Garmin, R2, personal exports or raw historical files were inspected
 | `messages.session_mesgs[].training_load_peak` (session 18, field 168) | Same existing ORIGINAL path | Retained when present in decoded messages | FIT sint32, scale 65536, offset 0; profile provides no unit or sufficiently precise activity-load definition | Not projected. Not relabelled as activity load, CTL, ATL or TSB |
 | Activity DTO `activityTrainingLoad` candidate | Existing activity DTO fetches | Not retained in summary or decoded activity metadata | SDK references a removable field but does not define its meaning/unit | Not projected; unknown load does not block TE |
 | Normalized TCX `activity.endurance.v1.json` | Existing TCX download → `normalize_endurance_session` | Explicit summary/laps/splits/HR/time series | No Training Effect source in this normalizer | TCX metrics cannot reconstruct Garmin TE |
-| Existing Coach Input | Existing stored FIT + endurance + TCX read by Python coach preparation | Explicit allowlisted analysis; no TE | Engine 1.2.0 adds recorded laps/distance segments; engine 1.3.0 adds a [stored health-context snapshot](#stored-pre-activity-context-in-coach-input), not TE | Immutable historical analyses retain their original bytes and engine |
+| Coach Input | Existing stored FIT + endurance + TCX read by Python coach preparation | Engine 1.4.0 adds neutral `training_effect` from the same single verified FIT session | Engine 1.2.0 adds recorded laps/distance segments; engine 1.3.0 adds a [stored health-context snapshot](#stored-pre-activity-context-in-coach-input). New 1.4.0 output retains context when eligible | Immutable historical analyses retain their original bytes and engine; no engine-only history queue |
 
 Garmin's [Training Effect manual](https://www8.garmin.com/manuals/webhelp/forerunner935/EN-US/GUID-7275629E-743A-4658-A284-C84F42A66AE5.html)
 documents the aerobic/anaerobic interpretation and 0–5 scale. The conventional
@@ -157,7 +157,20 @@ and the known HRV summary fields retain explicit units and per-field status.
 There are no raw sleep stages, HRV readings, provider DTOs or device IDs in this
 block. Garmin estimates do not replace the user's confirmed zones or thresholds;
 the separately stored `user_context` remains the user's own RPE, notes and context.
-Training Effect is still a detail-read field, not newly included in Coach Input.
+New engine `1.4.0` also includes aerobic/anaerobic `training_effect` from already
+stored decoded FIT sessions. Its source is the neutral `fit_session`, method
+`fit_recorded_estimate`, and scale `0_to_5`; it does not claim a third-party
+FIT file's estimator manufacturer. Exact activity/session/local-day association,
+source digest and known observation clocks accompany the values. Available
+values are already-decoded tenths on the inclusive 0–5 scale; actual zero is
+valid. Missing/invalid fields and unverified associations stay explicit, without
+activity-list DTO fallback, lap summing, coaching labels or provider calls.
+
+New 1.4.0 analyses have this block with or without eligible stored health
+context. Earlier 1.0–1.3 analyses retain their own fields, IDs and stored bytes.
+Unchanged or forced same-input generation reuses the canonical identity; changed
+recorded inputs can append a new one. Ordinary bulk runs do not regenerate old
+history merely to add Training Effect or new context.
 
 ### Which clocks mean what
 

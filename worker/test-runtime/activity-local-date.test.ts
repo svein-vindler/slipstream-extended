@@ -7,6 +7,7 @@ import { R2Storage } from "../src/r2-storage";
 import { ActivityCoachTools } from "../src/activity-coach-tools";
 import { FreshDataService } from "../src/fresh-data";
 import { PROTOCOL_VERSION_META_KEY, CLIENT_CAPABILITIES_META_KEY } from "@modelcontextprotocol/server";
+import { outputSchemas } from "../src/mcp-output";
 
 const issuer = "https://activity-calendar-synthetic.cloudflareaccess.com";
 let privateKey: CryptoKey;
@@ -68,6 +69,7 @@ async function call(name: string, args: Record<string, unknown> = { activity_id:
   const body = await response.text();
   await waitOnExecutionContext(context);
   expect(response.status, body).toBe(200);
+  expect(response.headers.get("content-type")).toContain(modern ? "application/json" : "text/event-stream");
   const line = body.split("\n").find(value => value.startsWith("data: "));
   const message = JSON.parse(line ? line.slice(6) : body);
   expect(message.error, body).toBeUndefined();
@@ -109,6 +111,71 @@ it("keeps old UTC-year context visible to the local-date freshness reader", asyn
 });
 
 for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  it(`${protocol}: activity_stats keeps nonempty all-missing totals unknown`, async () => {
+    const csv = "Activity ID,Activity Date,Activity Name,Activity Type,Source,Distance,Moving Time,Elevation Gain,Calories\n"
+      + "garmin-73,2026-12-31 23:30:00,Synthetic missing run,Run,garmin,,,,\n";
+    await env.SLIPSTREAM_DATA.put("summary/activities.csv", csv);
+    clearSummaryCaches(); reads.length = 0; writes.length = 0;
+    const result = await call("activity_stats", {}, protocol);
+    expect(outputSchemas.activity_stats.parse(result)).toEqual(result);
+    expect(result.overall).toEqual({ activities: 1, total_distance_km: null, total_moving_time: null,
+      total_elevation_gain_m: null, total_calories: null, avg_hr: null });
+    expect(writes).toEqual([]);
+    expect(await (await env.SLIPSTREAM_DATA.get("summary/activities.csv"))?.text()).toBe(csv);
+  });
+  const statsHeader = "Activity ID,Activity Date,Activity Name,Activity Type,Source,Distance,Moving Time,Elevation Gain,Calories,Average Heart Rate\n";
+  const recorded = "garmin-81,2026-09-01 06:00:00,Synthetic recorded,Run,garmin,1.234,61,1.26,2.4,120";
+  const complete = { activities: 2, total_distance_km: 3.58, total_moving_time: "2:03",
+    total_elevation_gain_m: 3.5, total_calories: 6, avg_hr: 120 };
+  it.each([
+    { label: "partial distance", rows: [recorded,
+      "garmin-82,2027-10-02 07:00:00,Synthetic partial,Ride,garmin,,62,2.26,3.4,"],
+      args: {}, expected: { overall: { ...complete, total_distance_km: null } } },
+    { label: "partial moving time", rows: [recorded,
+      "garmin-82,2027-10-02 07:00:00,Synthetic partial,Ride,garmin,2.345,,2.26,3.4,"],
+      args: {}, expected: { overall: { ...complete, total_moving_time: null } } },
+    { label: "partial elevation", rows: [recorded,
+      "garmin-82,2027-10-02 07:00:00,Synthetic partial,Ride,garmin,2.345,62,,3.4,"],
+      args: {}, expected: { overall: { ...complete, total_elevation_gain_m: null } } },
+    { label: "partial calories", rows: [recorded,
+      "garmin-82,2027-10-02 07:00:00,Synthetic partial,Ride,garmin,2.345,62,2.26,,"],
+      args: {}, expected: { overall: { ...complete, total_calories: null } } },
+    { label: "recorded zero", rows: [
+      "garmin-83,2026-09-01 06:00:00,Synthetic zero,Run,garmin,0,0,0,0,0"],
+      args: {}, expected: { overall: { activities: 1, total_distance_km: 0, total_moving_time: "0:00",
+        total_elevation_gain_m: 0, total_calories: 0, avg_hr: 0 } } },
+    { label: "empty selection", rows: [],
+      args: {}, expected: { overall: { activities: 0, total_distance_km: 0, total_moving_time: "0:00",
+        total_elevation_gain_m: 0, total_calories: 0, avg_hr: null } } },
+    { label: "complete rounded totals and known HR average", rows: [recorded,
+      "garmin-82,2027-10-02 07:00:00,Synthetic complete,Ride,garmin,2.345,62,2.26,3.4,"],
+      args: {}, expected: { overall: complete } },
+    { label: "nonfinite totals remain unknown", rows: [recorded,
+      "garmin-82,2027-10-02 07:00:00,Synthetic invalid,Ride,garmin,Infinity,Infinity,Infinity,Infinity,"],
+      args: {}, expected: { overall: { activities: 2, total_distance_km: null, total_moving_time: null,
+        total_elevation_gain_m: null, total_calories: null, avg_hr: 120 } } },
+    { label: "sport groups keep their own completeness", rows: [recorded,
+      "garmin-82,2027-10-02 07:00:00,Synthetic missing,Ride,garmin,,,,,"],
+      args: { group_by: "sport" }, expected: {
+        overall: { activities: 2, total_distance_km: null, total_moving_time: null,
+          total_elevation_gain_m: null, total_calories: null, avg_hr: 120 },
+        by_sport: {
+          Ride: { activities: 1, total_distance_km: null, total_moving_time: null,
+            total_elevation_gain_m: null, total_calories: null, avg_hr: null },
+          Run: { activities: 1, total_distance_km: 1.23, total_moving_time: "1:01",
+            total_elevation_gain_m: 1.3, total_calories: 2, avg_hr: 120 },
+        },
+      } },
+  ])(`${protocol}: activity_stats full totals contract: $label`, async ({ rows, args, expected }) => {
+    const csv = statsHeader + rows.join("\n") + (rows.length ? "\n" : "");
+    await env.SLIPSTREAM_DATA.put("summary/activities.csv", csv);
+    clearSummaryCaches(); reads.length = 0; writes.length = 0;
+    const result = await call("activity_stats", args, protocol);
+    expect(outputSchemas.activity_stats.parse(result)).toEqual(result);
+    expect(result).toEqual(expected);
+    expect(writes).toEqual([]);
+    expect(await (await env.SLIPSTREAM_DATA.get("summary/activities.csv"))?.text()).toBe(csv);
+  });
   it.each([[2, "garmin-fit"], [true, "garmin-fit"], [1, "other-source"], [1, null], [null, "garmin-fit"]])(
     `does not claim a local day from schema=%s source=%s through ${protocol}`, async (version, source) => {
       await env.SLIPSTREAM_DATA.put("activities/2027/73/activity.v1.json", JSON.stringify({
