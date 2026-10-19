@@ -78,7 +78,7 @@ Totals (distance, time, elevation, calories) require a valid recorded value for 
 
 ### `add_activity_context`
 
-Append user-supplied RPE, conditions, note or workout correction to one activity. Call only when the user explicitly asks to record this information. The values are never inferred and existing context is never overwritten.
+Append explicit user context to one activity. gct_balance_side declares the raw session/recorded-lap percentage's side for this exact stored FIT digest, not a device-wide convention. Call only on explicit user request. Side-only additions retain existing RPE/notes; historical contexts are never overwritten.
 
 **Effect:** Explicit user confirmation required; append-only profile/context write to private R2; no Garmin account write.
 
@@ -105,6 +105,27 @@ Append user-supplied RPE, conditions, note or workout correction to one activity
           "type": "null"
         }
       ]
+    },
+    "gct_balance_side": {
+      "additionalProperties": false,
+      "properties": {
+        "raw_side": {
+          "enum": [
+            "left",
+            "right"
+          ],
+          "type": "string"
+        },
+        "source_fit_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_fit_sha256",
+        "raw_side"
+      ],
+      "type": "object"
     },
     "note": {
       "anyOf": [
@@ -311,7 +332,7 @@ Read all Garmin body-composition measurements stored for one date, including wei
 
 ### `coach_input`
 
-Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. Analyzer 1.1.0 includes five optional recorded FIT running measurements. Analyzer 1.2.0 adds raw ground-contact balance with unknown side semantics, recorded lap measurements and producer-computed distance-split/half measurements with source units, identity, clocks and coverage. Analyzer 1.4.0 adds neutral recorded aerobic/anaerobic Training Effect, eligible frozen stored health context, and explicit coverage/nulls for incomplete structured lap totals. Historical analyses remain unchanged.
+Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. Analyzer 1.1.0 includes five optional recorded FIT running measurements. Analyzer 1.2.0 adds raw ground-contact balance with unknown side semantics, recorded lap measurements and producer-computed distance-split/half measurements with source units, identity, clocks and coverage. Analyzer 1.4.0 adds neutral recorded aerobic/anaerobic Training Effect, eligible frozen stored health context, and explicit coverage/nulls for incomplete structured lap totals. Analyzer 1.5.0 adds activity/FIT-scoped declared ground-contact sides and a calculated complement for the session and actual laps; raw values and historical analyses remain unchanged.
 
 **Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
 

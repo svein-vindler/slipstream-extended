@@ -972,6 +972,27 @@ def _stored_context_shape(value, analysis):
 
 def _validate_value(key: str, value: Any):
     kind, parts = key_info(key)
+    if kind == "context" and isinstance(value, dict) and type(value.get("schema_version")) is int and value["schema_version"] == 2:
+        from .gct_sides import valid_declaration
+
+        _exact(value, _CONTEXT_FIELDS | {"gct_balance_side", "activity_date", "date_source"})
+        legacy = {name: item for name, item in value.items() if name in _CONTEXT_FIELDS}
+        _validate_value(key, {**legacy, "schema_version": 1})
+        _date(value["activity_date"])
+        if (value["date_source"] not in ("garmin_local", "utc_fallback")
+                or not valid_declaration(value["gct_balance_side"])):
+            raise BackupError("invalid_gct_declaration")
+        return
+    if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") == "1.5.0":
+        from .gct_sides import ground_contact_sides
+
+        legacy = {name: item for name, item in value.items() if name != "ground_contact_sides"}
+        # Reuse the complete 1.4 shape without broadening historical allowlists.
+        _validate_value(key, {**legacy, "analyzer_version": "1.4.0"})
+        expected = ground_contact_sides(value["recorded_running_metrics"], value["user_context"])
+        if _json_bytes(value.get("ground_contact_sides")) != _json_bytes(expected):
+            raise BackupError("invalid_gct_sides")
+        return
     fields = {"profile": _PROFILE_FIELDS, "context": _CONTEXT_FIELDS, "analysis": _ANALYSIS_FIELDS}[
         kind
     ]

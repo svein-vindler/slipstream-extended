@@ -1,6 +1,7 @@
 import { COACH_PROFILE_CAPACITY } from "./coach-profile-capacity";
 import { readCurrentCoachInput } from "./coach-selection";
-import { resolveActivityClock } from "./activity-clock";
+import { activityCalendarYears, resolveActivityClock } from "./activity-clock";
+import { activityContextSchema, gctSideInput } from "./gct-sides";
 import { ApplicationToolError, applicationToolResult } from "./application-errors";
 import { McpServer } from "@modelcontextprotocol/server";
 import { errorCategory } from "./output-privacy";
@@ -39,6 +40,28 @@ export class ActivityCoachTools {
     return this.storage.getR2Json(...args);
   }
   private text<T extends Record<string, unknown>>(obj: T) { return structuredToolResult(obj); }
+
+  private async previousContext(id: string, day: string) {
+    const objects: R2Object[] = [];
+    for (const year of activityCalendarYears(day)) {
+      const prefix = `activities/${year}/${id}/context/v1/`;
+      // Match the existing FreshData activity-context lookup's bounded limit.
+      const listed = await this.env.SLIPSTREAM_DATA.list({ prefix, limit: 100 });
+      if (listed.truncated) throw new Error("Activity context exceeds its bounded limit.");
+      objects.push(...listed.objects.filter(item => item.key.startsWith(prefix)
+        && !item.key.slice(prefix.length).includes("/") && item.key.endsWith(".json")));
+    }
+    const timestamp = (key: string) => key.slice(key.lastIndexOf("/") + 1).split("-")[0];
+    objects.sort((a, b) => timestamp(a.key) < timestamp(b.key) ? 1 : timestamp(a.key) > timestamp(b.key) ? -1 : 0);
+    if (objects.length > 1 && timestamp(objects[0].key) === timestamp(objects[1].key)) {
+      throw new Error("Activity context selection is ambiguous.");
+    }
+    if (!objects.length) return null;
+    const stored = await this.getR2Json([objects[0].key], COACH_CONFIG_R2_LIMITS);
+    const parsed = activityContextSchema.safeParse(stored?.data);
+    if (!parsed.success || parsed.data.activity_id !== id) throw new Error("Stored activity context is unverified.");
+    return parsed.data;
+  }
 
   async putSmallJson(key: string, value: Record<string, unknown>): Promise<void> {
     const body = JSON.stringify(value);
@@ -473,15 +496,16 @@ export class ActivityCoachTools {
 
       server.registerTool("add_activity_context", {
       title: "Add user context to an activity",
-      description: "Append user-supplied RPE, conditions, note or workout correction to one activity. Call only when the user explicitly asks to record this information. The values are never inferred and existing context is never overwritten.",
+      description: "Append explicit user context to one activity. gct_balance_side declares the raw session/recorded-lap percentage's side for this exact stored FIT digest, not a device-wide convention. Call only on explicit user request. Side-only additions retain existing RPE/notes; historical contexts are never overwritten.",
       inputSchema: z.object({
         activity_id: z.string().regex(/^(garmin-)?\d{1,20}$/),
         rpe: z.number().min(0).max(10).nullable().optional(),
         conditions: z.string().trim().min(1).max(240).nullable().optional(),
         note: z.string().trim().min(1).max(2000).nullable().optional(),
         workout_correction: z.string().trim().min(1).max(1000).nullable().optional(),
+        gct_balance_side: gctSideInput.optional(),
       }).refine((value) => value.rpe != null || value.conditions != null
-        || value.note != null || value.workout_correction != null,
+        || value.note != null || value.workout_correction != null || value.gct_balance_side != null,
       { message: "At least one context field is required." }),
       outputSchema: outputSchemas.add_activity_context,
       annotations: { readOnlyHint: false, destructiveHint: false,
@@ -492,21 +516,36 @@ export class ActivityCoachTools {
         (item) => rawGarminActivityId(item.id) === requested,
       );
       if (!indexed || !indexed.date) throw new Error("The activity ID was not found.");
-      const { activity } = await resolveActivityClock(indexed, keys => this.getR2Json(keys));
-      const activityDate = activityCalendarDay(activity);
-      if (!validCalendarDay(activityDate)) {
+      const resolved = await resolveActivityClock(indexed, keys => this.getR2Json(keys));
+      const { activity } = resolved;
+      const activityDate = validCalendarDay(activityCalendarDay(activity));
+      if (!activityDate) {
         throw new ApplicationToolError({ kind: "calendar_date" });
       }
       const createdAt = new Date().toISOString();
+      if (args.gct_balance_side) {
+        const stored = resolved.stored ?? await this.getR2Json(activityJsonObjectKeys(activity));
+        const source = recordedRunningMetrics(activity, stored?.data, {});
+        if (source.association !== "matched" || source.source_fit_sha256 !== args.gct_balance_side.source_fit_sha256) {
+          throw new ApplicationToolError({ kind: "gct_declaration" });
+        }
+      }
+      const previous = await this.previousContext(requested, activityDate);
+      const side = args.gct_balance_side
+        ? { ...args.gct_balance_side, source: "user_activity_declaration" as const }
+        : previous?.schema_version === 2 ? previous.gct_balance_side : undefined;
+      const keep = <T>(supplied: T | undefined, prior: T | undefined): T | null =>
+        supplied !== undefined ? supplied : side ? prior ?? null : null;
       const core = {
-        schema_version: 1,
+        schema_version: side ? 2 : 1,
         activity_id: requested,
         activity_date: activityDate,
         date_source: activity.localDate ? "garmin_local" : "utc_fallback",
-        rpe: args.rpe ?? null,
-        conditions: args.conditions ?? null,
-        note: args.note ?? null,
-        workout_correction: args.workout_correction ?? null,
+        rpe: keep(args.rpe, previous?.rpe),
+        conditions: keep(args.conditions, previous?.conditions),
+        note: keep(args.note, previous?.note),
+        workout_correction: keep(args.workout_correction, previous?.workout_correction),
+        ...(side ? { gct_balance_side: side } : {}),
         source: "user",
         created_at: createdAt,
       };
@@ -523,7 +562,7 @@ export class ActivityCoachTools {
 
     server.registerTool("coach_input", {
       title: "Read coach input",
-      description: "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. Analyzer 1.1.0 includes five optional recorded FIT running measurements. Analyzer 1.2.0 adds raw ground-contact balance with unknown side semantics, recorded lap measurements and producer-computed distance-split/half measurements with source units, identity, clocks and coverage. Analyzer 1.4.0 adds neutral recorded aerobic/anaerobic Training Effect, eligible frozen stored health context, and explicit coverage/nulls for incomplete structured lap totals. Historical analyses remain unchanged.",
+      description: "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. Analyzer 1.1.0 includes five optional recorded FIT running measurements. Analyzer 1.2.0 adds raw ground-contact balance with unknown side semantics, recorded lap measurements and producer-computed distance-split/half measurements with source units, identity, clocks and coverage. Analyzer 1.4.0 adds neutral recorded aerobic/anaerobic Training Effect, eligible frozen stored health context, and explicit coverage/nulls for incomplete structured lap totals. Analyzer 1.5.0 adds activity/FIT-scoped declared ground-contact sides and a calculated complement for the session and actual laps; raw values and historical analyses remain unchanged.",
       inputSchema: z.object({
         activity_id: z.string().regex(/^(garmin-)?\d{1,20}$/),
       }),

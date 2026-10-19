@@ -12,6 +12,8 @@ import { outputSchemas } from "../src/mcp-output";
 const issuer = "https://activity-calendar-synthetic.cloudflareaccess.com";
 let privateKey: CryptoKey;
 const reads: string[] = [], writes: string[] = [];
+let allowContextLookup = false;
+const contextLists: { prefix: string; limit: number }[] = [];
 const bucket = new Proxy(env.SLIPSTREAM_DATA, {
   get(target, field) {
     const method = Reflect.get(target, field);
@@ -19,7 +21,15 @@ const bucket = new Proxy(env.SLIPSTREAM_DATA, {
     return (...args: unknown[]) => {
       if (field === "get") reads.push(String(args[0]));
       if (field === "put") writes.push(String(args[0]));
-      if (field === "list") throw new Error("Calendar resolution must not scan R2");
+      if (field === "list") {
+        const options = args[0] as Record<string, unknown> | undefined;
+        const prefixes = ["activities/2027/73/context/v1/", "activities/2026/73/context/v1/"];
+        if (!allowContextLookup || !options || !prefixes.includes(String(options.prefix))
+          || options.limit !== 100 || Object.keys(options).some(key => key !== "prefix" && key !== "limit")) {
+          throw new Error("Calendar resolution must not scan R2");
+        }
+        contextLists.push({ prefix: String(options.prefix), limit: options.limit });
+      }
       return Reflect.apply(method, target, args);
     };
   },
@@ -36,6 +46,8 @@ beforeAll(async () => {
 });
 afterAll(() => vi.restoreAllMocks());
 beforeEach(async () => {
+  allowContextLookup = false;
+  contextLists.length = 0;
   for (const year of ["2026", "2027"]) {
     const contexts = await env.SLIPSTREAM_DATA.list({ prefix: `activities/${year}/73/context/v1/` });
     if (contexts.objects.length) await env.SLIPSTREAM_DATA.delete(contexts.objects.map(item => item.key));
@@ -84,10 +96,18 @@ it("reads the local-year endurance object and reuses the resolved FIT", async ()
   expect(reads.filter(key => key === "activities/2027/73/activity.v1.json")).toHaveLength(1);
   expect(writes).toEqual([]);
 });
-it("saves a legacy activity's context in the producer's local-year namespace", async () => {
-  const result = await call("add_activity_context", { activity_id: "73", rpe: 7 });
+it.each(["2025-03-26", "2026-07-28"])("%s: saves a legacy activity's context in the producer's local-year namespace", async protocol => {
+  allowContextLookup = true;
+  const result = await call("add_activity_context", { activity_id: "73", rpe: 7 }, protocol);
+  allowContextLookup = false;
   expect(result.saved).toBe(true);
   expect(result.key).toMatch(/^activities\/2027\/73\/context\/v1\//);
+  expect(result.context).toMatchObject({ schema_version: 1, activity_date: "2027-01-01",
+    date_source: "garmin_local", rpe: 7 });
+  expect(contextLists).toEqual([
+    { prefix: "activities/2027/73/context/v1/", limit: 100 },
+    { prefix: "activities/2026/73/context/v1/", limit: 100 },
+  ]);
   expect(writes).toEqual([result.key]);
   const list = await call("list_activities", {});
   expect(list.activities[0]).toMatchObject({ date: "2026-12-31", date_source: "utc_fallback" });

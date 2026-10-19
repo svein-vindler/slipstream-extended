@@ -109,7 +109,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       kilometer_splits: { status: "available", method: "fit_record_time_weighted_mean",
         interval_policy: "left_sample_hold_distance_progressing_max_30s", distance_allocation: "linear_between_record_distances" },
       distance_halves: { status: "available", method: "fit_record_time_weighted_mean" } });
-    expect(coach.analysis.analyzer_version).toBe("1.4.0");
+    expect(coach.analysis.analyzer_version).toBe("1.5.0");
     expect(detail.recorded_running_metrics).toEqual(coach.analysis.recorded_running_metrics);
     expect(outputSchemas.endurance_session.parse(detail)).toEqual(detail);
     expect(outputSchemas.coach_input.parse(coach)).toEqual(coach);
@@ -253,7 +253,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
     const output = await call("coach_input", protocol);
     expect(output.available).toBe(true);
-    expect(output.analysis).toMatchObject({ analyzer_version: "1.4.0", activity_id: "42",
+    expect(output.analysis).toMatchObject({ analyzer_version: "1.5.0", activity_id: "42",
       analysis_id: produced.source_error.analysis_id, summary: { distance_m: 2000 },
       recorded_running_metrics: { schema_version: 2, association: "decode_errors", source_fit_sha256: null,
         average_power: { status: "unavailable", value: null },

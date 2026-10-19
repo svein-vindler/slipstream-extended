@@ -95,7 +95,7 @@ def test_targeted_reads_exact_day_sources_into_real_append_only_coach():
     client = source_store()
     coach_backfill.run_one(activity=ACTIVITY, store=client.store())
     pointer, result = selected(client)
-    assert result["analyzer_version"] == "1.4.0"
+    assert result["analyzer_version"] == "1.5.0"
     context = result["stored_context_snapshot"]
     assert context["snapshot_at"] == "2026-10-19T08:00:00.000Z"
     assert context["reference_time_utc"] == "2026-10-19T07:00:00.000Z"
@@ -104,7 +104,7 @@ def test_targeted_reads_exact_day_sources_into_real_append_only_coach():
     assert context["training_day"]["readiness"]["value"] == 80
     assert context["training_day"]["recovery"]["value"] == 0
     assert context["sleep"]["source_checked_at"] == "2026-10-19T08:00:00.000Z"
-    assert pointer["analyzer_version"] == "1.4.0"
+    assert pointer["analyzer_version"] == "1.5.0"
     assert {key for key in client.gets if key.startswith(("health/", "refresh/checks/"))} == set(CONTEXT_KEYS.values())
     assert sum("/canonical/" in key for key in client.puts) == 1
 
@@ -200,10 +200,10 @@ def test_legitimate_new_bulk_uses_same_context_and_identity_as_targeted():
     coach_backfill.run_one(activity=ACTIVITY, store=targeted_client.store())
     bulk_pointer, bulk_coach = selected(bulk_client)
     target_pointer, target_coach = selected(targeted_client)
-    assert bulk_coach["analyzer_version"] == "1.4.0"
+    assert bulk_coach["analyzer_version"] == "1.5.0"
     assert bulk_coach == target_coach
     assert bulk_pointer == target_pointer
-    assert bulk["bulk_reuse_proofs"]["42"]["analyzer_version"] == "1.4.0"
+    assert bulk["bulk_reuse_proofs"]["42"]["analyzer_version"] == "1.5.0"
     assert bulk_client.objects[bulk_pointer["analysis_key"]] == targeted_client.objects[target_pointer["analysis_key"]]
 
 

@@ -93,8 +93,8 @@ def test_changed_input_rebuilds_and_preserves_the_previous_version(store, builds
         activity[changed] = {"name": "Changed name", "date": "2026-09-29",
                              "type": "trail_running", "moving_seconds": 1900}[changed]
     else:
-        monkeypatch.setattr(coach_backfill, "TRAINING_EFFECT_ANALYZER_VERSION", "synthetic-next")
-        monkeypatch.setattr(coach, "TRAINING_EFFECT_ANALYZER_VERSION", "synthetic-next")
+        monkeypatch.setattr(coach_backfill, "GCT_SIDES_ANALYZER_VERSION", "synthetic-next")
+        monkeypatch.setattr(coach, "GCT_SIDES_ANALYZER_VERSION", "synthetic-next")
     result = run_one(activity=activity, store=store)
     assert result["skipped_this_run"] == []
     assert result["reused_sources"] == {}

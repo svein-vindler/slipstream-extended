@@ -26,8 +26,8 @@ def test_actual_fit_training_effect_reaches_versioned_coach_without_dto_estimate
     prefix = "activities/2026/42/coach-input/v1/"
     pointer = json.loads(objects[prefix + "latest-ready.json"])
     coach = json.loads(gzip.decompress(objects[pointer["analysis_key"]]))
-    assert coach["analyzer_version"] == "1.4.0"
-    assert pointer["analyzer_version"] == "1.4.0"
+    assert coach["analyzer_version"] == "1.5.0"
+    assert pointer["analyzer_version"] == "1.5.0"
     assert coach["summary"]["distance_m"] == 2000
     assert coach["training_effect"] == {
         "schema_version": 1, "source": "fit_session", "method": "fit_recorded_estimate",
@@ -141,7 +141,7 @@ def test_unassociated_stored_fit_never_claims_available_estimates(damage, reason
     assert [block[name]["value"] for name in ("aerobic", "anaerobic")] == [None, None]
 
 
-def test_missing_activity_clock_emits14_without_context_and_remains_cold_verifiable():
+def test_missing_activity_clock_emits_current_without_context_and_remains_cold_verifiable():
     store = source_store()
     key = "activities/2026/42/activity.v1.json"
     decoded = json.loads(gzip.decompress(store.objects[key]))
@@ -149,7 +149,7 @@ def test_missing_activity_clock_emits14_without_context_and_remains_cold_verifia
     store.objects[key] = gzip_json(decoded)
     coach_backfill.run_one(activity=ACTIVITY, store=store)
     pointer, first = selected(store)
-    assert first["analyzer_version"] == "1.4.0"
+    assert first["analyzer_version"] == "1.5.0"
     assert "stored_context_snapshot" not in first
     assert "input_source_revisions" not in pointer
     assert first["training_effect"]["association"] == "time_mismatch"

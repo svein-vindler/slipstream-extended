@@ -90,7 +90,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
   it(`Training Effect stored-source integrity: preserves real estimates and rejects nested extras via ${protocol}`, async () => {
     const original = await call(protocol);
     expect(original.available).toBe(true);
-    expect(original.analysis).toMatchObject({ analyzer_version: "1.4.0", summary: { distance_m: 2000 },
+    expect(original.analysis).toMatchObject({ analyzer_version: "1.5.0", summary: { distance_m: 2000 },
       training_effect: { source: "fit_session", method: "fit_recorded_estimate", association: "matched",
         aerobic: { value: 3.4, source_field: "total_training_effect" },
         anaerobic: { value: 0, source_field: "total_anaerobic_training_effect" } } });
@@ -117,7 +117,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
       const output = await call(protocol);
       expect(output.available).toBe(true);
-      expect(output.analysis).toMatchObject({ analysis_id: fixture.analysis_id, analyzer_version: "1.4.0",
+      expect(output.analysis).toMatchObject({ analysis_id: fixture.analysis_id, analyzer_version: "1.5.0",
         summary: { distance_m: 2000 }, training_effect: { source: "fit_session", method: "fit_recorded_estimate" } });
       const effect = output.analysis.training_effect;
       if (mode === "zero") expect(effect.aerobic).toMatchObject({ status: "available", value: 0 });

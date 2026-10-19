@@ -1,5 +1,33 @@
 # Coach Input identity and immutable publication
 
+## Activity-scoped ground contact sides (1.5.0)
+
+New analyses add `ground_contact_sides`, while preserving the raw
+`recorded_running_metrics` percentage and its unknown manufacturer side convention.
+An explicit `add_activity_context.gct_balance_side` declaration identifies the raw
+side (`left` or `right`) for one activity and exact `source_fit_sha256`. It is a
+user declaration, not device-wide manufacturer evidence. Notes are never parsed
+to infer it. The same declaration applies only to the associated FIT session and
+its actual recorded laps. The opposite side is calculated as `100 - raw`, without
+rescaling or display rounding. Both sides remain null for missing, invalid,
+out-of-range or unverified measurements; genuine zero and 100 remain valid.
+No balance is aggregated for distance splits or halves.
+
+This append-only context uses object schema 2 in the existing `context/v1`
+namespace. Adding just a side declaration retains earlier RPE, conditions, note
+and workout correction; later context updates retain the declaration when omitted.
+The writer verifies the stored FIT association/hash before reservation or write,
+and stops on unavailable or ambiguous prior context. Existing cooldowns and daily
+limits apply. Reader validation binds the side block back to its exact context,
+raw measurements, activity, FIT digest and recorded lap clocks.
+
+Historical 1.0–1.4 analyses and context schema 1 remain readable and immutable.
+The engine change alone does not enqueue historical regeneration. New context or
+explicit targeted generation can create a new canonical version. Backups validate
+1.5/context2 separately; historical strict schemas are unchanged. Rollback after
+new-version data is stored requires a reader/backup version that supports it;
+preserve data and prefer a compatible forward fix.
+
 Bulk `coach_backfill.run` and targeted `run_one` use one content-identity and
 publication rule for newly generated analyses. This is R2-derived calculation;
 it does not call Garmin or change profile selection, zones or user context.
