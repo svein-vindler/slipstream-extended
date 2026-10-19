@@ -33,9 +33,9 @@ const activitySummary = z.object({
 const activityStats = z.object({
   activities: z.number().int().nonnegative(),
   filter_warning: z.string().optional(),
-  total_distance_km: z.number().finite(),
-  total_moving_time: z.string(),
-  total_elevation_gain_m: z.number().finite(),
+  total_distance_km: nullableNumber,
+  total_moving_time: nullableString,
+  total_elevation_gain_m: nullableNumber,
   total_calories: nullableNumber,
   avg_hr: nullableNumber,
 });

@@ -326,11 +326,13 @@ default-off.
 ## Stored context snapshots (engine 1.3.0)
 
 When a running activity's verified FIT start and local date permit exact-day
-source selection, new generation adds `stored_context_snapshot` and labels the
-analysis `1.3.0`. Its outer schema and v1 canonical paths stay unchanged, and the
+source selection, engine `1.3.0` generation added `stored_context_snapshot`.
+Its outer schema and v1 canonical paths stay unchanged, and the
 recorded running block remains schema 2. A known missing source is represented
 inside the snapshot; it is not invented data. When the activity cannot be bound
-to this clock/date, the builder keeps the `1.2.0` path without stored context.
+to this clock/date, that engine used the `1.2.0` path without stored context.
+Current engine `1.4.0` retains the same context eligibility but uses `1.4.0`
+with or without a snapshot, as described below.
 
 The snapshot contains only allowlisted recorded summaries from already-stored
 sleep/HRV and optional canonical Readiness/Recovery. It is separate from explicit
@@ -409,3 +411,31 @@ and compares timestamp basenames across only the activity's allowed calendar
 years. Selected top ties remain ambiguous; unrelated ties do not block index
 creation. Targeted lookup and the full fingerprint keyset stay unchanged.
 There is no persistent context cache or additional inventory/provider call.
+
+## Recorded Training Effect and explicit section totals (engine 1.4.0)
+
+New generation includes a strict `training_effect` block from the single
+associated stored FIT session: neutral source `fit_session`, method
+`fit_recorded_estimate`, scale `0_to_5`, source-field names, activity/local-date/
+UTC identity, digest and known measurement clock. Aerobic and anaerobic values
+are independent already-decoded tenths. Missing and invalid remain null with
+their statuses; real zero is available. Unassociated sources are unavailable,
+not guessed from DTOs, laps or other activities. No coaching interpretation or
+device-manufacturer attribution is added.
+
+Structured executed-lap sections now give `elapsed_seconds` and `distance_m`
+only when every contributing lap has a valid nonnegative recorded value. Any
+missing/invalid component makes that section total null, not measured zero or
+an unqualified partial sum. Each quantity's `measurement_coverage` states
+complete/partial/unknown, observed lap count and total lap count. Recorded zero
+counts as observed. Existing heart-rate coverage remains a separate elapsed-
+weighted description. Continuous TCX-based summary sections are unchanged.
+
+The seed and final content identity bind the new block, actual engine and
+eligible frozen context. Repeats/forced retries with identical inputs preserve
+ID and bytes. Genuine earlier 1.0–1.3 outputs are verified using their own seeds,
+never relabelled, rewritten or queued merely because the engine advanced.
+Cold bulk reuse retains their original history. Backup and MCP readers accept
+the versioned recorded fields but reject unknown nested fields, invalid ranges,
+inconsistent coverage, clocks and source association. This adds payload work,
+not a speed, account-cost or source-freshness guarantee.

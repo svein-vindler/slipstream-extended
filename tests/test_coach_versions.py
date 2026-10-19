@@ -220,7 +220,7 @@ def test_rejected_create_only_attempt_keeps_existing_write_budgets():
     assert store.operations["put"] == 1
 
 def test_legacy_analysis_profile_and_context_bytes_remain_readable_after_new_publication():
-    from pipeline.coach import build_coach_input
+    from pipeline.coach import analysis_id, build_coach_input
 
     client = MemoryS3()
     profile_key = "coach/profiles/v1/2026-01-01/test.json"
@@ -228,12 +228,21 @@ def test_legacy_analysis_profile_and_context_bytes_remain_readable_after_new_pub
     context_key = f"{PREFIX}/context/v1/2026-09-30T12-00-00.json"
     context_bytes = b'{"context_id":"synthetic-legacy-context","rpe":6}'
     client.objects[context_key] = context_bytes
-    # The unchanged builder still reproduces the older source/profile-ID scheme.
+    # Explicit old-format/seed fixture, not today's1.4 builder relabelled as
+    # genuine historical producer evidence. Genuine legacy bytes have their own
+    # transition fixtures and retention tests.
     legacy = build_coach_input(
         activity=ACTIVITY, decoded_fit=client.read(f"{PREFIX}/activity.v1.json"),
         endurance=client.read(f"{PREFIX}/activity.endurance.v1.json"),
         profile=client.read(profile_key), tcx_sha256=hashlib.sha256(b"synthetic tcx").hexdigest(),
         context=client.read(context_key),
+    )
+    del legacy["training_effect"]
+    legacy["analyzer_version"] = "1.2.0"
+    legacy["analysis_id"] = analysis_id(
+        activity_id=ACTIVITY["id"], fit_sha256=legacy["source"]["fit_sha256"],
+        tcx_sha256=legacy["source"]["tcx_sha256"], profile_id=legacy["profile"]["profile_id"],
+        context_revision=legacy["user_context"]["context_id"],
     )
     old_key = f"{PREFIX}/coach-input/v1/canonical/{legacy['analysis_id']}.json"
     old_bytes = gzip.compress(json.dumps(legacy, indent=2).encode(), mtime=1234)

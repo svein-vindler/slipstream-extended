@@ -71,11 +71,11 @@ def document(objects):
     }
 
 
-def test_verify_backup_preserves_real_wired_13_and_v2_running_fields_exactly(tmp_path):
+def test_verify_backup_preserves_real_wired_current_and_v2_running_fields_exactly(tmp_path):
     objects = context_objects()
     analysis_key = next(key for key in objects if "/canonical/" in key)
     original = json.loads(gzip.decompress(objects[analysis_key]))
-    assert original["analyzer_version"] == "1.3.0"
+    assert original["analyzer_version"] == "1.4.0"
     assert original["recorded_running_metrics"]["schema_version"] == 2
     assert original["stored_context_snapshot"]["training_day"]["recovery"]["value"] == 0
     verified = backup.verify_backup(_write_document(tmp_path, document(objects)), PASSWORD)
@@ -164,7 +164,7 @@ def test_known_missing_context_retains_v2_running_fields_without_fabricated_cloc
 
 @pytest.mark.parametrize('engine,fixture,prior_rejection', [
     ('1.0.0', 'coach_legacy_transition.json', 'invalid_analysis_source_hash'),
-    ('1.0.1', 'coach_engine_101_transition.json', 'invalid_format_fields'),
+    ('1.0.1', 'coach_engine_101_transition.json', 'invalid_analysis_source_hash'),
     ('1.1.0', 'coach_engine_110_transition.json', None),
 ])
 def test_genuine_legacy_fixture_acceptance_is_not_relaxed(tmp_path, engine, fixture, prior_rejection):
@@ -184,7 +184,8 @@ def test_genuine_legacy_fixture_acceptance_is_not_relaxed(tmp_path, engine, fixt
     archive = _write_document(tmp_path, document(objects))
     if prior_rejection is not None:
         # These transition inputs were never valid backup inputs: old synthetic
-        # non-hashes / old section extensions are not grounds to weaken import.
+        # non-hashes are not grounds to weaken import. Versioned HR coverage is
+        # now accepted, but the original malformed synthetic hash remains invalid.
         with pytest.raises(BackupError, match=prior_rejection):
             backup.verify_backup(archive, PASSWORD)
     else:
@@ -200,11 +201,12 @@ def test_allowed_legacy_backup_schema_without_new_extensions_is_still_accepted(t
     analysis['analyzer_version'] = engine
     del analysis['stored_context_snapshot']
     del analysis['recorded_running_metrics']
+    del analysis['training_effect']
     objects[key] = gzip.compress(backup._json_bytes(analysis), mtime=0)
     assert backup.verify_backup(_write_document(tmp_path, document(objects)), PASSWORD).objects == objects
 
 
-def test_real_12_public_builder_remains_backup_compatible_without_context_injection(tmp_path):
+def test_current_public_builder_remains_backup_compatible_without_context_injection(tmp_path):
     client = source_store()
     decoded = client.read('activities/2026/42/activity.v1.json')
     endurance = client.read('activities/2026/42/activity.endurance.v1.json')
@@ -214,7 +216,7 @@ def test_real_12_public_builder_remains_backup_compatible_without_context_inject
     analysis = build_coach_input(activity=ACTIVITY, decoded_fit=decoded, endurance=endurance,
                                 profile=profile, tcx_sha256=hashlib.sha256(
                                     client.objects['activities/2026/42/activity.tcx']).hexdigest())
-    assert analysis['analyzer_version'] == '1.2.0'
+    assert analysis['analyzer_version'] == '1.4.0'
     assert 'stored_context_snapshot' not in analysis
     objects = {
         f"activities/2026/42/coach-input/v1/canonical/{analysis['analysis_id']}.json": gzip.compress(backup._json_bytes(analysis), mtime=0),
@@ -282,7 +284,7 @@ def test_verify_backup_preserves_known_garmin_clock_when_local_pair_is_incomplet
     objects = context_objects(stored_snapshot=snapshot)
     key = next(key for key in objects if "/canonical/" in key)
     analysis = json.loads(gzip.decompress(objects[key]))
-    assert analysis["analyzer_version"] == "1.3.0"
+    assert analysis["analyzer_version"] == "1.4.0"
     assert analysis["summary"]["distance_m"] == 5000
     for kind in ("sleep", "hrv"):
         context = analysis["stored_context_snapshot"][kind]

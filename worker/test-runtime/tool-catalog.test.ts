@@ -97,7 +97,7 @@ it("advertises the D4 scalar metric contract in every registration mode", () => 
 });
 
 const approvedEnduranceDescription = "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates and recorded running measurements. New stored datasets also include raw ground-contact balance with unknown side semantics, recorded lap measurements, and producer-computed distance-split/half measurements with coverage. Existing datasets retain their five-field fallback. No new FIT fetch or segment computation is performed here, and missing or unverified optional fields do not change dataset availability.";
-const approvedCoachDescription = "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. Analyzer 1.1.0 includes five optional recorded FIT running measurements. Analyzer 1.2.0 adds raw ground-contact balance with unknown side semantics, recorded lap measurements and producer-computed distance-split/half measurements with source units, identity, clocks and coverage. Historical analyses remain unchanged.";
+const approvedCoachDescription = "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. Analyzer 1.1.0 includes five optional recorded FIT running measurements. Analyzer 1.2.0 adds raw ground-contact balance with unknown side semantics, recorded lap measurements and producer-computed distance-split/half measurements with source units, identity, clocks and coverage. Analyzer 1.4.0 adds neutral recorded aerobic/anaerobic Training Effect, eligible frozen stored health context, and explicit coverage/nulls for incomplete structured lap totals. Historical analyses remain unchanged.";
 
 it("advertises optional strict v1-or-v2 running fields without changing the stored session contract", () => {
   for (const mode of modes) {
@@ -147,9 +147,28 @@ it("advertises optional strict v1-or-v2 running fields without changing the stor
   }
 });
 
-// Historical guards remove only explicitly checked additions. Current full
-// snapshots retain the actual new optional measurement schema and descriptions.
+const approvedStatsDescription = "Totals (distance, time, elevation, calories) require a valid recorded value for every matched activity; a missing or invalid field makes that total null. Recorded zero stays zero. Empty results have activities=0 and zero totals. Average HR uses known values. Optionally group_by sport/month/year.";
+
+// Historical guards reconstruct only explicitly checked changes. Current full
+// snapshots retain the actual schemas and descriptions.
 function beforeExplicitInspection(tool: ToolContract): ToolContract {
+  if (tool.name === "activity_stats") {
+    const previous = structuredClone(tool);
+    expect(previous.description).toBe(approvedStatsDescription);
+    previous.description = "Totals (distance, time, elevation, calories, avg HR). Optionally group_by sport/month/year.";
+    const properties = previous.outputSchema!.properties as Record<string, Record<string, unknown>>;
+    const grouped = previous.outputSchema!.additionalProperties as Record<string, unknown>;
+    expect(grouped.type).toBe("object");
+    for (const stats of [properties.overall, grouped.additionalProperties as Record<string, unknown>]) {
+      const fields = stats.properties as Record<string, unknown>;
+      for (const [field, type] of [["total_distance_km", "number"], ["total_moving_time", "string"],
+        ["total_elevation_gain_m", "number"]] as const) {
+        expect(fields[field]).toEqual({ type: [type, "null"] });
+        fields[field] = { type };
+      }
+    }
+    return previous;
+  }
   if (tool.name === "endurance_session") {
     const previous = structuredClone(tool);
     const schema = previous.outputSchema!;

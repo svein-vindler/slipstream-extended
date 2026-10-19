@@ -25,7 +25,7 @@ from pipeline.backup_source import (
     Scope,
     SourceChanged,
 )
-from pipeline.coach import STORED_CONTEXT_ANALYZER_VERSION, build_coach_input, validate_profile
+from pipeline.coach import TRAINING_EFFECT_ANALYZER_VERSION, build_coach_input, validate_profile
 from scripts.build_recorded_running_metrics_contract import build as build_recorded_fixture
 
 PASSWORD = b"synthetic-test-password-only"
@@ -143,7 +143,7 @@ def test_current_recorded_analysis_backup_verify_restore_preserves_producer_byte
             objects[f"coach/profiles/v1/{profile['effective_from']}/{profile['profile_id']}.json"] = (
                 backup._json_bytes(profile)
             )
-    assert analysis["analyzer_version"] == STORED_CONTEXT_ANALYZER_VERSION
+    assert analysis["analyzer_version"] == TRAINING_EFFECT_ANALYZER_VERSION
     assert analysis["stored_context_snapshot"]["reference_time_utc"] == "2026-10-07T23:30:00.000Z"
     assert analysis["recorded_running_metrics"]["association"] == "matched"
     assert analysis["recorded_running_metrics"]["average_power"]["value"] == 250
