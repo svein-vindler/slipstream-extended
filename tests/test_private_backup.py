@@ -25,7 +25,7 @@ from pipeline.backup_source import (
     Scope,
     SourceChanged,
 )
-from pipeline.coach import build_coach_input, validate_profile
+from pipeline.coach import STORED_CONTEXT_ANALYZER_VERSION, build_coach_input, validate_profile
 from scripts.build_recorded_running_metrics_contract import build as build_recorded_fixture
 
 PASSWORD = b"synthetic-test-password-only"
@@ -143,7 +143,8 @@ def test_current_recorded_analysis_backup_verify_restore_preserves_producer_byte
             objects[f"coach/profiles/v1/{profile['effective_from']}/{profile['profile_id']}.json"] = (
                 backup._json_bytes(profile)
             )
-    assert analysis["analyzer_version"] == "1.1.0"
+    assert analysis["analyzer_version"] == STORED_CONTEXT_ANALYZER_VERSION
+    assert analysis["stored_context_snapshot"]["reference_time_utc"] == "2026-10-07T23:30:00.000Z"
     assert analysis["recorded_running_metrics"]["association"] == "matched"
     assert analysis["recorded_running_metrics"]["average_power"]["value"] == 250
     path = tmp_path / "recorded.slbk"
@@ -157,6 +158,56 @@ def test_current_recorded_analysis_backup_verify_restore_preserves_producer_byte
     }
     assert restored == objects
     assert not list(target.rglob("latest-ready.json"))
+
+
+def test_verify_backup_rejects_unequal_recorded_distance_halves(tmp_path):
+    from scripts.build_running_segments_contract import build_case
+
+    fixture = build_case()
+    objects = {}
+    for key, encoded in fixture["objects_base64"].items():
+        body = base64.b64decode(encoded)
+        if "/canonical/" in key:
+            canonical_key = key
+            analysis = json.loads(gzip.decompress(body))
+            objects[key] = body
+        elif key.startswith("coach/profiles/"):
+            profile = validate_profile({**json.loads(body), "created_at": "2026-01-01T00:00:00Z"})
+            profile_key = f"coach/profiles/v1/{profile['effective_from']}/{profile['profile_id']}.json"
+            objects[profile_key] = backup._json_bytes(profile)
+
+    def document():
+        entries = []
+        for key, body in sorted(objects.items()):
+            decoded = gzip.decompress(body) if body[:2] == b"\x1f\x8b" else body
+            digest = hashlib.sha256(body).hexdigest()
+            entries.append({"key": key, "type": "profile" if key == profile_key else "analysis",
+                            "revision": digest, "size": len(body), "decoded_size": len(decoded),
+                            "sha256": digest, "data": base64.b64encode(body).decode("ascii")})
+        return {
+            "format": "slipstream-user-backup", "version": 1,
+            "created_at": "2026-10-19T00:00:00.000Z",
+            "scope": [{"year": "2026", "activity_id": "42"}], "complete": True,
+            "objects": entries, "stored_bytes": sum(entry["size"] for entry in entries),
+            "decoded_bytes": sum(entry["decoded_size"] for entry in entries),
+            "references": [{
+                "analysis": canonical_key, "profile": profile_key, "context": None,
+                "external_sources": ["activities/2026/42/" + name for name in
+                                     ("activity.v1.json", "activity.endurance.v1.json", "activity.tcx")],
+                "source_hashes": {name: analysis["source"][name] for name in ("fit_sha256", "tcx_sha256")},
+                "ready": False, "reason": "external_sources_not_backed_up",
+            }],
+        }
+
+    # Real authenticated verification must accept the genuine producer data
+    # before the only mutation. No archive publisher or atomic-link fake is used.
+    assert backup.verify_backup(_write_document(tmp_path, document()), PASSWORD).objects == objects
+    first, second = analysis["recorded_running_metrics"]["distance_halves"]["items"]
+    first.update(start_distance_m=0, end_distance_m=500, distance_m=500)
+    second.update(start_distance_m=500, end_distance_m=2000, distance_m=1500)
+    objects[canonical_key] = gzip.compress(backup._json_bytes(analysis), mtime=0)
+    with pytest.raises(BackupError, match="invalid_running_segment_bounds"):
+        backup.verify_backup(_write_document(tmp_path, document()), PASSWORD)
 
 
 def test_plan_is_read_only(archive, tmp_path):

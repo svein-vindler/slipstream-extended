@@ -14,9 +14,12 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from time import perf_counter
 
+from botocore.exceptions import ClientError
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pipeline.coach_backfill import run_one  # noqa: E402
+from pipeline.r2_store import R2ObjectSnapshot, R2ReadBoundaryError  # noqa: E402
 
 
 class CountingStore:
@@ -44,6 +47,21 @@ class CountingStore:
         self.counts["get"] += 1
         self.counts["download_bytes"] += len(self.objects[key])
         return self.objects[key]
+
+    def get_snapshot(self, key, *, max_bytes=None):
+        """Synthetic outer storage with the production bounded-read interface."""
+        if max_bytes is not None and (type(max_bytes) is not int or max_bytes <= 0):
+            raise ValueError("Invalid storage read limit")
+        if key not in self.objects:
+            self.counts["get"] += 1
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        if max_bytes is not None and len(self.objects[key]) > max_bytes:
+            self.counts["get"] += 1
+            raise R2ReadBoundaryError("oversize")
+        data = self.get(key)
+        if not isinstance(data, bytes):
+            raise R2ReadBoundaryError("schema_unverified")
+        return R2ObjectSnapshot(data, '"' + hashlib.sha256(data).hexdigest() + '"')
 
     def list_keys(self, prefix=""):
         self.counts["list"] += 1

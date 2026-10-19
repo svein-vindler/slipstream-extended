@@ -32,8 +32,12 @@ and prepared analyses remain available between refreshes.
   verified stored FIT sessions in activity detail reads
 - Optional [recorded running measurements](docs/TRAINING_CONTEXT.md#recorded-running-measurements):
   average power, step length, ground contact time, vertical oscillation and
-  vertical ratio in endurance details and newly generated Coach Input
+  vertical ratio, plus recorded ground-contact balance with unknown side semantics;
+  new Coach Input includes FIT laps and source-covered distance segments
 - Versioned coach profiles, append-only RPE/context and prepared coach-input JSON
+- [Stored pre-activity Coach context](docs/TRAINING_CONTEXT.md#stored-pre-activity-context-in-coach-input)
+  from the workout's local-night sleep/HRV and optional already-collected
+  Readiness/Recovery, with separate observation and source-check clocks
 - Optional [encrypted local backup and isolated recovery testing](docs/PRIVATE_BACKUP.md)
   of user-owned profile/context history and immutable coach inputs; see the
   [backup quick start](docs/BACKUP_QUICKSTART.md) for a separate local installation
@@ -139,6 +143,11 @@ same request ID is available. Unknown/error results consume it; it starts no new
 import and does not establish data readiness. It must never become automatic polling.
 See [Fresh data on request](docs/FRESH_DATA.md) for local workout/wake-date rules,
 polling limits and R2-only Coach Input repair.
+Coach context is a versioned, retrospective snapshot, not a live recovery check
+or coaching recommendation. Reading an existing analysis never adds later health
+data or starts a sync. See [context semantics](docs/TRAINING_CONTEXT.md#stored-pre-activity-context-in-coach-input)
+and [immutable versioning](docs/COACH_INPUT_VERSIONING.md#stored-context-snapshots-engine-130)
+before requesting regeneration of a particular activity.
 See [HRV and sleep history](docs/HEALTH_HISTORY.md) for date-range behavior,
 local `night_of` versus wake-date semantics, monthly R2 indexes and the one-time
 index build. Garmin's recorded local times handle travel nights; set

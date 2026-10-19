@@ -278,6 +278,108 @@ does not authorize regenerating that analysis. Old producers may not recognize
 forward fix after checking producer/reader compatibility; do not blindly revert
 the producer, overwrite history or turn a hold into automatic recalculation.
 
+## Recorded laps and distance segments (engine 1.2.0)
+
+Engine `1.2.0` introduced running block schema 2 for new or changed inputs.
+Engine `1.3.0` retains that block and adds the stored-context snapshot below.
+The outer Coach schema, v1 paths and create-only canonical publication do not
+change. Genuine unchanged `1.0.0`, `1.0.1` and `1.1.0` content remains immutable;
+an engine update alone never schedules historical regeneration.
+
+The five existing session fields keep their units. A sixth optional field,
+`average_ground_contact_balance`, preserves FIT `avg_stance_time_balance` in %.
+The FIT profile does not establish a verified left/right convention here, so
+`side_semantics` is `unknown`: no L/R pair, mirrored percentage or diagnosis is
+inferred. Recorded FIT lap means use their own `avg_*` fields, not session means.
+Lap clocks must be ordered and lie inside the verified single FIT session.
+
+Kilometre splits and equal-distance halves use the existing TCX distance
+partitions and the original FIT records, never the sampled TCX display series.
+Distances must agree at centimetre precision; there is no series stretching.
+`fit_record_time_weighted_mean` holds each left sample over a distance-progressing
+interval and allocates elapsed seconds linearly between its distance endpoints.
+Stationary intervals and gaps over 30 seconds are not filled. Timer-event pauses
+are not separately reconstructed. Missing sensor values are never filled from
+the next record or a session mean. Recorded ratios are averaged directly rather
+than calculated from other means. Ground-contact balance is not aggregated into
+distance segments while its side convention remains unverified.
+
+Each distance metric reports valid/eligible seconds, excluded gap seconds,
+contributing intervals and `none`, `partial` or `complete` coverage. These refer
+to this stated interpolation policy, not to all elapsed time or all sensors.
+Zero is a value; missing, invalid and unavailable remain separate states.
+There is no watch-model registry or inference of permanent device capability.
+
+Normal joint FIT/TCX export can persist the same GPS-free block in endurance
+data. Reads use it only after identity, FIT digest, clocks, shape and segment
+invariants agree with the already loaded source. Old exports retain the five-field
+session fallback; reads do not regenerate data or fetch another source. A malformed
+new `1.2.0` Coach block makes that selection unverified, without changing its bytes.
+
+The deterministic tests use our own synthetic data encoded and decoded by the
+FIT SDK. No Garmin sample binaries, GPS, private exports or SDK code are vendored.
+This does not attest what a particular watch delivers. Stored pre-activity
+sleep/HRV/Readiness/Recovery context is a separate engine `1.3.0` addition below,
+not a reinterpretation of these running fields. Readiness collection remains
+default-off.
+
+## Stored context snapshots (engine 1.3.0)
+
+When a running activity's verified FIT start and local date permit exact-day
+source selection, new generation adds `stored_context_snapshot` and labels the
+analysis `1.3.0`. Its outer schema and v1 canonical paths stay unchanged, and the
+recorded running block remains schema 2. A known missing source is represented
+inside the snapshot; it is not invented data. When the activity cannot be bound
+to this clock/date, the builder keeps the `1.2.0` path without stored context.
+
+The snapshot contains only allowlisted recorded summaries from already-stored
+sleep/HRV and optional canonical Readiness/Recovery. It is separate from explicit
+`user_context` and makes no coaching recommendation. Completed local-night and
+per-field observation clocks determine pre-activity attribution. Check times
+and the stable snapshot clock do not claim that data was known at workout start.
+See [field, clock and device semantics](TRAINING_CONTEXT.md#stored-pre-activity-context-in-coach-input).
+
+The projected snapshot participates in the deterministic builder seed and final
+content identity. Selected source content/revisions and matching source-check
+receipts bind the targeted input signature and versioned selection proof.
+Unchanged relevant inputs reproduce the same canonical identity and bytes,
+including when a forced request repeats the same selection. Execution-now is
+not added to the seed. The caller uses the latest verified selected source-check
+clock as stable `snapshot_at`, or null if no clock can be attested; it is not a
+new freshness check. Immutable snapshots can retain an explicit UTC provenance
+clock later than their observations or source checks, but not earlier than an
+included known check.
+
+New/pending ordinary generation or an expressly requested calculation for one
+activity can choose current stored sources and publish a new immutable version.
+A later matching receipt can therefore change that selected activity's snapshot
+and ID on regeneration, while preserving its earlier canonical object. This is
+not permission to regenerate the rest of history. In particular, cold bulk reuse
+of an already-current analysis does not reread health sources just because a
+later receipt may exist. Verified unchanged genuine `1.0.0`–`1.2.0` analyses keep
+their original content, bytes, identities and engine labels. Version-aware reuse
+reconstructs their own seed instead of injecting a `1.3.0` block into old data.
+
+For eligible new generation the source loader reads only five exact-day keys:
+training day, sleep, HRV and the two sleep/HRV check receipts. A cache is shared
+only within the current bulk invocation and exact local date. There is no new
+history inventory, provider call, neighbouring-date search or persistent cache.
+Verified absence is distinct from storage/auth/budget/read failures; an unknown
+source read stops publication and preserves the previous selection. Existing
+bounded read and immutable canonical-before-pointer publication rules apply.
+This is additional read/payload work, not an account-wide cost or speed guarantee.
+
+Ordinary MCP JSON/SSE reads return the selected immutable analysis without
+fetching health sources, adding fields or writing storage. Context availability
+does not establish present-day source freshness, successful Readiness activation
+or support on a particular device. Unknown/future observation clocks cannot be
+made available by merely relabelling the stored context status.
+
+The local synthetic contracts cover pure projection, real stored-source Coach
+generation/reuse, immutable preservation, backup validation and authenticated
+MCP reading. They do not establish live Garmin/device coverage, production
+deployment, Windows filesystem portability or total account resource use.
+
 ## Bulk profile snapshot
 
 Each bulk invocation lists the complete profile namespace once. The same local

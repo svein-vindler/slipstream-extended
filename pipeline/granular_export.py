@@ -23,6 +23,8 @@ from .granular import (
 )
 from .health_history_index import sync_dates
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
+from .recorded_running_metrics import expanded_recorded_running_metrics
+from .schema import activity_local_date
 from .sources.garmin import _login
 
 MAX_HRV_DAYS_PER_RUN = 60
@@ -113,6 +115,7 @@ def export_activity(
         return record
 
     fit_data = None
+    decoded = None
     if fit_key not in known:
         from garminconnect import Garmin
 
@@ -178,6 +181,14 @@ def export_activity(
                     raise ValueError("Existing TCX data requires an R2 store for normalization")
                 tcx = store.get(tcx_key)
             endurance = normalize_endurance_session(activity, tcx)
+            # Compute once during a normal joint export. Never fetch an extra
+            # FIT/JSON source merely to enrich a partial or historical repair.
+            if decoded is not None and "run" in kind.lower():
+                endurance["recorded_running_metrics_v2"] = expanded_recorded_running_metrics(
+                    {"id": str(activity_id), "type": kind,
+                     "date": activity_local_date(activity.get("startTimeLocal"))},
+                    decoded, endurance,
+                )
             record["endurance_trackpoints"] = endurance["summary"]["trackpoint_count"]
             record["files"].append(
                 _write_or_upload(

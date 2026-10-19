@@ -1,4 +1,4 @@
-"""Retain real historic engines while publishing only changed/new 1.1.0 input."""
+"""Retain real historic engines while publishing changed/new current input."""
 import base64
 import gzip
 import json
@@ -8,6 +8,7 @@ import pytest
 from test_recorded_running_metrics import ACTIVITY, PROFILE, decoded_source
 
 from pipeline import coach_backfill
+from pipeline.coach import ANALYZER_VERSION, STORED_CONTEXT_ANALYZER_VERSION
 from pipeline.granular import gzip_json
 from scripts.benchmark_coach_reuse import CountingStore
 
@@ -54,7 +55,7 @@ def test_101_checkpoint_then_explicit_same_input_110_selection_is_bulk_noop(monk
     target = {"id": "3", "date": "2026-03-05", "name": "Synthetic 3",
               "type": "Run", "moving_seconds": 120.0}
     coach_backfill.run_one(store=store, activity=target)
-    assert selected(store, "3")["analyzer_version"] == "1.1.0"
+    assert selected(store, "3")["analyzer_version"] == ANALYZER_VERSION
     assert store.objects[coach_backfill.PLAN_KEY] == original[coach_backfill.PLAN_KEY]
     after_targeted = store.objects.copy()
     store.reset_counts()
@@ -100,8 +101,9 @@ def test_new_bulk_and_targeted_share_recorded_identity_and_repeat_bytes():
     again = coach_backfill.run(store=bulk, max_activities=1)
     assert again["generated_this_run"] == 1  # Saved complete checkpoint's original result.
     assert bulk.counts["put"] == 0 and bulk.objects == before
-    # Extraction reuses the same loaded FIT/TCX inputs: one source read each.
-    assert target.counts["get"] == 4  # Profile + FIT + endurance + TCX, no extra source fetch.
+    # FIT/TCX are still read once; five bounded known-day context reads now also
+    # attest absence. They do not contact a provider or scan health history.
+    assert target.counts["get"] == 9  # Profile + FIT + endurance + TCX + five context keys.
 
 
 def test_changed_recorded_input_gets_new_id_and_keeps_old_canonical_bytes():
@@ -132,7 +134,9 @@ def test_saved_mixed_engine_proofs_are_warm_noop_without_rebuilding(monkeypatch)
     result = coach_backfill.run(store=store, max_activities=4)
     assert result["generated_this_run"] == 1 and result["already_current_activities"] == 3
     plan = json.loads(store.objects[coach_backfill.PLAN_KEY])
-    assert {proof["analyzer_version"] for proof in plan["bulk_reuse_proofs"].values()} == {"1.0.1", "1.1.0"}
+    assert {proof["analyzer_version"] for proof in plan["bulk_reuse_proofs"].values()} == {
+        "1.0.1", STORED_CONTEXT_ANALYZER_VERSION,
+    }
     before = store.objects.copy()
     store.reset_counts()
 

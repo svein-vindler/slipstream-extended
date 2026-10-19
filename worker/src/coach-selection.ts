@@ -1,4 +1,7 @@
 /** Shared current-selection contract; immutable object timestamps are legacy only. */
+import { recordedRunningSegmentsSchema } from "./recorded-running-segments";
+import { validStoredCoachContext } from "./coach-stored-context";
+
 type Json = Record<string, unknown>;
 export type CoachSelection =
   | { status: "available"; analysis: Json }
@@ -81,5 +84,28 @@ export async function readCurrentCoachInput(options: {
     || typeof analysis.analysis_id !== "string"
     || (options.date && record(analysis.activity).date !== options.date)
     || (strictIdentity && analysis.analysis_id !== key.slice(prefix.length, -5))) return { status: "unverified" };
+  if (analysis.analyzer_version === "1.2.0" || analysis.analyzer_version === "1.3.0") {
+    const measurements = recordedRunningSegmentsSchema.safeParse(analysis.recorded_running_metrics);
+    if (!measurements.success || measurements.data.activity_id !== activityId) return { status: "unverified" };
+    const block = measurements.data;
+    if (analysis.analyzer_version === "1.3.0" && !validStoredCoachContext(analysis.stored_context_snapshot,
+      block.session_start_time_utc, block.local_date)) return { status: "unverified" };
+    const sourceDigest = record(analysis.source).fit_sha256;
+    if (block.association === "matched") {
+      if (block.source_fit_sha256 !== sourceDigest
+        || (block.local_date !== null && block.local_date !== record(analysis.activity).date)) return { status: "unverified" };
+    } else {
+      // A real producer failure can precede digest/date association. Keep the
+      // ordinary summary, but only with the producer's wholly unavailable block.
+      if (block.source_fit_sha256 !== null && block.source_fit_sha256 !== sourceDigest) return { status: "unverified" };
+      const values = [block.average_power, block.average_step_length, block.average_ground_contact_time,
+        block.average_vertical_oscillation, block.average_vertical_ratio, block.average_ground_contact_balance];
+      const groups = [block.laps, block.kilometer_splits, block.distance_halves];
+      if (values.some(value => value.status !== "unavailable" || value.value !== null)
+        || groups.some(group => group.status !== "unavailable" || group.reason !== block.association || group.items.length !== 0)) {
+        return { status: "unverified" };
+      }
+    }
+  }
   return { status: "available", analysis };
 }
