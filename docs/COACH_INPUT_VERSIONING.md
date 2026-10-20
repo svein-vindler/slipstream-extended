@@ -1,5 +1,60 @@
 # Coach Input identity and immutable publication
 
+## Executed intervals and distance-half statistics (1.6.0)
+
+New generation adds `segment_running_metrics` schema 1. Its six metrics are
+power, step length, ground contact time, vertical oscillation, vertical ratio
+and raw ground contact balance. The three groups are maximal contiguous
+actually executed active FIT laps with the same verified workout-step identity,
+whole-activity equal-distance halves from TCX, and equal-distance halves of the
+verified FIT main section including recoveries. A recovery or real clock gap
+separates active groups. Continuous sessions reuse the whole halves as main.
+Each lap's own record-distance geometry is verified; matching aggregate totals
+or a filtered ordinal join cannot replace source identity or local geometry.
+
+The new clock basis is `fit_start_time_plus_total_elapsed_time`. FIT summary
+messages span StartTime + TotalElapsedTime; their message timestamp is separate
+metadata, not automatically the end. The session end and summary timestamp are
+stored separately. Irregular record times are retained. Missing/invalid frames,
+real overlaps and unverifiable record geometry leave the affected groups
+unavailable; no fuzzy join, time shift, distance scaling or inferred timer events
+fill them. Whole-half alignment retains the existing TCX partition tolerance
+and FIT endpoint check. A mismatch there need not hide valid FIT main/intervals.
+
+Means use original left FIT samples, weighted by progressing-distance time and
+linearly allocated at distance cuts. Original gaps over 30 seconds are excluded
+before clipping; stationary time, missing sensors and right samples cannot be
+filled from session or lap averages. Per-metric coverage records eligible,
+valid and excluded-gap seconds plus unique contributing original intervals.
+Complete coverage describes eligible samples, not complete elapsed recording.
+Null/invalid remain distinct from genuine zero. Large finite scalars use a
+convex weighted mean rather than an overflowing value-times-duration sum.
+
+Raw balance aggregates have the explicit new policy
+`raw_scalar_time_weighted_mean_side_unknown`: finite values such as 101 are
+retained without 0–100 clipping or rescaling, and side remains unknown. No user
+declaration, L/R projection or complement is used for these aggregates. Existing
+`recorded_running_metrics` schema 2 retains its no-balance-aggregation policy;
+its five available whole-half metrics are copied unchanged into the new block.
+If the old timestamp-end gate made only that old calculation unavailable, 1.6
+can calculate independently using the correct frame without rewriting it.
+`ground_contact_sides` and all earlier projections remain unchanged.
+
+The 1.6 block participates in the versioned seed and content identity. Bulk and
+targeted publication share the same immutable canonical/pointer/checkpoint
+contract. Engine advancement alone never queues historical regeneration.
+Genuine 1.0–1.5 history remains readable and byte-preserved; new source/context
+or explicit targeted generation can create a new version. Strict 1.6 backup
+validation checks nested shape, source/frame/step/distance and coverage binding
+without fetching or recalculating sources. Its lap lookup is built once for all
+groups. Existing budgets, freshness proofs, profile choice and storage calls
+are unchanged. The new payload adds bytes and calculation; synthetic operation
+counts do not establish live CPU, account cost or device coverage.
+
+After 1.6 data exists, rollback must retain a compatible reader and backup
+validator, or use a forward fix. Never roll back stored data or replace old
+canonical bytes to undo the feature.
+
 ## Activity-scoped ground contact sides (1.5.0)
 
 New analyses add `ground_contact_sides`, while preserving the raw

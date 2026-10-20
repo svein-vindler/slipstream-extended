@@ -6,6 +6,8 @@ import { clearSummaryCaches } from "../src/r2-storage";
 import { outputSchemas } from "../src/mcp-output";
 import { PROTOCOL_VERSION_META_KEY, CLIENT_CAPABILITIES_META_KEY } from "@modelcontextprotocol/server";
 import produced from "./generated/recorded-running-segments.json";
+import produced16 from "./generated/coach-segment-metrics.json";
+import legacy150 from "./fixtures/recorded-running-segments-engine-150.json";
 
 const issuer = "https://running-segments-synthetic.cloudflareaccess.com";
 const hostname = "running-segments.example";
@@ -32,8 +34,8 @@ async function editStored(change: (block: Record<string, unknown>) => void) {
   change(body.recorded_running_metrics_v2);
   rows.set(enduranceKey, new TextEncoder().encode(JSON.stringify(body)));
 }
-async function editCoach(change: (analysis: Record<string, unknown>) => void) {
-  const canonicalKey = `activities/2026/42/coach-input/v1/canonical/${produced.analysis_id}.json`;
+async function editCoach(change: (analysis: Record<string, unknown>) => void, analysisId = produced.analysis_id) {
+  const canonicalKey = `activities/2026/42/coach-input/v1/canonical/${analysisId}.json`;
   const bytes = rows.get(canonicalKey);
   if (!bytes) throw new Error("Missing genuine canonical Coach fixture");
   const stream = new Response(bytes).body;
@@ -98,6 +100,252 @@ async function call(name: "endurance_session" | "coach_input", protocol: string)
 }
 
 for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  it(`Coach 1.6 segment metrics tracer: reads genuine executed and whole/main halves via ${protocol}`, async () => {
+    load(produced16.complete.objects_base64);
+    const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+    const output = await call("coach_input", protocol);
+    expect(output.available).toBe(true);
+    expect(output.analysis.analyzer_version).toBe("1.6.0");
+    expect(output.analysis).toEqual(produced16.complete.analysis);
+    const block = output.analysis.segment_running_metrics;
+    // Independent worked values from the accepted FIT tracer, not a second implementation.
+    expect(block).toMatchObject({ schema_version: 1, activity_id: "42", association: "matched",
+      session_start_time_utc: "2026-10-07T23:30:00.000Z", session_end_time_utc: "2026-10-07T23:31:00.000Z",
+      executed_intervals: { status: "available", reason: null,
+        clock_basis: "fit_start_time_plus_total_elapsed_time",
+        balance_aggregation: "raw_scalar_time_weighted_mean_side_unknown",
+        items: [
+          { interval: 1, source_laps: [2, 3], workout_step_index: 1, distance_m: 1000,
+            average_power: { value: 150, unit: "W", source_field: "power" } },
+          { interval: 2, source_laps: [5], workout_step_index: 1, distance_m: 500,
+            average_power: { value: 400 } },
+        ] },
+      whole_distance_halves: { status: "available", distance_basis: "tcx_endurance_distance",
+        items: [{ segment: "first", distance_m: 1500, average_power: { value: 400 } },
+          { segment: "second", distance_m: 1500, average_power: { value: 433.3333 } }] },
+      main_distance_halves: { status: "available", distance_basis: "fit_executed_main_distance",
+        items: [
+          { segment: "first", start_distance_m: 0, end_distance_m: 1000, distance_m: 1000,
+            average_power: { value: 150 }, average_step_length: { value: 1050, unit: "mm" },
+            average_ground_contact_time: { value: 210, unit: "ms" },
+            average_vertical_oscillation: { value: 70, unit: "mm" },
+            average_vertical_ratio: { value: 7, unit: "%" },
+            average_ground_contact_balance: { value: 102, side_semantics: "unknown" } },
+          { segment: "second", start_distance_m: 1000, end_distance_m: 2000, distance_m: 1000,
+            average_power: { value: 200 }, average_step_length: { value: 1300,
+              coverage: { valid_seconds: 10, eligible_seconds: 20, status: "partial" } },
+            average_ground_contact_time: { value: 250 }, average_vertical_oscillation: { value: 110 },
+            average_vertical_ratio: { value: 11 },
+            average_ground_contact_balance: { value: 106, side_semantics: "unknown" } },
+        ] },
+    });
+    expect(JSON.stringify(block)).not.toMatch(/left_percent|right_percent|recorded_side|calculated_side/);
+    expect(outputSchemas.coach_input.parse(output)).toEqual(output);
+    expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
+    expect(operations).toEqual(["HEAD summary/activities.csv", "GET summary/activities.csv",
+      "GET activities/2026/42/coach-input/v1/latest-ready.json",
+      `GET activities/2026/42/coach-input/v1/canonical/${produced16.complete.analysis_id}.json`]);
+  });
+
+  it(`Coach 1.6 segment metrics source windows: retains official elapsed end despite summary timestamp via ${protocol}`, async () => {
+    load(produced16.official_clock.objects_base64);
+    const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+    const output = await call("coach_input", protocol);
+    expect(output.available).toBe(true);
+    expect(output.analysis).toEqual(produced16.official_clock.analysis);
+    expect(output.analysis.segment_running_metrics).toMatchObject({
+      session_start_time_utc: "2026-10-07T23:30:00.000Z",
+      session_end_time_utc: "2026-10-07T23:31:00.000Z",
+      session_summary_timestamp_utc: "2026-10-07T23:30:59.000Z",
+      executed_intervals: { status: "available", items: [{ source_laps: [2, 3] }, { source_laps: [5] }] },
+      whole_distance_halves: { status: "available",
+        items: [{ average_power: { value: 400 } }, { average_power: { value: 433.3333 } }] },
+      main_distance_halves: { status: "available",
+        items: [{ average_power: { value: 150 } }, { average_power: { value: 200 } }] },
+    });
+    expect(output.analysis.recorded_running_metrics).toMatchObject({ measured_at_utc: "2026-10-07T23:30:59.000Z",
+      distance_halves: { status: "unavailable", reason: "record_order_unverified", items: [] } });
+    expect(outputSchemas.coach_input.parse(output)).toEqual(output);
+    expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
+    expect(operations).toEqual(["HEAD summary/activities.csv", "GET summary/activities.csv",
+      "GET activities/2026/42/coach-input/v1/latest-ready.json",
+      `GET activities/2026/42/coach-input/v1/canonical/${produced16.official_clock.analysis_id}.json`]);
+  });
+
+  it(`Coach 1.6 segment metrics source windows: keeps main and intervals when whole distance is unaligned via ${protocol}`, async () => {
+    load(produced16.unaligned_whole.objects_base64);
+    const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+    const output = await call("coach_input", protocol);
+    expect(output.available).toBe(true);
+    expect(output.analysis).toEqual(produced16.unaligned_whole.analysis);
+    expect(output.analysis.segment_running_metrics).toMatchObject({
+      whole_distance_halves: { status: "unavailable", reason: "distance_alignment_unverified", items: [] },
+      executed_intervals: { status: "available", items: [{ source_laps: [2, 3] }, { source_laps: [5] }] },
+      main_distance_halves: { status: "available", distance_basis: "fit_executed_main_distance",
+        items: [{ average_power: { value: 150 }, average_ground_contact_balance: { value: 102 } },
+          { average_power: { value: 200 }, average_ground_contact_balance: { value: 106 } }] },
+    });
+    expect(output.analysis.recorded_running_metrics.distance_halves).toMatchObject({
+      status: "unavailable", reason: "distance_alignment_unverified", items: [] });
+    expect(outputSchemas.coach_input.parse(output)).toEqual(output);
+    expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
+    expect(operations).toEqual(["HEAD summary/activities.csv", "GET summary/activities.csv",
+      "GET activities/2026/42/coach-input/v1/latest-ready.json",
+      `GET activities/2026/42/coach-input/v1/canonical/${produced16.unaligned_whole.analysis_id}.json`]);
+  });
+
+  for (const [name, fixture] of [
+    ["complete", produced], ["sparse", produced.sparse],
+    ["source_error", produced.source_error], ["invalid_halves", produced.invalid_halves],
+  ] as const) {
+    it(`Coach 1.6 final source variants: ${name} retains genuine optional data via ${protocol}`, async () => {
+      load(fixture.objects_base64);
+      const before = [...rows].map(([key, body]) => [key, Array.from(body)]);
+      const canonicalKey = `activities/2026/42/coach-input/v1/canonical/${fixture.analysis_id}.json`;
+      const bytes = rows.get(canonicalKey);
+      if (!bytes) throw new Error("Missing genuine final Coach fixture");
+      const stream = new Response(bytes).body;
+      if (!stream) throw new Error("Missing genuine final Coach fixture stream");
+      const plain = bytes[0] === 0x1f && bytes[1] === 0x8b ? stream.pipeThrough(new DecompressionStream("gzip")) : stream;
+      const expected = await new Response(plain).json();
+      const output = await call("coach_input", protocol);
+      expect(output.available).toBe(true);
+      expect(output.analysis).toEqual(expected);
+      expect(output.analysis).toMatchObject({ analyzer_version: "1.6.0", activity_id: "42", analysis_id: fixture.analysis_id,
+        workout_structure: { has_structured_workout: false } });
+      const block = output.analysis.segment_running_metrics;
+      expect(block.main_distance_halves.distance_basis).toBe("tcx_endurance_distance_continuous_main");
+      expect(block.executed_intervals).toMatchObject({ status: "unavailable", items: [] });
+      if (name === "complete" || name === "sparse") {
+        expect(block.executed_intervals.reason).toBe("no_verified_structured_workout");
+        for (const group of [block.whole_distance_halves, block.main_distance_halves]) {
+          expect(group).toMatchObject({ status: "available", reason: null });
+          expect(group.items).toHaveLength(2);
+          if (name === "sparse") {
+            for (const row of group.items) {
+              expect(row.average_power).toMatchObject({ status: "available", value: 0 });
+              for (const field of ["average_step_length", "average_ground_contact_time", "average_vertical_oscillation",
+                "average_vertical_ratio", "average_ground_contact_balance"]) {
+                expect(row[field]).toMatchObject({ status: "missing", value: null,
+                  coverage: { status: "none", valid_seconds: 0, contributing_intervals: 0 } });
+              }
+            }
+          }
+        }
+        expect(block.main_distance_halves.items).toEqual(block.whole_distance_halves.items);
+      } else {
+        for (const group of [block.whole_distance_halves, block.main_distance_halves]) {
+          expect(group).toMatchObject({ status: "unavailable", items: [],
+            reason: name === "source_error" ? "source_unverified" : "invalid_distance_partition" });
+        }
+        if (name === "source_error") {
+          // The stored source failed decoding; this is not evidence that FIT is absent.
+          expect(block).toMatchObject({ association: "decode_errors", source_fit_sha256: null,
+            session_start_time_utc: null, session_end_time_utc: null, session_summary_timestamp_utc: null });
+          expect(block.executed_intervals.reason).toBe("source_unverified");
+        } else {
+          expect(block.association).toBe("matched");
+          expect(block.executed_intervals.reason).toBe("no_verified_structured_workout");
+        }
+      }
+      expect(outputSchemas.coach_input.parse(output)).toEqual(output);
+      expect([...rows].map(([key, body]) => [key, Array.from(body)])).toEqual(before);
+      expect(operations).toEqual(["HEAD summary/activities.csv", "GET summary/activities.csv",
+        "GET activities/2026/42/coach-input/v1/latest-ready.json", `GET ${canonicalKey}`]);
+    });
+  }
+
+  for (const [group, seconds] of [["whole_distance_halves", 31], ["main_distance_halves", 21]] as const) {
+    it(`Coach 1.6 review SP01: rejects aggregate ${group} coverage beyond its span via ${protocol}`, async () => {
+      load(produced16.complete.objects_base64);
+      await editCoach(analysis => {
+        const block = analysis.segment_running_metrics as typeof produced16.complete.analysis.segment_running_metrics;
+        // Preserve each field's positive original pair count; only corrupt the duration totals.
+        for (const row of block[group].items) {
+          for (const metric of ["average_power", "average_step_length", "average_ground_contact_time",
+            "average_vertical_oscillation", "average_vertical_ratio", "average_ground_contact_balance"] as const) {
+            Object.assign(row[metric].coverage, { valid_seconds: seconds, eligible_seconds: seconds,
+              excluded_gap_seconds: 0, status: "complete" });
+          }
+        }
+      }, produced16.complete.analysis_id);
+      const before = [...rows].map(([key, body]) => [key, Array.from(body)]);
+      const output = await call("coach_input", protocol);
+      expect(output.available).toBe(false);
+      expect(output).not.toHaveProperty("analysis");
+      expect(output.message).toContain("current coach input could not be verified");
+      expect(outputSchemas.coach_input.parse(output)).toEqual(output);
+      expect([...rows].map(([key, body]) => [key, Array.from(body)])).toEqual(before);
+      expect(operations).toEqual(["HEAD summary/activities.csv", "GET summary/activities.csv",
+        "GET activities/2026/42/coach-input/v1/latest-ready.json",
+        `GET activities/2026/42/coach-input/v1/canonical/${produced16.complete.analysis_id}.json`]);
+    });
+  }
+
+  const malformed: Array<{ name: string; change: (block: typeof produced16.complete.analysis.segment_running_metrics) => void }> = [
+    { name: "unknown block field", change: block => { Object.assign(block, { unexpected: true }); } },
+    { name: "different activity", change: block => { block.activity_id = "43"; } },
+    { name: "different FIT digest", change: block => { block.source_fit_sha256 = "0".repeat(64); } },
+    { name: "coverage beyond eligible time", change: block => {
+      const coverage = block.main_distance_halves.items[0].average_power.coverage;
+      coverage.valid_seconds = coverage.eligible_seconds + 1;
+    } },
+    { name: "available measurement with null value", change: block => {
+      Object.assign(block.main_distance_halves.items[0].average_power, { value: null });
+    } },
+    { name: "invented balance policy", change: block => {
+      block.main_distance_halves.balance_aggregation = "recorded_and_complement";
+    } },
+    { name: "unavailable group retaining successful items", change: block => {
+      Object.assign(block.whole_distance_halves, { status: "unavailable", reason: "synthetic_corruption" });
+    } },
+    { name: "noncontiguous source laps", change: block => { block.executed_intervals.items[0].source_laps = [2, 4]; } },
+  ];
+  for (const { name, change } of malformed) {
+    it(`Coach 1.6 segment metrics boundary: rejects ${name} via ${protocol}`, async () => {
+      load(produced16.complete.objects_base64);
+      // Corrupt only the outer stored object; the real reader/auth/MCP path stays intact.
+      await editCoach(analysis => { change(analysis.segment_running_metrics as typeof produced16.complete.analysis.segment_running_metrics); },
+        produced16.complete.analysis_id);
+      const before = [...rows].map(([key, body]) => [key, Array.from(body)]);
+      const output = await call("coach_input", protocol);
+      expect(output.available).toBe(false);
+      expect(output).not.toHaveProperty("analysis");
+      expect(output.message).toContain("current coach input could not be verified");
+      expect(outputSchemas.coach_input.parse(output)).toEqual(output);
+      expect([...rows].map(([key, body]) => [key, Array.from(body)])).toEqual(before);
+      expect(operations).toEqual(["HEAD summary/activities.csv", "GET summary/activities.csv",
+        "GET activities/2026/42/coach-input/v1/latest-ready.json",
+        `GET activities/2026/42/coach-input/v1/canonical/${produced16.complete.analysis_id}.json`]);
+    });
+  }
+
+  it(`Coach 1.6 segment metrics boundary: keeps genuine 1.5 readable but rejects the new block via ${protocol}`, async () => {
+    load(legacy150.objects_base64);
+    const before = [...rows].map(([key, body]) => [key, Array.from(body)]);
+    const legacy = await call("coach_input", protocol);
+    expect(legacy.available).toBe(true);
+    expect(legacy.analysis.analyzer_version).toBe("1.5.0");
+    expect(legacy.analysis).not.toHaveProperty("segment_running_metrics");
+    expect(outputSchemas.coach_input.parse(legacy)).toEqual(legacy);
+    expect([...rows].map(([key, body]) => [key, Array.from(body)])).toEqual(before);
+    await editCoach(analysis => {
+      analysis.segment_running_metrics = structuredClone(produced16.complete.analysis.segment_running_metrics);
+    }, legacy150.analysis_id);
+    const corrupted = [...rows].map(([key, body]) => [key, Array.from(body)]);
+    const output = await call("coach_input", protocol);
+    expect(output.available).toBe(false);
+    expect(output).not.toHaveProperty("analysis");
+    expect(output.message).toContain("current coach input could not be verified");
+    expect(outputSchemas.coach_input.parse(output)).toEqual(output);
+    expect([...rows].map(([key, body]) => [key, Array.from(body)])).toEqual(corrupted);
+    expect(operations).toEqual(["HEAD summary/activities.csv", "GET summary/activities.csv",
+      "GET activities/2026/42/coach-input/v1/latest-ready.json",
+      `GET activities/2026/42/coach-input/v1/canonical/${legacy150.analysis_id}.json`,
+      "HEAD summary/activities.csv", "GET activities/2026/42/coach-input/v1/latest-ready.json",
+      `GET activities/2026/42/coach-input/v1/canonical/${legacy150.analysis_id}.json`]);
+  });
+
   it(`running segment tracer: exposes the same genuine stored FIT segments and Coach source data via ${protocol}`, async () => {
     const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
     const detail = await call("endurance_session", protocol);
@@ -109,7 +357,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       kilometer_splits: { status: "available", method: "fit_record_time_weighted_mean",
         interval_policy: "left_sample_hold_distance_progressing_max_30s", distance_allocation: "linear_between_record_distances" },
       distance_halves: { status: "available", method: "fit_record_time_weighted_mean" } });
-    expect(coach.analysis.analyzer_version).toBe("1.5.0");
+    expect(coach.analysis.analyzer_version).toBe("1.6.0");
     expect(detail.recorded_running_metrics).toEqual(coach.analysis.recorded_running_metrics);
     expect(outputSchemas.endurance_session.parse(detail)).toEqual(detail);
     expect(outputSchemas.coach_input.parse(coach)).toEqual(coach);
@@ -253,7 +501,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
     const output = await call("coach_input", protocol);
     expect(output.available).toBe(true);
-    expect(output.analysis).toMatchObject({ analyzer_version: "1.5.0", activity_id: "42",
+    expect(output.analysis).toMatchObject({ analyzer_version: "1.6.0", activity_id: "42",
       analysis_id: produced.source_error.analysis_id, summary: { distance_m: 2000 },
       recorded_running_metrics: { schema_version: 2, association: "decode_errors", source_fit_sha256: null,
         average_power: { status: "unavailable", value: null },
