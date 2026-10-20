@@ -15,6 +15,16 @@ repair never logs into Garmin. Explicit historical date/year inputs remain
 available; year imports run newest first. Historical work is never inferred from
 a normal chat request.
 
+An explicitly requested R2-only activity repair may use an older local date.
+It still requires an exact numeric activity ID and a strict `YYYY-MM-DD` date
+no later than tomorrow. The stored canonical activity must have the known
+schema and match both ID and Garmin-local date before Coach generation.
+Missing or unverified inputs do not become a successful Garmin source check;
+old canonical analyses remain immutable. Activity and night jobs that contact
+Garmin retain the existing today-minus-seven through tomorrow window.
+This historical exception belongs to the explicit workflow/Python repair
+entrypoints; the MCP `sync_latest_activity` request window is unchanged.
+
 Each stage keeps a separate R2 write budget, matching the former workflow steps.
 Stages reuse one R2 client and a lazy bucket inventory owned by this run. The
 first required PUT inventories the bucket; subsequent stages carry forward
@@ -108,10 +118,11 @@ Pause cloud Garmin jobs and wait for active runs before using the same core loca
 python -m pipeline.refresh --confirm-cloud-jobs-paused
 python -m pipeline.refresh --confirm-cloud-jobs-paused --mode night --wake-date YYYY-MM-DD
 python -m pipeline.refresh --confirm-cloud-jobs-paused --mode activity --include-granular
-python -m pipeline.refresh --confirm-cloud-jobs-paused --mode activity --repair-only --activity-id NUMERIC_ID
+python -m pipeline.refresh --confirm-cloud-jobs-paused --mode activity --repair-only --activity-id NUMERIC_ID --expected-date YYYY-MM-DD
 ```
 
-Use a recent Garmin-local wake-date or expected workout date. Local invocation
+Use a recent Garmin-local wake-date or expected workout date, except for the
+explicit exact stored-source repair described above. Local invocation
 loads `.env` without overriding existing environment variables, including an
 optional ignored token file. Resume after failure by running the same request;
 existing canonical data and checkpoints remain reusable. Full history is optional

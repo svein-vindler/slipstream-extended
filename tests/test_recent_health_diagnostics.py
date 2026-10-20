@@ -327,6 +327,7 @@ def test_actual_r2_only_activity_repair_never_confirms_a_garmin_check(
     client.objects["activities/2026/1/activity.v1.json"] = {
         "Body": json.dumps(
             {
+                "schema_version": 1,
                 "activity": {"id": "1", "type": "running", "start_time_local": f"{DAY} 10:00:00"},
             }
         ).encode()

@@ -11,8 +11,8 @@ from .activity_backfill import is_job_stopping_error, is_supported_activity
 from .activity_refresh import refresh_activity
 from .coach_backfill import _float, _json
 from .coach_backfill import run_one as run_coach_one
-from .freshness import activity_scope, publish, receipt, recent_day
-from .granular import activity_type, gzip_json
+from .freshness import activity_scope, publish, receipt, recent_day, repair_day
+from .granular import SCHEMA_VERSION, activity_type, gzip_json
 from .granular_export import activity_artifact_keys
 from .manual_activity_refresh import _complete_activity_details, _rows
 from .output_privacy import SafeArgumentParser, safe_cli
@@ -95,16 +95,17 @@ def run(
             raise ValueError("expected_date must use YYYY-MM-DD")
 
     if expected_date:
-        recent_day(expected_date)
+        (repair_day if repair_only else recent_day)(expected_date)
     store = store or R2Store()
     scope = activity_scope(requested_activity_id, expected_date, new_activity_expected)
     receipt(store, run_id, request_id, scope)
     if repair_only:
         if not requested_activity_id or not expected_date:
             raise ValueError("R2 repair requires an activity ID and local day")
-        recent_day(expected_date)
         prefix = f"activities/{expected_date[:4]}/{requested_activity_id}"
         decoded = _json(store, f"{prefix}/activity.v1.json")
+        if type(decoded.get("schema_version")) is not int or decoded["schema_version"] != SCHEMA_VERSION:
+            raise ValueError("Unverified canonical activity schema")
         canonical = decoded.get("activity", {})
         local = activity_local_date(canonical.get("start_time_local"))
         if str(canonical.get("id")) != requested_activity_id or local != expected_date:

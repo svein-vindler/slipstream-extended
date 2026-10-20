@@ -152,6 +152,7 @@ def test_single_coach_scope_never_lists_history_or_changes_backfill_plan():
 def test_r2_only_repair_uses_canonical_id_without_a_summary_or_garmin(monkeypatch):
     store = FakeStore()
     store.objects["activities/2026/1/activity.v1.json"] = json.dumps({
+        "schema_version": 1,
         "activity": {"id": "1", "type": "running", "start_time_local": f"{DAY} 10:00:00"},
     }).encode()
     monkeypatch.setattr("pipeline.latest_activity.garmin_source._login",
