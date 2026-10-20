@@ -25,7 +25,7 @@ from . import (
     training_sync,
 )
 from .dispatch_receipt import publish_start, valid_request_id, workflow_receipt
-from .freshness import recent_day
+from .freshness import recent_day, repair_day
 from .granular import json_bytes
 from .local_bootstrap import prepare_environment
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
@@ -79,7 +79,7 @@ class RefreshRequest:
         if self.mode == "night":
             recent_day(self.wake_date)
         if self.mode == "activity" and self.expected_date:
-            recent_day(self.expected_date)
+            (repair_day if self.repair_only else recent_day)(self.expected_date)
         if bool(self.health_start) != bool(self.health_end):
             raise ValueError("Both health_start and health_end are required")
         if bool(self.backfill_start_year) != bool(self.backfill_end_year):

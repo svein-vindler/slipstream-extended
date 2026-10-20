@@ -90,6 +90,7 @@ def build_targeted(kind, *, repair=False):
         "Body": b'{"run_id":1,"scope":"night/2000-01-01"}'}
     if repair:
         client.objects["activities/2026/1/activity.v1.json"] = {"Body": json.dumps({
+            "schema_version": 1,
             "activity": {"id": "1", "start_time_local": "2026-10-14 10:00:00", "type": "running"}}).encode()}
     originals = {key: value["Body"] for key, value in client.objects.items()}
     store = R2Store(client=client, bucket="synthetic")

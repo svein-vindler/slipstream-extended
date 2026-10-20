@@ -15,6 +15,14 @@ def recent_day(value: str) -> str:
     return value
 
 
+def repair_day(value: str) -> str:
+    """Stored-source repair may be historical, retaining the future-date limit."""
+    parsed = date.fromisoformat(value)
+    if parsed.isoformat() != value or parsed > date.today() + timedelta(days=1):
+        raise ValueError("Requested local day must use YYYY-MM-DD and cannot be after tomorrow")
+    return value
+
+
 def activity_scope(activity_id: str | None, expected_date: str | None, new_expected: bool) -> str:
     return f"activity/{expected_date or 'latest'}/{activity_id or 'latest'}/{'new' if new_expected else 'known'}"
 

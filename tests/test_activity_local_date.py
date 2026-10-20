@@ -267,6 +267,7 @@ def test_r2_only_repair_rejects_a_malformed_local_clock_even_when_the_date_prefi
     store = CountingStore()
     key = "activities/2026/1/activity.v1.json"
     decoded = json.loads(store.objects[key])
+    decoded["schema_version"] = 1
     decoded["activity"]["start_time_local"] = "2026-10-13 24:00:00"
     store.objects[key] = json.dumps(decoded).encode()
     monkeypatch.setattr("pipeline.latest_activity.recent_day", lambda day: date.fromisoformat(day))
