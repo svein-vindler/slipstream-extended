@@ -21,6 +21,10 @@ execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
   "scripts/build_running_segments_contract.py", "worker/test-runtime/generated/recorded-running-segments.json",
 ], { cwd: root, stdio: "inherit" });
 execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_running_segments_contract.py", "worker/test-runtime/generated/coach-segment-metrics.json",
+  "worker/test-runtime/generated/coach-segment-metrics-work",
+], { cwd: root, stdio: "inherit" });
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
   "scripts/build_coach_stored_context_contract.py", "worker/test-runtime/generated/coach-stored-context.json",
 ], { cwd: root, stdio: "inherit" });
 execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [

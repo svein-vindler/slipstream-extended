@@ -10,6 +10,7 @@ from contextlib import redirect_stdout
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -23,6 +24,69 @@ from scripts.build_training_context_contract import DTO, START  # noqa: E402
 
 ACTIVITY = {"id": "42", "date": "2026-10-08", "name": "Synthetic run",
             "type": "Run", "moving_seconds": 40.0}
+SEGMENT_ACTIVITY = {**ACTIVITY, "moving_seconds": 60.0}
+
+
+def structured_source_store(output, *, elapsed_shift=0.0, tcx_distance_scale=1.0, summary_timestamp_shift=0):
+    """Actual encoded sources for a split active step and a later repeated step."""
+    class StructuredGarmin:
+        def download_activity(self, activity_id, *, dl_fmt):
+            from garminconnect import Garmin
+
+            assert activity_id == 42
+            if dl_fmt != Garmin.ActivityDownloadFormat.ORIGINAL:
+                points = "".join(
+                    f"<Trackpoint><Time>{(START + timedelta(seconds=second)).isoformat()}</Time>"
+                    f"<DistanceMeters>{second * 50 * tcx_distance_scale}</DistanceMeters>"
+                    "<HeartRateBpm><Value>140</Value></HeartRateBpm></Trackpoint>"
+                    for second in range(0, 61, 10)
+                )
+                return (f'<TrainingCenterDatabase><Activities><Activity Sport="Running">'
+                        f'<Id>{START.isoformat()}</Id><Lap StartTime="{START.isoformat()}">'
+                        f'<TotalTimeSeconds>60</TotalTimeSeconds><DistanceMeters>{3000 * tcx_distance_scale}</DistanceMeters>'
+                        f'<Track>{points}</Track></Lap></Activity></Activities></TrainingCenterDatabase>').encode()
+            encoder = Encoder()
+            powers = [900, 100, 200, 0, 400, 900, 999]
+            lengths = [9000, 1000, 1100, None, 1300, 9000, 9999]
+            contacts = [999, 200, 220, 240, 260, 999, 999]
+            oscillations = [999, 60, 80, 100, 120, 999, 999]
+            ratios = [99, 6, 8, 10, 12, 99, 99]
+            balances = [50, 101, 103, 105, 107, 50, 0]
+            for index in range(7):
+                row = {"mesg_num": 20, "timestamp": START + timedelta(seconds=index * 10),
+                       "distance": index * 500, "power": powers[index],
+                       "stance_time": contacts[index], "vertical_oscillation": oscillations[index],
+                       "vertical_ratio": ratios[index], "stance_time_balance": balances[index]}
+                if lengths[index] is not None:
+                    row["step_length"] = lengths[index]
+                encoder.write_mesg(row)
+            for index, intensity in enumerate(("warmup", "active", "recovery", "cooldown")):
+                encoder.write_mesg({"mesg_num": 27, "message_index": index, "intensity": intensity})
+            for index, step in enumerate((0, 1, 1, 2, 1, 3)):
+                encoder.write_mesg({"mesg_num": 19, "message_index": index, "wkt_step_index": step,
+                                   "start_time": START + timedelta(seconds=index * 10),
+                                   "timestamp": START + timedelta(seconds=(index + 1) * 10 + summary_timestamp_shift),
+                                   "total_elapsed_time": 10 + (elapsed_shift if index == 1 else 0),
+                                   "total_timer_time": 10,
+                                   "total_distance": 500, "avg_power": 777})
+            encoder.write_mesg({"mesg_num": 18, "start_time": START,
+                               "timestamp": START + timedelta(seconds=60 + summary_timestamp_shift), "sport": "running",
+                               "total_distance": 3000, "total_elapsed_time": 60,
+                               "total_timer_time": 60, "avg_power": 999})
+            return bytes(encoder.close())
+
+    store = CountingStore()
+    store.objects = {
+        "summary/activities.csv": (
+            b"Activity ID,Activity Date,Activity Name,Activity Type,Moving Time,Activity Local Date\n"
+            b"garmin-42,2026-10-07 23:30:00,Synthetic run,Run,60,2026-10-08\n"),
+        "coach/profiles/v1/2026-01-01/synthetic.json": json.dumps({
+            "profile_id": "synthetic-segments", "effective_from": "2026-01-01",
+            "zones": [{"label": "Easy", "min_bpm": 100, "max_bpm": 150}],
+        }).encode(),
+    }
+    export_activity(DTO, StructuredGarmin(), store, output)
+    return store
 
 
 def synthetic_fit(*, sparse=False):
@@ -132,7 +196,29 @@ def build():
             "invalid_halves": build_case(invalid_halves=True)}
 
 
+def build_segment_contract(work):
+    """Same actual encoded-source helper as Python tests, exported for native MCP."""
+    result = {}
+    for name, options in (("complete", {}), ("official_clock", {"summary_timestamp_shift": -1}),
+                          ("unaligned_whole", {"tcx_distance_scale": 1.1})):
+        output = work / (name + "-" + uuid4().hex)
+        output.mkdir(parents=True)
+        store = structured_source_store(output, **options)
+        store.reset_counts()
+        coach_backfill.run_one(activity=SEGMENT_ACTIVITY, store=store)
+        pointer = json.loads(store.objects["activities/2026/42/coach-input/v1/latest-ready.json"])
+        body = store.objects[pointer["analysis_key"]]
+        analysis = json.loads(gzip.decompress(body))
+        result[name] = {
+            "analysis_id": analysis["analysis_id"],
+            "analysis": analysis, "counts": dict(store.counts),
+            "objects_base64": {key: base64.b64encode(value).decode() for key, value in store.objects.items()},
+        }
+    return result
+
+
 if __name__ == "__main__":
     target = Path(sys.argv[1])
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(build(), separators=(",", ":")), encoding="utf-8")
+    produced = (build_segment_contract(Path(sys.argv[2])) if len(sys.argv) == 3 else build())
+    target.write_text(json.dumps(produced, separators=(",", ":")), encoding="utf-8")

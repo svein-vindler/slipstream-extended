@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from pipeline import coach_backfill
-from pipeline.coach import ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION
+from pipeline.coach import ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION
 from scripts.benchmark_coach_reuse import CountingStore
 
 
@@ -49,7 +49,7 @@ def test_targeted_upgrade_changes_exactly_one_selection_and_bulk_keeps_others():
     before = store.objects.copy()
     result = coach_backfill.run_one(store=store, activity=activity())
     assert set(result["processed_sources"]) == {"3"}
-    assert selected(store, "3")["analyzer_version"] == GCT_SIDES_ANALYZER_VERSION
+    assert selected(store, "3")["analyzer_version"] == SEGMENT_ANALYZER_VERSION
     assert selected(store, "3")["sections"][0]["average_heart_rate_bpm"] == 150
     bulk = coach_backfill.run(store=store, max_activities=3)
     assert bulk["generated_this_run"] == bulk["remaining_activities"] == 0
@@ -67,7 +67,7 @@ def test_genuine_changed_legacy_source_generates_new_engine_and_preserves_old_by
     result = coach_backfill.run(store=store, max_activities=3)
     assert result["generated_this_run"] == 1
     assert result["remaining_activities"] == 0
-    assert selected(store, "3")["analyzer_version"] == GCT_SIDES_ANALYZER_VERSION
+    assert selected(store, "3")["analyzer_version"] == SEGMENT_ANALYZER_VERSION
     for key, value in before.items():
         if "/canonical/" in key:
             assert store.objects[key] == value
@@ -130,7 +130,7 @@ def test_new_bulk_and_targeted_results_share_identity_without_upgrading_history(
     assert result["generated_this_run"] == 1
     assert result["remaining_activities"] == 0
     assert result["completed_this_run"][0]["analysis_id"] == targeted["processed_sources"]["4"]
-    assert selected(bulk_store, "4")["analyzer_version"] == GCT_SIDES_ANALYZER_VERSION
+    assert selected(bulk_store, "4")["analyzer_version"] == SEGMENT_ANALYZER_VERSION
     assert selected(bulk_store, "4")["sections"][0]["average_heart_rate_bpm"] == 150
     assert all(bulk_store.objects[key] == value for key, value in old.items())
     repeated = coach_backfill.run(store=bulk_store, max_activities=3)
@@ -245,7 +245,7 @@ def test_unmarked_adoption_does_not_hide_pending_new_work_on_ordinary_continuati
     second = coach_backfill.run(store=store, max_activities=1)
     assert second["generated_this_run"] == 1
     assert second["remaining_activities"] == 0
-    assert selected(store, "4")["analyzer_version"] == GCT_SIDES_ANALYZER_VERSION
+    assert selected(store, "4")["analyzer_version"] == SEGMENT_ANALYZER_VERSION
     assert selected(store, "4")["sections"][0]["average_heart_rate_bpm"] == 150
     assert all(store.objects[key] == value for key, value in original.items())
 
@@ -287,7 +287,7 @@ def test_context_change_preserves_neighbor_year_and_same_year_contract(old_year)
     current = json.loads(gzip.decompress(store.objects[json.loads(
         store.objects["activities/2027/1/coach-input/v1/latest-ready.json"])["analysis_key"]]))
     assert current["user_context"]["context_id"] == "synthetic-new"
-    assert current["analyzer_version"] == GCT_SIDES_ANALYZER_VERSION
+    assert current["analyzer_version"] == SEGMENT_ANALYZER_VERSION
     assert all(store.objects[key] == value for key, value in before.items() if "/canonical/" in key)
 
 @pytest.mark.parametrize("bad_key", [

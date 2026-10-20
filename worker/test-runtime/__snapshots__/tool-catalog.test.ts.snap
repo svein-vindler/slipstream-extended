@@ -3,7 +3,7 @@
 exports[`preserves the complete tool contracts with writes=false 1`] = `
 {
   "count": 24,
-  "hash": "5d67490c7f9b145ba24ec4a53389f18b2469442765f7c325b88388084541af8d",
+  "hash": "54e3ba8fa990b2571a17339c3ca3e05cb0f1905a3522a11e4a56aede3e7ecde4",
   "writes": false,
 }
 `;
@@ -11,7 +11,7 @@ exports[`preserves the complete tool contracts with writes=false 1`] = `
 exports[`preserves the complete tool contracts with writes=true 1`] = `
 {
   "count": 26,
-  "hash": "8ca9b9844d0b032703b0aafa7f98fd43efe628c5335d8831ce2420e0456fa03c",
+  "hash": "685d894c726fa6258bb231b5bc2430f0681a2962ebaaae6ae1b90f4b27f0c856",
   "writes": true,
 }
 `;
