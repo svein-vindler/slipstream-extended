@@ -983,6 +983,16 @@ def _validate_value(key: str, value: Any):
                 or not valid_declaration(value["gct_balance_side"])):
             raise BackupError("invalid_gct_declaration")
         return
+    if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") == "1.7.0":
+        from .coach_segment_metrics import validate_partial_segment_metrics
+
+        legacy = {name: item for name, item in value.items() if name != "segment_running_metrics"}
+        _validate_value(key, {**legacy, "analyzer_version": "1.5.0"})
+        try:
+            validate_partial_segment_metrics(value.get("segment_running_metrics"), value)
+        except (KeyError, TypeError, ValueError, OverflowError, StopIteration) as exc:
+            raise BackupError("invalid_segment_running_metrics") from exc
+        return
     if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") == "1.6.0":
         from .coach_segment_metrics import validate_segment_metrics
 

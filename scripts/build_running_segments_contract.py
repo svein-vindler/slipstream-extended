@@ -196,16 +196,58 @@ def build():
             "invalid_halves": build_case(invalid_halves=True)}
 
 
+def partial_source_case():
+    """Literal synthetic terminal-boundary tracer shared by producer contracts."""
+    start = "2026-01-01T00:00:00Z"
+    half = {"distance_m": 450, "duration_seconds": None, "pace_seconds_per_km": None,
+            "average_speed_mps": None, "average_heart_rate_bpm": None,
+            "maximum_heart_rate_bpm": None, "elevation_change_m": None}
+    records = [{"timestamp": f"2026-01-01T00:00:{seconds:02d}Z", "distance": distance,
+                "power": power, "step_length": 1000, "stance_time": 200,
+                "vertical_oscillation": 10, "vertical_ratio": 5, "stance_time_balance": 101}
+               for seconds, distance, power in zip((0, 2, 4, 6, 8, 9), (0, 200, 400, 600, 800, 900),
+                                                   (100, 200, 300, 400, 500, 9000), strict=True)]
+    return {"activity": {"id": "42", "date": "2026-01-01", "type": "running"},
+            "decoded_fit": {"schema_version": 1, "source": "garmin-fit", "decode_errors": [],
+                "source_fit_sha256": "a" * 64,
+                "activity": {"id": "42", "type": "running", "start_time_gmt": start,
+                             "start_time_local": "2026-01-01T00:00:00"},
+                "messages": {"session_mesgs": [{"start_time": start, "timestamp": "2026-01-01T00:00:09Z",
+                                                 "total_elapsed_time": 8.5, "sport": "running"}],
+                             "record_mesgs": records, "lap_mesgs": [], "workout_step_mesgs": []}},
+            "endurance": {"activity": {"id": "42"}, "summary": {"distance_m": 900},
+                          "distance_halves": {"first": dict(half), "second": dict(half)}},
+            "profile": {"profile_id": "synthetic-partial", "effective_from": "2026-01-01",
+                        "zones": [{"label": "synthetic", "min_bpm": 100, "max_bpm": 150}]},
+            "tcx_sha256": "b" * 64}
+
+
+def partial_store_case():
+    """Same literal source replayed through the normal immutable publisher."""
+    source = partial_source_case()
+    store = CountingStore()
+    store.objects = {
+        "activities/2026/42/activity.v1.json": gzip.compress(json.dumps(source["decoded_fit"]).encode(), mtime=0),
+        "activities/2026/42/activity.endurance.v1.json": gzip.compress(json.dumps(source["endurance"]).encode(), mtime=0),
+        "activities/2026/42/activity.tcx": b"synthetic-stored-tcx-partial-contract",
+        "coach/profiles/v1/2026-01-01/synthetic-partial.json": json.dumps(source["profile"]).encode(),
+        "summary/activities.csv": (b"Activity ID,Activity Date,Activity Name,Activity Type,Moving Time,Activity Local Date\n"
+                                   b"garmin-42,2026-01-01 00:00:00,Synthetic partial,running,8.5,2026-01-01\n"),
+    }
+    return store, {**source["activity"], "name": "Synthetic partial", "moving_seconds": 8.5}
+
+
 def build_segment_contract(work):
     """Same actual encoded-source helper as Python tests, exported for native MCP."""
     result = {}
     for name, options in (("complete", {}), ("official_clock", {"summary_timestamp_shift": -1}),
-                          ("unaligned_whole", {"tcx_distance_scale": 1.1})):
+                          ("unaligned_whole", {"tcx_distance_scale": 1.1}), ("terminal_partial", None)):
         output = work / (name + "-" + uuid4().hex)
         output.mkdir(parents=True)
-        store = structured_source_store(output, **options)
+        store, activity = (partial_store_case() if options is None
+                           else (structured_source_store(output, **options), SEGMENT_ACTIVITY))
         store.reset_counts()
-        coach_backfill.run_one(activity=SEGMENT_ACTIVITY, store=store)
+        coach_backfill.run_one(activity=activity, store=store)
         pointer = json.loads(store.objects["activities/2026/42/coach-input/v1/latest-ready.json"])
         body = store.objects[pointer["analysis_key"]]
         analysis = json.loads(gzip.decompress(body))

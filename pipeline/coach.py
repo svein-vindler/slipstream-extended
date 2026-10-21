@@ -25,6 +25,7 @@ STORED_CONTEXT_ANALYZER_VERSION = "1.3.0"
 TRAINING_EFFECT_ANALYZER_VERSION = "1.4.0"
 GCT_SIDES_ANALYZER_VERSION = "1.5.0"
 SEGMENT_ANALYZER_VERSION = "1.6.0"
+PARTIAL_SEGMENT_ANALYZER_VERSION = "1.7.0"
 
 
 def _number(value: Any) -> float | None:
@@ -306,7 +307,8 @@ def analysis_id(
 ) -> str:
     value = {
         "activity_id": activity_id,
-        "analyzer_version": (SEGMENT_ANALYZER_VERSION if segment_metrics is not None
+        "analyzer_version": (PARTIAL_SEGMENT_ANALYZER_VERSION if segment_metrics is not None and segment_metrics.get("schema_version") == 2
+                             else SEGMENT_ANALYZER_VERSION if segment_metrics is not None
                              else GCT_SIDES_ANALYZER_VERSION if gct_sides is not None
                              else TRAINING_EFFECT_ANALYZER_VERSION if training_effect is not None
                              else STORED_CONTEXT_ANALYZER_VERSION if stored_context_snapshot is not None
@@ -344,7 +346,7 @@ def build_coach_input(
                       if stored_context_snapshot is not None else None)
     structure = workout_structure(decoded_fit)
     segments = segment_running_metrics(activity, decoded_fit, endurance, recorded=metrics,
-                                       structure=structure, tcx_sha256=tcx_sha256)
+                                       structure=structure, tcx_sha256=tcx_sha256, partial=True)
     identifier = analysis_id(
         activity_id=activity_id,
         fit_sha256=decoded_fit.get("source_fit_sha256"),
@@ -373,7 +375,7 @@ def build_coach_input(
             drift = round(second_hr - first_hr, 2)
     return {
         "schema_version": COACH_SCHEMA_VERSION,
-        "analyzer_version": SEGMENT_ANALYZER_VERSION,
+        "analyzer_version": PARTIAL_SEGMENT_ANALYZER_VERSION,
         "analysis_id": identifier,
         "activity_id": activity_id,
         "activity": {

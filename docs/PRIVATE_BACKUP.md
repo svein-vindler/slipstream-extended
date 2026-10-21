@@ -66,6 +66,15 @@ Training Effect values, conflicting clocks/source identity and inconsistent
 coverage still reject the archive. Historical 1.0–1.3 bytes/IDs are unchanged;
 verification neither regenerates analyses nor fetches their source data.
 
+Engine `1.7.0` additionally uses strict `segment_running_metrics` schema 2.
+Its source-window disposition/counts and each field's boundary-excluded time
+are validated alongside the unchanged source/frame/step/distance bindings and
+joint session/main coverage budgets. Positive boundary exclusion cannot be
+labelled complete. Genuine 1.6/schema-1 and earlier canonical bytes remain
+readable with their own validators; verification does not regenerate sources
+or relabel historical analyses. A rollback after storing 1.7 must preserve
+compatible readers and validators, never revert stored data.
+
 ## Format and password handling
 
 Format v1: fixed `SLIPSTREAM-BACKUP-1` header, 16-byte random salt, and one standard

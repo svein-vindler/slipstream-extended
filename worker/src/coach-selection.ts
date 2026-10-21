@@ -87,18 +87,18 @@ export async function readCurrentCoachInput(options: {
     || typeof analysis.analysis_id !== "string"
     || (options.date && record(analysis.activity).date !== options.date)
     || (strictIdentity && analysis.analysis_id !== key.slice(prefix.length, -5))) return { status: "unverified" };
-  if (!["1.5.0", "1.6.0"].includes(String(analysis.analyzer_version)) && "ground_contact_sides" in analysis) return { status: "unverified" };
-  if (analysis.analyzer_version !== "1.6.0" && "segment_running_metrics" in analysis) return { status: "unverified" };
-  if (["1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0"].includes(String(analysis.analyzer_version))) {
+  if (!["1.5.0", "1.6.0", "1.7.0"].includes(String(analysis.analyzer_version)) && "ground_contact_sides" in analysis) return { status: "unverified" };
+  if (analysis.analyzer_version !== "1.6.0" && analysis.analyzer_version !== "1.7.0" && "segment_running_metrics" in analysis) return { status: "unverified" };
+  if (["1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0"].includes(String(analysis.analyzer_version))) {
     const measurements = recordedRunningSegmentsSchema.safeParse(analysis.recorded_running_metrics);
     if (!measurements.success || measurements.data.activity_id !== activityId) return { status: "unverified" };
     const block = measurements.data;
-    if ((analysis.analyzer_version === "1.3.0" || (["1.4.0", "1.5.0", "1.6.0"].includes(String(analysis.analyzer_version)) && "stored_context_snapshot" in analysis))
+    if ((analysis.analyzer_version === "1.3.0" || (["1.4.0", "1.5.0", "1.6.0", "1.7.0"].includes(String(analysis.analyzer_version)) && "stored_context_snapshot" in analysis))
       && !validStoredCoachContext(analysis.stored_context_snapshot,
       block.session_start_time_utc, block.local_date)) return { status: "unverified" };
-    if (["1.4.0", "1.5.0", "1.6.0"].includes(String(analysis.analyzer_version)) && !validCoachTrainingEffect(analysis, activityId)) return { status: "unverified" };
-    if (["1.5.0", "1.6.0"].includes(String(analysis.analyzer_version)) && !validGroundContactSides(analysis, block)) return { status: "unverified" };
-    if (analysis.analyzer_version === "1.6.0" && !validSegmentRunningMetrics(analysis, block)) return { status: "unverified" };
+    if (["1.4.0", "1.5.0", "1.6.0", "1.7.0"].includes(String(analysis.analyzer_version)) && !validCoachTrainingEffect(analysis, activityId)) return { status: "unverified" };
+    if (["1.5.0", "1.6.0", "1.7.0"].includes(String(analysis.analyzer_version)) && !validGroundContactSides(analysis, block)) return { status: "unverified" };
+    if ((analysis.analyzer_version === "1.6.0" || analysis.analyzer_version === "1.7.0") && !validSegmentRunningMetrics(analysis, block)) return { status: "unverified" };
     const sourceDigest = record(analysis.source).fit_sha256;
     if (block.association === "matched") {
       if (block.source_fit_sha256 !== sourceDigest

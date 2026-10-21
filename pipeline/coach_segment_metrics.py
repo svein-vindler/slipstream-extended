@@ -43,29 +43,32 @@ def _group(basis, reason):
             "balance_aggregation": POLICY, "items": []}
 
 
-def _points(decoded, frame):
+def _points(decoded, frame, *, allow_terminal=False):
     rows = decoded.get("messages", {}).get("record_mesgs")
     if not isinstance(rows, list) or len(rows) < 2:
         return None
     start, end = frame["start"], frame["end"]
     points = []
-    for row in rows:
+    for ordinal, row in enumerate(rows):
         stamp = _epoch(row.get("timestamp")) if isinstance(row, dict) else None
         distance = _finite_number(row.get("distance")) if isinstance(row, dict) else None
-        if (stamp is None or distance is None or distance < 0 or not start <= stamp <= end
+        if (stamp is None or distance is None or distance < 0
+                or not (start <= stamp <= end or allow_terminal and ordinal == len(rows) - 1 and stamp > end)
                 or points and (stamp <= points[-1][0] or distance < points[-1][1])):
             return None
         points.append((stamp, distance, row))
     return points
 
 
-def _distance_at(points, stamps, stamp):
+def _distance_at(points, stamps, stamp, *, frame_end=None):
     index = bisect.bisect_left(stamps, stamp)
     if index < len(points) and points[index][0] == stamp:
         return points[index][1]
     if not 0 < index < len(points):
         return None
     left, right = points[index - 1:index + 1]
+    if frame_end is not None and right[0] > frame_end:
+        return None
     if right[0] - left[0] > 30:
         return None
     return left[1] + (right[1] - left[1]) * (stamp - left[0]) / (right[0] - left[0])
@@ -114,8 +117,8 @@ def _lap_windows(decoded, points, session):
                         "start_time_utc": frame["start_time_utc"], "end_time_utc": frame["end_time_utc"]})
     # Establish the complete clock ordering before interpreting local geometry.
     for window in windows:
-        first = _distance_at(points, stamps, window["start"])
-        last = _distance_at(points, stamps, window["end"])
+        first = _distance_at(points, stamps, window["start"], frame_end=session["end"])
+        last = _distance_at(points, stamps, window["end"], frame_end=session["end"])
         if first is None or last is None or round(last - first, 2) != round(window["distance"], 2):
             return None, "main_distance_alignment_unverified"
         window.update(start_distance=first, end_distance=last)
@@ -138,9 +141,9 @@ def _pieces(windows, cells):
     return pieces
 
 
-def _means(points, cells, pieces):
+def _means(points, cells, pieces, *, frame_end=None):
     """An ordered record/piece sweep; no records-times-all-laps scan."""
-    accumulators = [{"eligible": 0.0, "gap": 0.0, "geometry": True,
+    accumulators = [{"eligible": 0.0, "gap": 0.0, "boundary": 0.0, "geometry": True,
                      "fields": {name: {"mean": 0.0, "seconds": 0.0, "count": 0, "last_pair": None, "invalid": False}
                                 for name, _, _ in _RECORD_FIELDS}} for _ in cells]
     for start_d, end_d, _start_t, _end_t, index in pieces:
@@ -158,13 +161,17 @@ def _means(points, cells, pieces):
         while index < len(pieces) and pieces[index][0] < right[1]:
             start_d, end_d, start_t, end_t, cell = pieces[index]
             lo, hi = max(left[0], start_t), min(right[0], end_t)
+            if frame_end is not None:
+                hi = min(hi, frame_end)
             if hi > lo:
                 lo_d = left[1] + delta * (lo - left[0]) / seconds
                 hi_d = left[1] + delta * (hi - left[0]) / seconds
                 overlap = min(hi_d, end_d) - max(lo_d, start_d)
                 weight = seconds * max(0.0, overlap) / delta
                 accumulator = accumulators[cell]
-                if weight and seconds > 30:
+                if weight and frame_end is not None and right[0] > frame_end:
+                    accumulator["boundary"] += weight
+                elif weight and seconds > 30:
                     accumulator["gap"] += weight
                 elif weight:
                     accumulator["eligible"] += weight
@@ -196,9 +203,11 @@ def _means(points, cells, pieces):
                 "excluded_gap_seconds": round(accumulator["gap"], 3),
                 "contributing_intervals": saved["count"],
                 "status": "none" if not saved["count"] else "complete"
-                if accumulator["geometry"] and not accumulator["gap"]
+                if accumulator["geometry"] and not accumulator["gap"] and not accumulator["boundary"]
                 and abs(saved["seconds"] - accumulator["eligible"]) < 1e-8 else "partial",
             }
+            if frame_end is not None:
+                value["coverage"]["boundary_excluded_seconds"] = round(accumulator["boundary"], 3)
             cell[name] = value
     return cells
 
@@ -229,8 +238,8 @@ def _available(group, items):
         group.update(status="available", reason=None, items=items)
 
 
-def segment_running_metrics(activity, decoded, endurance, *, recorded, structure, tcx_sha256):
-    result = {"schema_version": 1, "activity_id": str(activity["id"]),
+def segment_running_metrics(activity, decoded, endurance, *, recorded, structure, tcx_sha256, partial=False):
+    result = {"schema_version": 2 if partial else 1, "activity_id": str(activity["id"]),
               "source_fit_sha256": recorded["source_fit_sha256"], "source_tcx_sha256": tcx_sha256,
               "association": recorded["association"],
               "session_start_time_utc": recorded["session_start_time_utc"],
@@ -239,6 +248,9 @@ def segment_running_metrics(activity, decoded, endurance, *, recorded, structure
               "whole_distance_halves": _group("tcx_endurance_distance", "source_unverified"),
               "main_distance_halves": _group("fit_executed_main_distance" if structure["has_structured_workout"]
                                              else "tcx_endurance_distance_continuous_main", "source_unverified")}
+    if partial:
+        result["source_window"] = {"disposition": "unverified", "original_record_count": None,
+                                   "boundary_excluded_record_count": 0, "boundary_excluded_pair_count": 0}
     if recorded["association"] != "matched" or not recorded["source_fit_sha256"]:
         return result
     sessions = decoded.get("messages", {}).get("session_mesgs")
@@ -249,11 +261,17 @@ def segment_running_metrics(activity, decoded, endurance, *, recorded, structure
         return result
     result["session_end_time_utc"] = frame["end_time_utc"]
     result["session_summary_timestamp_utc"] = frame["summary_timestamp_utc"]
-    points = _points(decoded, frame)
+    points = _points(decoded, frame, allow_terminal=partial)
     if points is None:
         for group in (result[name] for name in ("executed_intervals", "whole_distance_halves", "main_distance_halves")):
             group["reason"] = "record_geometry_unverified"
         return result
+    if partial:
+        excluded = int(points[-1][0] > frame["end"])
+        result["source_window"].update(
+            disposition="verified_terminal_exclusion" if excluded else "verified_in_frame",
+            original_record_count=len(points), boundary_excluded_record_count=excluded,
+            boundary_excluded_pair_count=excluded)
     whole = result["whole_distance_halves"]
     old_whole = recorded["distance_halves"]
     cells, reason = _whole_halves(endurance, points)
@@ -261,8 +279,8 @@ def segment_running_metrics(activity, decoded, endurance, *, recorded, structure
     if cells is not None:
         pieces = [(row["start_distance_m"], row["end_distance_m"], points[0][0], points[-1][0], index)
                   for index, row in enumerate(cells)]
-        _means(points, cells, pieces)
-        if old_whole["status"] == "available":
+        _means(points, cells, pieces, frame_end=frame["end"] if partial else None)
+        if not partial and old_whole["status"] == "available":
             for cell, old in zip(cells, old_whole["items"], strict=True):
                 for name, _, _ in _RECORD_FIELDS[:-1]:
                     cell[name] = deepcopy(old[name])
@@ -283,7 +301,7 @@ def segment_running_metrics(activity, decoded, endurance, *, recorded, structure
     main["reason"] = "main_distance_missing"
     if total > 0:
         cells = _halves(total)
-        _available(main, _means(points, cells, _pieces(main_windows, cells)))
+        _available(main, _means(points, cells, _pieces(main_windows, cells), frame_end=frame["end"] if partial else None))
     groups = []
     for window in windows:
         if not window["active"]:
@@ -307,7 +325,7 @@ def segment_running_metrics(activity, decoded, endurance, *, recorded, structure
         cuts = [{"start_distance_m": 0, "end_distance_m": total}]
         pieces.extend((*piece[:4], index) for piece in _pieces(group, cuts))
     intervals["reason"] = "no_verified_active_groups"
-    _available(intervals, _means(points, cells, pieces))
+    _available(intervals, _means(points, cells, pieces, frame_end=frame["end"] if partial else None))
     return result
 
 
@@ -454,3 +472,69 @@ def validate_segment_metrics(block, analysis):
             require(sum(item["average_power"]["coverage"]["eligible_seconds"]
                         + item["average_power"]["coverage"]["excluded_gap_seconds"]
                         for item in items) <= total_span + 0.002)
+
+
+def validate_partial_segment_metrics(block, analysis):
+    """Schema2 extends, but never broadens, the genuine schema1 validator."""
+    def require(condition):
+        if not condition:
+            raise ValueError("invalid_segment_running_metrics")
+
+    require(isinstance(block, dict) and type(block.get("schema_version")) is int and block["schema_version"] == 2)
+    window = block.get("source_window")
+    require(isinstance(window, dict) and set(window) == {
+        "disposition", "original_record_count", "boundary_excluded_record_count", "boundary_excluded_pair_count"})
+    disposition = window["disposition"]
+    require(disposition in ("unverified", "verified_in_frame", "verified_terminal_exclusion"))
+    count = window["original_record_count"]
+    excluded = 1 if disposition == "verified_terminal_exclusion" else 0
+    require(all(type(window[name]) is int and window[name] == excluded
+                for name in ("boundary_excluded_record_count", "boundary_excluded_pair_count")))
+    require(count is None if disposition == "unverified" else type(count) is int and 2 <= count <= 2**53 - 1)
+    if disposition != "unverified":
+        require(block["association"] == "matched" and bool(block["source_fit_sha256"])
+                and block["session_start_time_utc"] is not None and block["session_end_time_utc"] is not None)
+    require(block["source_fit_sha256"] == analysis["recorded_running_metrics"]["source_fit_sha256"])
+    legacy = deepcopy(block)
+    del legacy["source_window"]
+    legacy["schema_version"] = 1
+    for name in ("executed_intervals", "whole_distance_halves", "main_distance_halves"):
+        group = legacy[name]
+        require(disposition != "unverified" or group["status"] != "available")
+        for row in group["items"]:
+            common = None
+            for field, _, _ in _RECORD_FIELDS:
+                coverage = row[field]["coverage"]
+                require(set(coverage) == {"valid_seconds", "eligible_seconds", "excluded_gap_seconds",
+                                          "boundary_excluded_seconds", "contributing_intervals", "status"})
+                boundary = coverage.pop("boundary_excluded_seconds")
+                require(_finite_number(boundary) is not None and boundary >= 0)
+                require(disposition == "verified_terminal_exclusion" or boundary == 0)
+                require(boundary == 0 or coverage["status"] != "complete")
+                require(type(coverage["contributing_intervals"]) is int and count is not None
+                        and coverage["contributing_intervals"] <= count - 1 - excluded)
+                require(common is None or common == boundary)
+                common = boundary
+    validate_segment_metrics(legacy, analysis)
+    session_span = (_epoch(block["session_end_time_utc"]) - _epoch(block["session_start_time_utc"])
+                    if disposition != "unverified" else None)
+    for name in ("executed_intervals", "whole_distance_halves", "main_distance_halves"):
+        group = block[name]
+        if group["status"] != "available":
+            continue
+        span = session_span
+        if name == "main_distance_halves" and group["distance_basis"] == "fit_executed_main_distance":
+            span = next(row["elapsed_seconds"] for row in analysis["sections"] if row["section"] == "main")
+            require(_finite_number(span) is not None and span >= 0)
+        total = 0.0
+        for row in group["items"]:
+            limit = span
+            if name == "executed_intervals":
+                limit = _epoch(row["end_time_utc"]) - _epoch(row["start_time_utc"])
+            coverage = row["average_power"]["coverage"]
+            duration = (coverage["eligible_seconds"] + coverage["excluded_gap_seconds"]
+                        + coverage["boundary_excluded_seconds"])
+            require(duration <= limit + 0.001)
+            total += duration
+        if name != "executed_intervals":
+            require(total <= span + 0.002)
