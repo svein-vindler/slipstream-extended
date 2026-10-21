@@ -1,5 +1,50 @@
 # Coach Input identity and immutable publication
 
+## Original native laps with verified workout-step references (1.8.0)
+
+New generation adds `native_lap_workout_binding`, schema 1. Its method is
+`fit_lap_wkt_step_index` and its measurement source is
+`recorded_running_metrics.laps`. Each ordered item refers to an existing native
+lap ordinal and, when verified, an explicit unique FIT lap message index and an
+explicit workout-step index. It does not copy the six metric objects, names,
+distances or durations into another measurement block. The recorded/schema 2
+and segment/schema 2 blocks retain their existing shapes and values.
+
+A bound link must reference exactly one corresponding planned step and one
+executed lap, with the same explicit step, normalized start and recorded
+distance, including legitimate nulls. Producer verification also requires the
+same raw lap identity, original summary timestamp and unique explicit raw step
+message. Array position, coerced indices and the older workout representation's
+fallbacks are not evidence of an explicit FIT link. Several native laps can
+refer to the same step. They are neither automatically separate intervals nor
+combined into one interval with invented weights.
+
+The block is `available` when all native laps bind, `partial` with reason
+`some_laps_unbound` when only some bind, or `unavailable` with one unbound item
+per lap and reason `no_verified_lap_workout_links` when none bind. A failed source
+association gives `source_unavailable`, a null digest and no items. A verified
+source without available native laps gives `recorded_laps_unavailable`, the
+verified FIT digest and no items. These optional failures preserve the ordinary
+activity summary. Missing or invalid measurements stay distinct from real zero;
+raw contact balance keeps unknown side semantics, and explicit user declarations
+retain their independent activity/FIT scope.
+
+Native lap measurements use the recorded native lap clocks. They do not open
+the separate record-derived interval or whole/main distance-half clock and
+distance gates. Existing unavailable and partial groups remain present; native
+means never fill their holes. No tolerance, clock repair, distance scaling,
+FIT/TCX positional join, source fetch or response-time aggregation is added.
+
+The 1.8 builder seed and final immutable identity include the complete binding
+block. Backup and MCP readers strictly check its fields, statuses, ordered
+ordinals, unique safe integer indices and source/plan/execution references.
+Historical engines reject this new field and retain their own labels, seeds,
+canonical bytes and validation. An engine upgrade alone never queues historical
+regeneration or expands repair eligibility. No automatic backfill, example
+regeneration or data migration follows this feature. After 1.8 storage, rollback
+must preserve a compatible 1.8 reader or use a forward fix; never delete or rewrite
+history to make an old reader accept it.
+
 ## Explicit verified in-frame partial coverage (1.7.0)
 
 New generation uses `segment_running_metrics` schema 2. It keeps the exact

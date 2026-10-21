@@ -238,6 +238,7 @@ def test_legacy_analysis_profile_and_context_bytes_remain_readable_after_new_pub
         context=client.read(context_key),
     )
     del legacy["training_effect"]
+    del legacy["native_lap_workout_binding"]
     legacy["analyzer_version"] = "1.2.0"
     legacy["analysis_id"] = analysis_id(
         activity_id=ACTIVITY["id"], fit_sha256=legacy["source"]["fit_sha256"],

@@ -9,6 +9,8 @@ import produced from "./generated/recorded-running-segments.json";
 import produced16 from "./generated/coach-segment-metrics.json";
 import legacy150 from "./fixtures/recorded-running-segments-engine-150.json";
 import coach17 from "./fixtures/coach17-intermediate-contract.json";
+import native18 from "./generated/native-lap-binding.json";
+import native17 from "../../tests/fixtures/coach_engine_170_native_lap_transition.json";
 
 const issuer = "https://running-segments-synthetic.cloudflareaccess.com";
 const hostname = "running-segments.example";
@@ -100,7 +102,170 @@ async function call(name: "endurance_session" | "coach_input", protocol: string)
   return message.result.structuredContent;
 }
 
+function loadNativeForContract(analysis: Record<string, unknown>) {
+  // Reuse the accepted outer storage envelope without changing the old tracers.
+  load(coach17.partial.objects_base64);
+  for (const name of rows.keys()) if (name.includes("/canonical/")) rows.delete(name);
+  const canonical = `activities/2026/42/coach-input/v1/canonical/${analysis.analysis_id}.json`;
+  rows.set(canonical, new TextEncoder().encode(JSON.stringify(analysis)));
+  rows.set("activities/2026/42/coach-input/v1/latest-ready.json", new TextEncoder().encode(JSON.stringify({
+    schema_version: 1, selection_version: 1, analysis_key: canonical, analyzer_version: analysis.analyzer_version,
+  })));
+}
+
+type NativeJson = Record<string, unknown>;
+const nativeBlock = (analysis: NativeJson) => analysis.native_lap_workout_binding as NativeJson;
+const nativeItems = (analysis: NativeJson) => nativeBlock(analysis).items as NativeJson[];
+const nativeStructure = (analysis: NativeJson) => analysis.workout_structure as {
+  planned_steps: NativeJson[]; executed_laps: NativeJson[];
+};
+const nativeReferenceFaults: Array<{ name: string; unbound?: boolean; change: (analysis: NativeJson) => void }> = [
+  { name: "missing required block", change: analysis => { delete analysis.native_lap_workout_binding; } },
+  { name: "duplicated metric payload", change: analysis => { nativeItems(analysis)[0].average_power = 111; } },
+  { name: "foreign activity reference", change: analysis => { nativeBlock(analysis).activity_id = "43"; } },
+  { name: "foreign source digest", change: analysis => { nativeBlock(analysis).source_fit_sha256 = "b".repeat(64); } },
+  { name: "null matched source digest", change: analysis => { nativeBlock(analysis).source_fit_sha256 = null; } },
+  { name: "missing lap reference", change: analysis => { nativeItems(analysis).pop(); } },
+  { name: "reversed lap order", change: analysis => { nativeItems(analysis).reverse(); } },
+  { name: "duplicate lap ordinal", change: analysis => { nativeItems(analysis)[1].lap = 1; } },
+  { name: "boolean raw index", change: analysis => { nativeItems(analysis)[0].source_message_index = true; } },
+  { name: "unsafe raw index", change: analysis => { nativeItems(analysis)[0].source_message_index = 9007199254740992; } },
+  { name: "duplicate raw index", change: analysis => { nativeItems(analysis)[1].source_message_index = 7; } },
+  { name: "string workout index", change: analysis => { nativeItems(analysis)[0].workout_step_index = "3"; } },
+  { name: "null bound raw index", change: analysis => { nativeItems(analysis)[0].source_message_index = null; } },
+  { name: "null bound workout index", change: analysis => { nativeItems(analysis)[0].workout_step_index = null; } },
+  { name: "missing planned step", change: analysis => { nativeStructure(analysis).planned_steps = []; } },
+  { name: "duplicate planned step", change: analysis => {
+    const planned = nativeStructure(analysis).planned_steps; planned.push({ ...planned[0] });
+  } },
+  { name: "missing executed lap", change: analysis => { nativeStructure(analysis).executed_laps.shift(); } },
+  { name: "duplicate executed lap", change: analysis => {
+    const executed = nativeStructure(analysis).executed_laps; executed.push({ ...executed[0] });
+  } },
+  { name: "different executed workout index", change: analysis => { nativeStructure(analysis).executed_laps[0].workout_step_index = 4; } },
+  { name: "different executed start", change: analysis => { nativeStructure(analysis).executed_laps[0].start_time = "2026-01-01T00:00:01Z"; } },
+  { name: "different executed distance", change: analysis => { nativeStructure(analysis).executed_laps[0].distance_m = 401; } },
+  { name: "bound item with failure reason", change: analysis => { nativeItems(analysis)[0].reason = "executed_lap_mismatch"; } },
+  { name: "all-bound partial status", change: analysis => {
+    Object.assign(nativeBlock(analysis), { status: "partial", reason: "some_laps_unbound" });
+  } },
+  { name: "available with failure reason", change: analysis => { nativeBlock(analysis).reason = "some_laps_unbound"; } },
+  { name: "unbound item with claimed workout index", unbound: true, change: analysis => { nativeItems(analysis)[0].workout_step_index = 3; } },
+  { name: "unbound item without reason", unbound: true, change: analysis => { nativeItems(analysis)[0].reason = null; } },
+  { name: "unverified identity with claimed raw index", unbound: true, change: analysis => { nativeItems(analysis)[0].reason = "lap_identity_unverified"; } },
+  { name: "historical engine with native metadata", change: analysis => { analysis.analyzer_version = "1.7.0"; } },
+];
+
 for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  for (const fault of nativeReferenceFaults) {
+    it(`Coach 1.8 strict native references: rejects ${fault.name} via ${protocol}`, async () => {
+      // Start from an already accepted real producer output. Only the outer
+      // stored canonical object is corrupted; no internal validator is mocked.
+      const fixture = fault.unbound ? native18.unbound : native18.complete;
+      const analysis = structuredClone(fixture) as NativeJson;
+      fault.change(analysis);
+      loadNativeForContract(analysis);
+      const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+      const output = await call("coach_input", protocol);
+      expect(output.available).toBe(false);
+      expect(output).not.toHaveProperty("analysis");
+      expect(output.message).toContain("current coach input could not be verified");
+      expect(outputSchemas.coach_input.parse(output)).toEqual(output);
+      expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
+      expect(operations).toEqual(["HEAD summary/activities.csv", "GET summary/activities.csv",
+        "GET activities/2026/42/coach-input/v1/latest-ready.json",
+        `GET activities/2026/42/coach-input/v1/canonical/${fixture.analysis_id}.json`]);
+    });
+  }
+  for (const name of ["sparse", "unbound"] as const) {
+    it(`Coach 1.8 native sparse/unbound: reads actual ${name} producer output via ${protocol}`, async () => {
+      const fixture = native18[name];
+      loadNativeForContract(fixture);
+      const before = [...rows].map(([key, body]) => [key, Array.from(body)]);
+      const output = await call("coach_input", protocol);
+      expect(output.available).toBe(true);
+      expect(output.analysis).toEqual(fixture);
+      expect(output.analysis.analyzer_version).toBe("1.8.0");
+      const block = output.analysis.native_lap_workout_binding;
+      expect(block).toMatchObject({
+        schema_version: 1, method: "fit_lap_wkt_step_index",
+        measurement_source: "recorded_running_metrics.laps", activity_id: "42",
+        source_fit_sha256: "a".repeat(64),
+      });
+      if (name === "sparse") {
+        expect(block.status).toBe("available"); expect(block.reason).toBeNull();
+        expect(block.items).toEqual([
+          { lap: 1, source_message_index: 7, status: "bound", reason: null, workout_step_index: 3 },
+          { lap: 2, source_message_index: 9, status: "bound", reason: null, workout_step_index: 3 },
+        ]);
+        const laps = output.analysis.recorded_running_metrics.laps.items;
+        expect(laps[0].distance_m).toBeNull();
+        expect(laps[0].average_power).toEqual({ status: "missing", value: null, unit: "W", source_field: "avg_power" });
+        expect(laps[0].average_step_length).toEqual({ status: "invalid", value: null, unit: "mm", source_field: "avg_step_length" });
+        expect(laps[1].average_power).toEqual({ status: "available", value: 0, unit: "W", source_field: "avg_power" });
+        expect(laps.map((lap: { average_ground_contact_balance: { value: number } }) => lap.average_ground_contact_balance.value))
+          .toEqual([101, 103]);
+      } else {
+        expect(block.status).toBe("unavailable"); expect(block.reason).toBe("no_verified_lap_workout_links");
+        expect(block.items).toEqual([
+          { lap: 1, source_message_index: 7, status: "unbound", reason: "workout_step_unverified", workout_step_index: null },
+          { lap: 2, source_message_index: 9, status: "unbound", reason: "workout_step_unverified", workout_step_index: null },
+        ]);
+        expect(output.analysis.recorded_running_metrics.laps.items.map((lap: { average_power: { value: number } }) => lap.average_power.value))
+          .toEqual([111, 222]);
+      }
+      for (const lap of output.analysis.recorded_running_metrics.laps.items) {
+        expect(lap.average_ground_contact_balance.side_semantics).toBe("unknown");
+        expect(lap.average_ground_contact_balance).not.toHaveProperty("left_percent");
+        expect(lap.average_ground_contact_balance).not.toHaveProperty("right_percent");
+      }
+      const derived = output.analysis.segment_running_metrics;
+      expect(derived).toEqual(fixture.segment_running_metrics);
+      expect(derived.whole_distance_halves.status).toBe("available");
+      expect(derived.main_distance_halves).toMatchObject({
+        status: "unavailable", reason: name === "sparse" ? "main_distance_unverified" : "step_binding_unverified", items: [],
+      });
+      expect(derived.executed_intervals.reason).toBe(derived.main_distance_halves.reason);
+      expect([...rows].map(([key, body]) => [key, Array.from(body)])).toEqual(before);
+      expect(operations).toEqual(["HEAD summary/activities.csv", "GET summary/activities.csv",
+        "GET activities/2026/42/coach-input/v1/latest-ready.json",
+        `GET activities/2026/42/coach-input/v1/canonical/${fixture.analysis_id}.json`]);
+    });
+  }
+  it(`Coach 1.8 native binding tracer: retains genuine1.7 and its clock gate via ${protocol}`, async () => {
+    function loadNative(analysis: Record<string, unknown>) {
+      load(coach17.partial.objects_base64);
+      for (const name of rows.keys()) if (name.includes("/canonical/")) rows.delete(name);
+      const canonical = `activities/2026/42/coach-input/v1/canonical/${analysis.analysis_id}.json`;
+      rows.set(canonical, new TextEncoder().encode(JSON.stringify(analysis)));
+      rows.set("activities/2026/42/coach-input/v1/latest-ready.json", new TextEncoder().encode(JSON.stringify({
+        schema_version: 1, selection_version: 1, analysis_key: canonical, analyzer_version: analysis.analyzer_version,
+      })));
+    }
+    loadNative(native17);
+    const old = await call("coach_input", protocol);
+    expect(old.available).toBe(true);
+    expect(old.analysis).toEqual(native17);
+    expect(old.analysis).not.toHaveProperty("native_lap_workout_binding");
+    expect(operations).toHaveLength(4);
+    clearSummaryCaches(); operations.length = 0;
+    loadNative(native18.complete);
+    const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+    const output = await call("coach_input", protocol);
+    expect(output.available).toBe(true);
+    expect(output.analysis).toEqual(native18.complete);
+    expect(output.analysis.native_lap_workout_binding.items).toEqual([
+      { lap: 1, source_message_index: 7, status: "bound", reason: null, workout_step_index: 3 },
+      { lap: 2, source_message_index: 9, status: "bound", reason: null, workout_step_index: 3 },
+    ]);
+    expect(output.analysis.segment_running_metrics).toEqual(native17.segment_running_metrics);
+    expect(output.analysis.segment_running_metrics.executed_intervals.reason).toBe("clock_basis_unverified");
+    expect(outputSchemas.coach_input.parse(output)).toEqual(output);
+    expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
+    expect(operations).toEqual(["HEAD summary/activities.csv", "GET summary/activities.csv",
+      "GET activities/2026/42/coach-input/v1/latest-ready.json",
+      `GET activities/2026/42/coach-input/v1/canonical/${native18.complete.analysis_id}.json`]);
+  });
   it(`Coach 1.7 partial coverage tracer: retains genuine1.6 and exposes actual schema2 boundary exclusion via ${protocol}`, async () => {
     // Exact before-edit1.6 canonical bytes; never generated by the new producer.
     load(coach17.genuine16.objects_base64);
@@ -224,7 +389,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
     const output = await call("coach_input", protocol);
     expect(output.available).toBe(true);
-    expect(output.analysis.analyzer_version).toBe("1.7.0");
+    expect(output.analysis.analyzer_version).toBe("1.8.0");
     expect(output.analysis).toEqual(produced16.complete.analysis);
     const block = output.analysis.segment_running_metrics;
     // Independent worked values from the accepted FIT tracer, not a second implementation.
@@ -330,7 +495,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       const output = await call("coach_input", protocol);
       expect(output.available).toBe(true);
       expect(output.analysis).toEqual(expected);
-      expect(output.analysis).toMatchObject({ analyzer_version: "1.7.0", activity_id: "42", analysis_id: fixture.analysis_id,
+      expect(output.analysis).toMatchObject({ analyzer_version: "1.8.0", activity_id: "42", analysis_id: fixture.analysis_id,
         workout_structure: { has_structured_workout: false } });
       const block = output.analysis.segment_running_metrics;
       expect(block.main_distance_halves.distance_basis).toBe("tcx_endurance_distance_continuous_main");
@@ -476,7 +641,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       kilometer_splits: { status: "available", method: "fit_record_time_weighted_mean",
         interval_policy: "left_sample_hold_distance_progressing_max_30s", distance_allocation: "linear_between_record_distances" },
       distance_halves: { status: "available", method: "fit_record_time_weighted_mean" } });
-    expect(coach.analysis.analyzer_version).toBe("1.7.0");
+    expect(coach.analysis.analyzer_version).toBe("1.8.0");
     expect(detail.recorded_running_metrics).toEqual(coach.analysis.recorded_running_metrics);
     expect(outputSchemas.endurance_session.parse(detail)).toEqual(detail);
     expect(outputSchemas.coach_input.parse(coach)).toEqual(coach);
@@ -620,7 +785,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
     const output = await call("coach_input", protocol);
     expect(output.available).toBe(true);
-    expect(output.analysis).toMatchObject({ analyzer_version: "1.7.0", activity_id: "42",
+    expect(output.analysis).toMatchObject({ analyzer_version: "1.8.0", activity_id: "42",
       analysis_id: produced.source_error.analysis_id, summary: { distance_m: 2000 },
       recorded_running_metrics: { schema_version: 2, association: "decode_errors", source_fit_sha256: null,
         average_power: { status: "unavailable", value: null },

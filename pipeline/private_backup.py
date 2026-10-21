@@ -970,6 +970,81 @@ def _stored_context_shape(value, analysis):
         raise BackupError("invalid_stored_context_clock")
 
 
+def _native_lap_binding_shape(value):
+    from .recorded_running_metrics import _utc
+
+    def index(item):
+        return type(item) is int and 0 <= item <= 2**53 - 1
+
+    def indexed(rows, field):
+        result = {}
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict) and index(row.get(field)):
+                result.setdefault(row[field], []).append(row)
+        return result
+
+    block = value.get("native_lap_workout_binding")
+    _exact(block, {"schema_version", "method", "measurement_source", "activity_id",
+                   "source_fit_sha256", "status", "reason", "items"})
+    recorded = value["recorded_running_metrics"]
+    if (type(block["schema_version"]) is not int or block["schema_version"] != 1
+            or block["method"] != "fit_lap_wkt_step_index"
+            or block["measurement_source"] != "recorded_running_metrics.laps"
+            or block["activity_id"] != value["activity_id"]):
+        raise BackupError("invalid_native_lap_binding")
+    digest = recorded.get("source_fit_sha256")
+    source_ready = (recorded["association"] == "matched" and isinstance(digest, str)
+                    and re.fullmatch(r"[a-f0-9]{64}", digest))
+    if block["source_fit_sha256"] != (digest if source_ready else None):
+        raise BackupError("invalid_native_lap_binding")
+    if not source_ready or recorded["laps"]["status"] != "available":
+        reason = "source_unavailable" if not source_ready else "recorded_laps_unavailable"
+        if block["status"] != "unavailable" or block["reason"] != reason or block["items"] != []:
+            raise BackupError("invalid_native_lap_binding")
+        return
+    items, laps = block["items"], recorded["laps"]["items"]
+    if not isinstance(items, list) or len(items) != len(laps) or not laps:
+        raise BackupError("invalid_native_lap_binding")
+    structure = value["workout_structure"]
+    planned = indexed(structure.get("planned_steps"), "step_index")
+    executed = indexed(structure.get("executed_laps"), "lap")
+    seen = set()
+    bound = 0
+    for item, lap in zip(items, laps, strict=True):
+        _exact(item, {"lap", "source_message_index", "status", "reason", "workout_step_index"})
+        if not index(item["lap"]) or item["lap"] != lap["lap"]:
+            raise BackupError("invalid_native_lap_binding")
+        source_index = item["source_message_index"]
+        if source_index is not None:
+            if not index(source_index) or source_index in seen:
+                raise BackupError("invalid_native_lap_binding")
+            seen.add(source_index)
+        if item["status"] == "unbound":
+            if (item["workout_step_index"] is not None
+                    or item["reason"] not in ("lap_identity_unverified", "workout_step_unverified", "executed_lap_mismatch")
+                    or (item["reason"] == "lap_identity_unverified") != (source_index is None)):
+                raise BackupError("invalid_native_lap_binding")
+            continue
+        step = item["workout_step_index"]
+        matches = executed.get(lap["lap"], [])
+        if (item["status"] != "bound" or item["reason"] is not None or source_index is None
+                or not index(step) or len(planned.get(step, [])) != 1 or len(matches) != 1):
+            raise BackupError("invalid_native_lap_binding")
+        execution = matches[0]
+        distance = execution.get("distance_m")
+        if (not index(execution.get("workout_step_index")) or execution["workout_step_index"] != step
+                or _utc(execution.get("start_time")) != lap["start_time_utc"]
+                or distance is not None and (type(distance) not in (int, float) or not math.isfinite(distance) or distance < 0)
+                or distance != lap["distance_m"]):
+            raise BackupError("invalid_native_lap_binding")
+        bound += 1
+    status, reason = (("available", None) if bound == len(items) else
+                      ("partial", "some_laps_unbound") if bound else
+                      ("unavailable", "no_verified_lap_workout_links"))
+    if block["status"] != status or block["reason"] != reason:
+        raise BackupError("invalid_native_lap_binding")
+
+
 def _validate_value(key: str, value: Any):
     kind, parts = key_info(key)
     if kind == "context" and isinstance(value, dict) and type(value.get("schema_version")) is int and value["schema_version"] == 2:
@@ -982,6 +1057,11 @@ def _validate_value(key: str, value: Any):
         if (value["date_source"] not in ("garmin_local", "utc_fallback")
                 or not valid_declaration(value["gct_balance_side"])):
             raise BackupError("invalid_gct_declaration")
+        return
+    if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") == "1.8.0":
+        legacy = {name: item for name, item in value.items() if name != "native_lap_workout_binding"}
+        _validate_value(key, {**legacy, "analyzer_version": "1.7.0"})
+        _native_lap_binding_shape(value)
         return
     if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") == "1.7.0":
         from .coach_segment_metrics import validate_partial_segment_metrics

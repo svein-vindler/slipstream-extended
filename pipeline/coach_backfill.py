@@ -13,6 +13,7 @@ from typing import Any
 from .coach import (
     ANALYZER_VERSION,
     GCT_SIDES_ANALYZER_VERSION,
+    NATIVE_LAP_ANALYZER_VERSION,
     PARTIAL_SEGMENT_ANALYZER_VERSION,
     SEGMENT_ANALYZER_VERSION,
     STORED_CONTEXT_ANALYZER_VERSION,
@@ -34,6 +35,7 @@ LEGACY_ANALYZER_VERSION = "1.0.0"
 SUPPORTED_ANALYZER_VERSIONS = (
     LEGACY_ANALYZER_VERSION, "1.0.1", "1.1.0", ANALYZER_VERSION, STORED_CONTEXT_ANALYZER_VERSION,
     TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION, PARTIAL_SEGMENT_ANALYZER_VERSION,
+    NATIVE_LAP_ANALYZER_VERSION,
 )
 BULK_REUSE_VERSION = 1
 
@@ -251,7 +253,8 @@ def _single_input_signature(
         "revisions": {key: revisions[key] for key in selected},
     }
     if ((analyzer_version or ANALYZER_VERSION) == STORED_CONTEXT_ANALYZER_VERSION
-            or analyzer_version in (TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION, PARTIAL_SEGMENT_ANALYZER_VERSION)
+            or analyzer_version in (TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
+                                    PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION)
             and input_source_revisions is not None):
         if not valid_source_proof(input_source_revisions, activity["date"]):
             return None
@@ -301,8 +304,11 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
         candidate = _json(store, key)
         engine = candidate.get("analyzer_version")
         stored = pointer.get("input_signature")
-        current_engine = engine in (ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION, PARTIAL_SEGMENT_ANALYZER_VERSION)
-        if engine is None and pointer.get("analyzer_version") in (ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION, PARTIAL_SEGMENT_ANALYZER_VERSION):
+        current_engine = engine in (ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
+                                    PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION)
+        if engine is None and pointer.get("analyzer_version") in (
+                ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
+                PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION):
             return "conflict", None
         marked = type(pointer.get("selection_version")) is int and pointer["selection_version"] == 1
         unmarked = "selection_version" not in pointer
@@ -314,6 +320,7 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
                 or type(candidate.get("schema_version")) is not int or candidate["schema_version"] != 1
                 or candidate.get("analysis_id") != key[len(canonical):-5]
                 or str(candidate.get("activity_id")) != activity["id"]
+                or engine != NATIVE_LAP_ANALYZER_VERSION and "native_lap_workout_binding" in candidate
                 ):
             return "unknown", None
         # Validate the C3 content identity, restoring its builder seed before hashing.
@@ -327,7 +334,8 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
         }
         context_sources = pointer.get("input_source_revisions")
         has_context = (engine == STORED_CONTEXT_ANALYZER_VERSION
-                       or engine in (TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION, PARTIAL_SEGMENT_ANALYZER_VERSION)
+                       or engine in (TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
+                                     PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION)
                        and "stored_context_snapshot" in candidate)
         if has_context:
             snapshot = candidate.get("stored_context_snapshot")
@@ -335,25 +343,33 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
                     or not valid_source_proof(context_sources, activity["date"])):
                 return "unknown", None
             seed["stored_context_snapshot"] = snapshot
-        elif engine in (TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION, PARTIAL_SEGMENT_ANALYZER_VERSION) and context_sources is not None:
+        elif engine in (TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
+                        PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION) and context_sources is not None:
             return "unknown", None
-        if engine in (TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION, PARTIAL_SEGMENT_ANALYZER_VERSION):
+        if engine in (TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
+                      PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION):
             if pointer.get("analyzer_version") != engine or not isinstance(candidate.get("training_effect"), dict):
                 return "unknown", None
             seed["training_effect"] = candidate["training_effect"]
-        if engine in (GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION, PARTIAL_SEGMENT_ANALYZER_VERSION):
+        if engine in (GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
+                      PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION):
             if not isinstance(candidate.get("ground_contact_sides"), dict):
                 return "unknown", None
             seed["ground_contact_sides"] = candidate["ground_contact_sides"]
-        if engine in (SEGMENT_ANALYZER_VERSION, PARTIAL_SEGMENT_ANALYZER_VERSION):
+        if engine in (SEGMENT_ANALYZER_VERSION, PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION):
             if not isinstance(candidate.get("segment_running_metrics"), dict):
                 return "unknown", None
             seed["segment_running_metrics"] = candidate["segment_running_metrics"]
+        if engine == NATIVE_LAP_ANALYZER_VERSION:
+            if not isinstance(candidate.get("native_lap_workout_binding"), dict):
+                return "unknown", None
+            seed["native_lap_workout_binding"] = candidate["native_lap_workout_binding"]
         seed_id = sha256(json.dumps(seed, sort_keys=True, separators=(",", ":")).encode())[:24]
         checked = {**candidate, "summary": dict(candidate["summary"]), "analysis_id": seed_id}
         _identify_coach_input(checked)
         if checked["analysis_id"] != candidate["analysis_id"]:
-            if engine in (TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION, PARTIAL_SEGMENT_ANALYZER_VERSION) and has_context:
+            if engine in (TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
+                          PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION) and has_context:
                 # As with1.3, damaged retrospective snapshots are unknown. They
                 # cannot authorize repair, historical regeneration or writes.
                 return "unknown", None
@@ -570,7 +586,7 @@ def run_one(*, activity: dict[str, Any], store: R2Store, force: bool = False) ->
     # moving time. Repeated calls with the same metadata reuse that successful result.
     signature = _single_input_signature(
         activity, profile, required, revisions, context_key,
-        analyzer_version=PARTIAL_SEGMENT_ANALYZER_VERSION,
+        analyzer_version=NATIVE_LAP_ANALYZER_VERSION,
         input_source_revisions=context_sources,
     )
     previous_key = previous_pointer.get("analysis_key")
