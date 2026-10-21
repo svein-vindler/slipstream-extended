@@ -1,8 +1,56 @@
 # Coach Input identity and immutable publication
 
+## Explicit verified in-frame partial coverage (1.7.0)
+
+New generation uses `segment_running_metrics` schema 2. It keeps the exact
+associated session StartTime + TotalElapsedTime frame and validates every
+original record's timestamp/order and finite nonnegative monotonic distance.
+Only one otherwise-valid last record strictly after that frame is permitted.
+There is no seconds tolerance, sorting, repair, deduplication, time extension
+or distance rescaling. Leading, interior, multiple or malformed outside
+records still leave the groups unavailable.
+
+Both original endpoints must be in frame for a pair to contribute values.
+The complete terminal crossing pair is excluded from means; its in-frame
+progressing portion is reported as `boundary_excluded_seconds` in each
+affected cell/field. Source timestamps, distances and records stay unchanged.
+The block's `source_window` reports `unverified`, `verified_in_frame` or
+`verified_terminal_exclusion`, original record count (null when unverified),
+and excluded record/pair counts (zero or one). It exposes no raw record array.
+Positive relevant boundary time prevents complete coverage even when all
+remaining eligible samples have values. An unrelated early verified interval
+can remain complete. Coverage describes usable progressing samples, not full
+elapsed recording or complete device delivery.
+
+Independent TCX nominal partition/alignment and verified FIT lap boundaries
+remain required. An outside endpoint cannot establish a lap boundary through
+interpolation. Original gaps over 30 seconds, stationary intervals, missing
+versus invalid versus zero, source units, left sample hold and unique original
+pair counts retain their policies. Missing power or a missing verified plan is
+not inferred. Main halves include recoveries; continuous main mirrors whole.
+Schema 2 computes its six means from usable pairs and never copies the older
+five whole-half means to fill holes. Raw balance still has unknown side
+semantics, including finite values such as 101. Old recorded measurements,
+sections, halves and declared-side projections remain separate and unchanged.
+
+The new engine/shape participates in input and content identities. Bulk,
+targeted, checkpoint/retry, fresh source proofs and immutable publication share
+their existing contract. Genuine 1.0–1.6 canonical objects retain their original
+labels and bytes; engine advancement alone never queues history. No migration,
+source acquisition, new inventory, service, limit or schedule is introduced.
+The ordered record/piece sweep avoids a records-times-all-laps scan; existing
+per-boundary binary searches remain. Additional output and validation work is
+not a live CPU, cost or total latency guarantee.
+
+Strict backup and corresponding version-aware readers must accept genuine
+older shapes and reject forged source/window/field/coverage metadata, including
+joint half coverage beyond the declared session/main span. Once 1.7 is stored,
+rollback must retain 1.7 reader/backup compatibility or use a forward fix.
+Never remove history or replace canonical bytes to roll back this feature.
+
 ## Executed intervals and distance-half statistics (1.6.0)
 
-New generation adds `segment_running_metrics` schema 1. Its six metrics are
+Engine 1.6 introduced `segment_running_metrics` schema 1. Its six metrics are
 power, step length, ground contact time, vertical oscillation, vertical ratio
 and raw ground contact balance. The three groups are maximal contiguous
 actually executed active FIT laps with the same verified workout-step identity,

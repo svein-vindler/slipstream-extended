@@ -18,8 +18,8 @@ def test_real_source_segments_keep_main_recovery_and_raw_scalar_policy(tmp_path,
     coach_backfill.run_one(activity=SEGMENT_ACTIVITY, store=store)
     _, analysis = selected(store)
     block = analysis["segment_running_metrics"]
-    assert analysis["analyzer_version"] == "1.6.0"
-    assert block["schema_version"] == 1 and block["activity_id"] == "42"
+    assert analysis["analyzer_version"] == "1.7.0"
+    assert block["schema_version"] == 2 and block["activity_id"] == "42"
     assert block["source_fit_sha256"] == analysis["source"]["fit_sha256"]
     assert block["source_tcx_sha256"] == analysis["source"]["tcx_sha256"]
     intervals = block["executed_intervals"]["items"]
@@ -260,6 +260,7 @@ def test_original_over_30_second_gap_is_excluded_before_half_clipping(tmp_path):
     metric = block["whole_distance_halves"]["items"][0]["average_ground_contact_balance"]
     assert metric["value"] is None and metric["status"] == "missing"
     assert metric["coverage"] == {"valid_seconds": 0, "eligible_seconds": 0, "excluded_gap_seconds": 30,
+                                  "boundary_excluded_seconds": 0,
                                   "contributing_intervals": 0, "status": "none"}
     assert block["main_distance_halves"]["reason"] == "main_distance_alignment_unverified"
 
@@ -340,7 +341,7 @@ def test_genuine15_history_stays_readable_and_is_not_bulk_queued_by_engine_only(
     store.reset_counts()
     coach_backfill.run_one(activity=ACTIVITY, store=store)
     new_pointer, new = selected(store)
-    assert new["analyzer_version"] == "1.6.0"
+    assert new["analyzer_version"] == "1.7.0"
     assert new_pointer["analysis_key"] != old_pointer["analysis_key"]
     assert all(new[key] == value for key, value in old.items() if key not in ("analysis_id", "analyzer_version"))
     assert all(store.objects[key] == body for key, body in before.items() if "/canonical/" in key
@@ -475,7 +476,7 @@ def test_stationary_original_interval_is_not_counted_or_filled_from_lap_mean(tmp
     assert interval["source_laps"] == [2, 3] and interval["distance_m"] == 500
     assert interval["average_power"]["value"] == 200
     assert interval["average_power"]["coverage"] == {
-        "valid_seconds": 10, "eligible_seconds": 10, "excluded_gap_seconds": 0,
+        "valid_seconds": 10, "eligible_seconds": 10, "excluded_gap_seconds": 0, "boundary_excluded_seconds": 0,
         "contributing_intervals": 1, "status": "complete",
     }
 

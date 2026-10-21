@@ -1,4 +1,4 @@
-/** Validate stored Coach 1.6 statistics; never decode FIT or aggregate samples here. */
+/** Validate stored Coach 1.6/1.7 statistics; never decode FIT or aggregate samples here. */
 import { z } from "zod";
 import { validCalendarDay } from "./lib";
 import { recordedRunningMetricsSchema } from "./recorded-running-metrics";
@@ -92,7 +92,7 @@ function lapClock(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-export function validSegmentRunningMetrics(analysis: Json, recorded: Recorded): boolean {
+function validSchema1Metrics(analysis: Json, recorded: Recorded): boolean {
   const parsed = schema.safeParse(analysis.segment_running_metrics);
   if (!parsed.success) return false;
   const block = parsed.data, source = object(analysis.source), structure = object(analysis.workout_structure);
@@ -150,4 +150,86 @@ export function validSegmentRunningMetrics(analysis: Json, recorded: Recorded): 
     previousEnd = last; previousLap = row.source_laps[row.source_laps.length - 1];
   }
   return true;
+}
+
+const recordCount = z.number().int().min(2).max(Number.MAX_SAFE_INTEGER);
+const sourceWindow = z.discriminatedUnion("disposition", [
+  z.strictObject({ disposition: z.literal("unverified"), original_record_count: z.null(),
+    boundary_excluded_record_count: z.literal(0), boundary_excluded_pair_count: z.literal(0) }),
+  z.strictObject({ disposition: z.literal("verified_in_frame"), original_record_count: recordCount,
+    boundary_excluded_record_count: z.literal(0), boundary_excluded_pair_count: z.literal(0) }),
+  z.strictObject({ disposition: z.literal("verified_terminal_exclusion"), original_record_count: recordCount,
+    boundary_excluded_record_count: z.literal(1), boundary_excluded_pair_count: z.literal(1) }),
+]);
+const groupNames = ["executed_intervals", "whole_distance_halves", "main_distance_halves"] as const;
+
+function validSchema2Metrics(analysis: Json, recorded: Recorded): boolean {
+  const block = object(analysis.segment_running_metrics);
+  if (block.schema_version !== 2) return false;
+  const parsedWindow = sourceWindow.safeParse(block.source_window);
+  if (!parsedWindow.success) return false;
+  const window = parsedWindow.data;
+  if (window.disposition !== "unverified" && (block.association !== "matched"
+    || !block.source_fit_sha256 || block.session_start_time_utc === null || block.session_end_time_utc === null)) return false;
+
+  // Strip only the schema2 extension into fresh computed-metric objects. The
+  // unchanged strict schema1 validator still checks every historical guard.
+  const { source_window: _window, ...legacy } = block;
+  legacy.schema_version = 1;
+  for (const name of groupNames) {
+    const group = object(block[name]);
+    if (!Array.isArray(group.items) || (window.disposition === "unverified" && group.status === "available")) return false;
+    const rows: Json[] = [];
+    for (const item of group.items) {
+      const row = object(item), copy = { ...row };
+      let commonBoundary: number | undefined;
+      for (const field of metricNames) {
+        const metric = object(row[field]), coverage = object(metric.coverage);
+        const { boundary_excluded_seconds: boundary, ...oldCoverage } = coverage;
+        if (!finite(boundary) || boundary < 0
+          || (window.disposition !== "verified_terminal_exclusion" && boundary !== 0)
+          || (boundary !== 0 && coverage.status === "complete")
+          || window.original_record_count === null || !finite(coverage.contributing_intervals)
+          || !Number.isInteger(coverage.contributing_intervals)
+          || coverage.contributing_intervals > window.original_record_count - 1 - window.boundary_excluded_pair_count
+          || (commonBoundary !== undefined && boundary !== commonBoundary)) return false;
+        commonBoundary = boundary;
+        copy[field] = { ...metric, coverage: oldCoverage };
+      }
+      rows.push(copy);
+    }
+    legacy[name] = { ...group, items: rows };
+  }
+  if (!validSchema1Metrics({ ...analysis, segment_running_metrics: legacy }, recorded)) return false;
+  if (window.disposition === "unverified") return true;
+
+  const sessionSpan = (Date.parse(String(block.session_end_time_utc)) - Date.parse(String(block.session_start_time_utc))) / 1000;
+  for (const name of groupNames) {
+    const group = object(block[name]);
+    if (group.status !== "available" || !Array.isArray(group.items)) continue;
+    let span = sessionSpan;
+    if (name === "main_distance_halves" && group.distance_basis === "fit_executed_main_distance") {
+      const main = Array.isArray(analysis.sections) ? analysis.sections.map(object).filter(value => value.section === "main") : [];
+      if (main.length !== 1 || !finite(main[0].elapsed_seconds) || main[0].elapsed_seconds < 0) return false;
+      span = main[0].elapsed_seconds;
+    }
+    let total = 0;
+    for (const item of group.items) {
+      const row = object(item), coverage = object(object(row.average_power).coverage);
+      if (!finite(coverage.eligible_seconds) || !finite(coverage.excluded_gap_seconds)
+        || !finite(coverage.boundary_excluded_seconds)) return false;
+      const duration = coverage.eligible_seconds + coverage.excluded_gap_seconds + coverage.boundary_excluded_seconds;
+      const limit = name === "executed_intervals"
+        ? (Date.parse(String(row.end_time_utc)) - Date.parse(String(row.start_time_utc))) / 1000 : span;
+      if (duration > limit + 0.001) return false;
+      total += duration;
+    }
+    if (name !== "executed_intervals" && total > span + 0.002) return false;
+  }
+  return true;
+}
+
+export function validSegmentRunningMetrics(analysis: Json, recorded: Recorded): boolean {
+  if (analysis.analyzer_version === "1.6.0") return validSchema1Metrics(analysis, recorded);
+  return analysis.analyzer_version === "1.7.0" && validSchema2Metrics(analysis, recorded);
 }

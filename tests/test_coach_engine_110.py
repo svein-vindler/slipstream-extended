@@ -8,7 +8,7 @@ import pytest
 from test_recorded_running_metrics import ACTIVITY, PROFILE, decoded_source
 
 from pipeline import coach_backfill
-from pipeline.coach import SEGMENT_ANALYZER_VERSION
+from pipeline.coach import PARTIAL_SEGMENT_ANALYZER_VERSION
 from pipeline.granular import gzip_json
 from scripts.benchmark_coach_reuse import CountingStore
 
@@ -55,7 +55,7 @@ def test_101_checkpoint_then_explicit_same_input_110_selection_is_bulk_noop(monk
     target = {"id": "3", "date": "2026-03-05", "name": "Synthetic 3",
               "type": "Run", "moving_seconds": 120.0}
     coach_backfill.run_one(store=store, activity=target)
-    assert selected(store, "3")["analyzer_version"] == SEGMENT_ANALYZER_VERSION
+    assert selected(store, "3")["analyzer_version"] == PARTIAL_SEGMENT_ANALYZER_VERSION
     assert store.objects[coach_backfill.PLAN_KEY] == original[coach_backfill.PLAN_KEY]
     after_targeted = store.objects.copy()
     store.reset_counts()
@@ -135,7 +135,7 @@ def test_saved_mixed_engine_proofs_are_warm_noop_without_rebuilding(monkeypatch)
     assert result["generated_this_run"] == 1 and result["already_current_activities"] == 3
     plan = json.loads(store.objects[coach_backfill.PLAN_KEY])
     assert {proof["analyzer_version"] for proof in plan["bulk_reuse_proofs"].values()} == {
-        "1.0.1", SEGMENT_ANALYZER_VERSION,
+        "1.0.1", PARTIAL_SEGMENT_ANALYZER_VERSION,
     }
     before = store.objects.copy()
     store.reset_counts()
