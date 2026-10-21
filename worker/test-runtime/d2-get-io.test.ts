@@ -126,13 +126,21 @@ it("preserves a late positive owned observation without lease-age cutoff", async
   const reader = new DispatchReader({ ...env, REFRESH_COORDINATOR: namespace }, CONFIG, async paths => (await storage.getR2Json(paths))?.data ?? null,
     () => now, async () => { gets++; entered.resolve(); return response.promise; });
   const pending = reader.observe(operation, "initial", "synthetic-actor"); await entered.promise;
-  await new Promise(resolve => setTimeout(resolve, 2000));
-  now = T0 + 121_000; response.resolve(Response.json(RUN));
+  // Cross the original lease boundary using the clock consumed by the coordinator,
+  // while the actual fetch is still pending; no CI wall-clock sleep is required.
+  now = T0 + 121_000;
+  const held = (await coordinator.dispatchOperation(operation.operation_id))!;
+  expect(held.read_claim).not.toBeNull();
+  expect(held.owner_released_at).toBeNull();
+  expect(held.general_initial_reads_used).toBe(1);
+  const identity = { operation_id: operation.operation_id, owner_key: operation.owner_key, owner_token: operation.owner_token };
+  expect((await coordinator.claimDispatchRead(identity, "initial", "second-actor", now)).acquired).toBe(false);
+  response.resolve(Response.json(RUN));
   const result = await pending;
   expect(result.fresh).toBe(true); expect(result.operation).toMatchObject({ dispatch_state: "verified_active", read_claim: null,
     owner_released_at: null, general_initial_reads_used: 1 });
   expect(gets).toBe(1);
-  task.meta.d2 = { get: gets, post: 0, read_ms: 2000, owner_held: true, ticket_used: 1 };
+  task.meta.d2 = { get: gets, post: 0, clock_advance_ms: 2000, real_wait_ms: 0, owner_held: true, ticket_used: 1 };
 });
 
 it("holds the owned claim until timed-out fetch settles without refund or duplicate admission", async ({ task }) => {
