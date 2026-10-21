@@ -1,5 +1,16 @@
 # Private backup and isolated local recovery
 
+Coach 1.8 backups preserve the native lap/workout-step reference block and the
+original recorded measurements separately. Verification checks ordered lap
+references, safe unique source indices, source identity and unambiguous existing
+plan/execution references. Several laps may refer to the same workout step;
+verification never merges them or invents an interval mean. A legitimate
+unavailable optional binding retains the ordinary analysis. Earlier 1.0–1.7
+objects keep their own strict shapes and bytes; new metadata on those versions
+is rejected. This does not trigger historical regeneration or a backfill, and
+does not relax record-derived interval or distance-half validation. After 1.8
+storage, recovery must keep a compatible reader or use a forward correction.
+
 For a small standalone installation and the four commands, start with
 [Backup quick start](BACKUP_QUICKSTART.md). The root `backup.py` entry point
 uses the same offline CLI and works from any current directory when invoked

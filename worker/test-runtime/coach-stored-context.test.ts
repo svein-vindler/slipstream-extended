@@ -97,7 +97,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
       const output = await call(protocol);
       expect(output.available).toBe(true);
-      expect(output.analysis).toMatchObject({ analysis_id: fixture.analysis_id, analyzer_version: "1.7.0",
+      expect(output.analysis).toMatchObject({ analysis_id: fixture.analysis_id, analyzer_version: "1.8.0",
         summary: { distance_m: 2000 }, recorded_running_metrics: { schema_version: 2, association: "matched" } });
       const context = output.analysis.stored_context_snapshot;
       expect(context).toMatchObject({ reference_time_utc: "2026-10-19T07:00:00.000Z", semantics: "retrospective_pre_activity" });
@@ -214,7 +214,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
   it(`stored context raw-field integrity: genuine snapshot remains readable but nested raw device data fails closed via ${protocol}`, async () => {
     const original = await call(protocol);
     expect(original.available).toBe(true);
-    expect(original.analysis.analyzer_version).toBe("1.7.0");
+    expect(original.analysis.analyzer_version).toBe("1.8.0");
     expect(original.analysis.stored_context_snapshot).toMatchObject({ schema_version: 1,
       reference_time_utc: "2026-10-19T07:00:00.000Z", semantics: "retrospective_pre_activity",
       sleep: { status: "available", metrics: { sleep_seconds: { value: 25200 } } },

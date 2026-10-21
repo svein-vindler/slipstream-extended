@@ -253,8 +253,8 @@ def test_sleep_and_hrv_remain_available_when_readiness_was_not_collected():
     assert context["training_day"]["selection_status"] == "unknown"
     assert context["training_day"]["readiness"]["value"] is None
     assert context["training_day"]["recovery"]["value"] is None
-    assert result["analyzer_version"] == "1.7.0"
-    assert coach()["analyzer_version"] == "1.7.0"
+    assert result["analyzer_version"] == "1.8.0"
+    assert coach()["analyzer_version"] == "1.8.0"
 
 
 def test_retained_field_with_unknown_time_does_not_inherit_the_new_observation_clock():
