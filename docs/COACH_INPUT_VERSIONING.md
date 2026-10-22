@@ -1,5 +1,47 @@
 # Coach Input identity and immutable publication
 
+## Optional read-time presentation
+
+`coach_input` accepts an optional `format` with values `coach`
+and `full`. Omitted format and
+explicit `full` retain the existing full response and analysis contract; unknown
+formats are rejected by the ordinary tool input schema. Older installations
+without this option still accept the existing call without `format`.
+
+Explicit `coach` is the recommended neutral presentation. After the same stored
+analysis has been selected and strictly verified once, the existing
+available/activity/message envelope contains one `presentation` object instead
+of `analysis`. Its presentation version is `1.0.0`, format is `coach_text`, and
+scope is `selected_fields`. It identifies the source analysis ID and analyzer
+version, contains deterministic text, and gives the retrieval hint `format=full`.
+The existing MCP structured-content/text serialization is unchanged. There is
+no complete analysis duplicate inside this excerpt. Absent or unverified data
+retains its existing safe response rather than a fabricated presentation.
+
+The selected content covers identity, summary, profile/references and supplied
+RPE/notes/conditions; recorded Training Effect and eligible frozen context with
+their original availability and clocks; sections; both whole/main first and
+second distance halves with coverage or unavailable reasons; record-derived
+intervals; and chronological native lap rows with all six original measurements.
+Units, source precision, valid zero, missing/invalid states and per-field
+coverage, boundary and gap metadata remain distinct. Verified native step
+references stay on their original lap rows, including repeated references to
+one step; unbound laps remain explicit. Raw aggregate balance keeps unknown side
+semantics, separate from stored activity/FIT-scoped declarations. Complete
+unselected splits and metadata remain accessible through `full`.
+
+This presentation version is independent of the stored analyzer version.
+Genuine older validated analyses keep their own labels and explicit feature
+absence; none is relabelled as 1.8. User/source strings are quoted as data, and
+the text provides recorded facts without training advice. Formatting does not
+mutate stored analyses, content IDs, source bytes, history, selectors or bulk
+eligibility. It adds no storage write, extra source read, provider fetch,
+analysis computation, inferred clock/distance/side, relaxed half/interval guard
+or automatic regeneration/backfill. Existing budgets, authorization and rate
+limits remain in force. Maintainers must align catalog descriptions and
+registered schemas with the actual implemented interface before publishing;
+this documentation change does not generate catalog snapshots.
+
 ## Original native laps with verified workout-step references (1.8.0)
 
 New generation adds `native_lap_workout_binding`, schema 1. Its method is

@@ -347,6 +347,14 @@ Read the newest deterministic coach-input analysis for one running activity. It 
     "activity_id": {
       "pattern": "^(garmin-)?\\d{1,20}$",
       "type": "string"
+    },
+    "format": {
+      "description": "Use coach for a neutral selected-fields presentation; full or omitted preserves the complete analysis.",
+      "enum": [
+        "coach",
+        "full"
+      ],
+      "type": "string"
     }
   },
   "required": [

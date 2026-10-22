@@ -62,14 +62,14 @@ beforeEach(async () => {
     MCP_RATE_LIMITER: { limit: async () => ({ success: true }) } } as Env;
 });
 afterEach(() => { clearSummaryCaches(); vi.restoreAllMocks(); });
-async function call(protocol: string, activityId = "garmin-42") {
+async function call(protocol: string, activityId = "garmin-42", extraArguments: Record<string, unknown> = {}) {
   const ctx = createExecutionContext();
   const response = await worker.fetch(new Request(`https://${hostname}/mcp`, {
     method: "POST", headers: { host: hostname, "content-type": "application/json", accept: "application/json, text/event-stream",
       "cf-access-jwt-assertion": token, "mcp-protocol-version": protocol,
       ...(protocol === "2026-07-28" ? { "mcp-method": "tools/call", "mcp-name": "coach_input" } : {}) },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "coach_input",
-      arguments: { activity_id: activityId }, ...(protocol === "2026-07-28" ? { _meta: {
+      arguments: { activity_id: activityId, ...extraArguments }, ...(protocol === "2026-07-28" ? { _meta: {
         [PROTOCOL_VERSION_META_KEY]: protocol, [CLIENT_CAPABILITIES_META_KEY]: {},
       } } : {}) } }),
   }), testEnv, ctx);
@@ -90,6 +90,34 @@ function expectBoundedReads(identifier = produced.analysis_id, activityId = "42"
 const contextCases = ["sparse", "missing_hrv", "after", "time_unknown", "ambiguous", "morning", "retained", "retained_unknown",
   "source_error", "garmin_residual", "partial_local", "zero", "invalid_measurement"] as const;
 for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  for (const mode of ["zero", "retained", "after"] as const) {
+    it(`Coach presentation frozen context: ${mode} keeps temporal status and observed values via ${protocol}`, async () => {
+      const fixture = produced.cases[mode];
+      load(fixture.objects_base64);
+      const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+      const output = await call(protocol, "garmin-42", { format: "coach" });
+      expect(output.available).toBe(true);
+      expect(output).not.toHaveProperty("analysis");
+      const text = output.presentation.text;
+      const line = text.split("\n").find((value: string) => value.startsWith("Stored context: "));
+      expect(line).toBeDefined();
+      const snapshot = JSON.parse(line!.slice("Stored context: ".length));
+      expect(snapshot).toMatchObject({ reference_time_utc: "2026-10-19T07:00:00.000Z", semantics: "retrospective_pre_activity" });
+      if (mode === "zero") {
+        expect(snapshot.sleep.metrics.sleep_score).toMatchObject({ value: 0, status: "available" });
+        expect(snapshot.hrv.metrics.last_night_avg_ms).toMatchObject({ value: 0, status: "available" });
+        expect(snapshot.training_day.recovery).toMatchObject({ value: 0, status: "available" });
+      } else if (mode === "retained") {
+        expect(snapshot.training_day).toMatchObject({ readiness: { retained_previous: true, source_checked_at: "2026-10-19T08:00:00Z" },
+          last_attempt: { status: "auth_required", attempted_at: "2026-10-19T09:00:00Z" } });
+      } else {
+        expect(snapshot.sleep.status).toBe("after_activity");
+        expect(snapshot.training_day).toMatchObject({ temporal_status: "after_activity", readiness: { value: null, status: "unavailable" } });
+      }
+      expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
+      expectBoundedReads(fixture.analysis_id);
+    });
+  }
   for (const mode of contextCases) {
     it(`stored context producer matrix: ${mode} preserves the genuine workout and source semantics via ${protocol}`, async () => {
       const fixture = produced.cases[mode];

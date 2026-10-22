@@ -67,6 +67,35 @@ steps and the laps actually performed are separate. If no Garmin workout or
 explicit correction exists, the first version treats the continuous activity as
 one main section; it does not guess intervals from pace or heart rate.
 
+### Stored Coach Input views
+
+Check the installed tool's input schema for the optional `format` argument.
+Older installations still accept the existing `coach_input` call without it.
+
+Once supported, explicitly request `format="coach"` for the recommended neutral
+coach presentation of an already stored activity. Omitting `format`, or choosing
+`format="full"`, keeps the complete existing JSON response. The coach view is a
+selected excerpt with a source analysis ID/version and a `format=full` retrieval
+hint; it does not include a second copy of the complete analysis.
+
+Example request for an installation supporting the option:
+
+> Using Slipstream, call `coach_input` for activity garmin-123 with
+> `format="coach"`. Show the neutral stored-data presentation, including missing
+> or unavailable values and their reasons. Do not add training advice or start a
+> sync or regeneration. If I need unselected splits or complete metadata, request
+> the same activity with `format="full"`.
+
+The excerpt keeps whole-distance and main-distance first/second halves, or the
+original reasons they are unavailable, separate from record-derived intervals.
+Native lap rows retain all six original measurements, units and missing states;
+verified workout-step links accompany those rows where available. Several laps
+can refer to one step and remain separate, without an invented combined mean.
+Unbound laps retain their measurements and lack of a verified step. Missing is
+not zero, aggregate contact balance keeps unknown sides, and explicit stored side
+declarations remain separate. Frozen context keeps its original time and
+availability metadata; it is not a new check of current readiness.
+
 After a new workout, request the targeted import rather than waiting for the
 nightly detailed-file job:
 
