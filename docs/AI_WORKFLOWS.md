@@ -138,6 +138,28 @@ For **an already stored workout**, use this reading variant:
 {"tool":"list_activities","arguments":{"start_date":"2026-09-20","end_date":"2026-09-20","limit":20,"sort":"date_desc"}}
 ```
 
+### Optional stored Coach Input presentation
+
+When supported by the installed tool, explicitly choose `format="coach"` for
+the recommended neutral selected-fields excerpt. Its `presentation` object
+identifies the source analysis and analyzer version, has presentation version
+1.0.0, and provides the full-data hint `format=full`; it omits `analysis`.
+This is a selected excerpt, not every stored field. Omitted format and explicit
+`format="full"` preserve the complete existing JSON response. Check the installed
+tool schema before using the optional argument on an older installation.
+
+These are alternative stored reads for the same synthetic activity, not a
+sequence requiring three calls. Choose one; none authorizes sync, regeneration
+or a context/profile write. Unknown format values are rejected.
+
+```json
+[
+  {"tool":"coach_input","arguments":{"activity_id":"garmin-1001","format":"coach"}},
+  {"tool":"coach_input","arguments":{"activity_id":"garmin-1001","format":"full"}},
+  {"tool":"coach_input","arguments":{"activity_id":"garmin-1001"}}
+]
+```
+
 ## 3. Last night
 
 > Using Slipstream, use `sync_latest_night` to fetch sleep and associated HRV for my last night, waking on

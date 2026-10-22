@@ -1,5 +1,6 @@
 import { COACH_PROFILE_CAPACITY } from "./coach-profile-capacity";
 import { readCurrentCoachInput } from "./coach-selection";
+import { coachPresentation } from "./coach-presentation";
 import { activityCalendarYears, resolveActivityClock } from "./activity-clock";
 import { activityContextSchema, gctSideInput } from "./gct-sides";
 import { ApplicationToolError, applicationToolResult } from "./application-errors";
@@ -565,6 +566,8 @@ export class ActivityCoachTools {
       description: "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. Analyzer 1.1.0 includes five optional recorded FIT running measurements. Analyzer 1.2.0 adds raw ground-contact balance with unknown side semantics, recorded lap measurements and producer-computed distance-split/half measurements with source units, identity, clocks and coverage. Analyzer 1.4.0 adds neutral recorded aerobic/anaerobic Training Effect, eligible frozen stored health context, and explicit coverage/nulls for incomplete structured lap totals. Analyzer 1.5.0 adds activity/FIT-scoped declared ground-contact sides and a calculated complement for the session and actual laps; raw values and historical analyses remain unchanged. Analyzer 1.6.0 adds stored time-weighted measurements for executed active intervals and whole/main distance halves, with source identity, clock basis and coverage; aggregate contact balance remains a raw scalar with unknown side semantics. Analyzer 1.7.0/schema 2 adds explicit verified in-frame partial coverage: one otherwise-valid terminal record may be excluded, with source-window counts and per-field boundary-excluded time. Relevant excluded boundary time is never complete; original clocks, strict lap/distance guards and genuine 1.0-1.6 histories remain unchanged. Analyzer 1.8.0 adds verified native FIT-lap references to explicit workout steps, using the existing recorded lap measurements without duplication. Several laps may reference one step; native laps are separate from record-computed intervals and do not relax half-distance or clock guards. Missing measurements remain distinct from zero, and historical analyses are not automatically regenerated. No new FIT fetch or segment computation is performed here.",
       inputSchema: z.object({
         activity_id: z.string().regex(/^(garmin-)?\d{1,20}$/),
+        format: z.enum(["coach", "full"]).optional()
+          .describe("Use coach for a neutral selected-fields presentation; full or omitted preserves the complete analysis."),
       }),
       outputSchema: outputSchemas.coach_input,
       annotations: { readOnlyHint: true, destructiveHint: false,
@@ -595,7 +598,9 @@ export class ActivityCoachTools {
             : "The current coach input could not be verified. Retry this read later; if it persists, ask the maintainer to check stored analysis compatibility." });
       }
       return this.text({ available: true, activity: toSummary(activity),
-        analysis: selection.analysis, message: activity.localDate ? "Coach input is available."
+        ...(args.format === "coach" ? { presentation: coachPresentation(selection.analysis) }
+          : { analysis: selection.analysis }),
+        message: activity.localDate ? "Coach input is available."
           : "Coach input is available. The indexed date uses a UTC fallback; its historical local-calendar association is unconfirmed." });
     });
 

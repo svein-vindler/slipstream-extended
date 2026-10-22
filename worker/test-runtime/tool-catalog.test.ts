@@ -149,6 +149,35 @@ it("advertises optional strict v1-or-v2 running fields without changing the stor
 
 const approvedStatsDescription = "Totals (distance, time, elevation, calories) require a valid recorded value for every matched activity; a missing or invalid field makes that total null. Recorded zero stays zero. Empty results have activities=0 and zero totals. Average HR uses known values. Optionally group_by sport/month/year.";
 
+const approvedCoachFormatDescription = "Use coach for a neutral selected-fields presentation; full or omitted preserves the complete analysis.";
+
+function expectCoachPresentationContract(tool: ToolContract) {
+  // First actual presentation slice: registration only, not full formatter coverage.
+  expect(tool.description).toBe(approvedCoachDescription);
+  const inputs = tool.inputSchema.properties as Record<string, unknown>;
+  expect(inputs.format).toEqual({ type: "string", enum: ["coach", "full"], description: approvedCoachFormatDescription });
+  expect(tool.inputSchema.required ?? []).not.toContain("format");
+  const validateInput = validator.getValidator(tool.inputSchema);
+  for (const args of [{ activity_id: "garmin-1001" }, { activity_id: "garmin-1001", format: "full" },
+    { activity_id: "garmin-1001", format: "coach" }]) expect(validateInput(args).valid).toBe(true);
+  expect(validateInput({ activity_id: "garmin-1001", format: "summary" }).valid).toBe(false);
+  const schema = tool.outputSchema!;
+  expect(schema.required ?? []).not.toContain("presentation");
+  const properties = schema.properties as Record<string, Record<string, unknown>>;
+  expect(properties.analysis).toBeDefined();
+  const presentation = properties.presentation;
+  const fields = ["version", "format", "source_analysis_id", "source_analyzer_version", "scope", "text", "full_data_hint"];
+  expect(presentation.type).toBe("object");
+  expect(Object.keys(presentation.properties as object).sort()).toEqual([...fields].sort());
+  expect(presentation.required).toHaveLength(fields.length);
+  expect(presentation.required).toEqual(expect.arrayContaining(fields));
+  expect(presentation.properties).toMatchObject({
+    version: { const: "1.0.0" }, format: { const: "coach_text" },
+    source_analysis_id: { type: "string" }, source_analyzer_version: { type: "string" },
+    scope: { const: "selected_fields" }, text: { type: "string" }, full_data_hint: { const: "format=full" },
+  });
+}
+
 // Historical guards reconstruct only explicitly checked changes. Current full
 // snapshots retain the actual schemas and descriptions.
 const approvedGctContextDescription = "Append explicit user context to one activity. gct_balance_side declares the raw session/recorded-lap percentage's side for this exact stored FIT digest, not a device-wide convention. Call only on explicit user request. Side-only additions retain existing RPE/notes; historical contexts are never overwritten.";
@@ -166,7 +195,7 @@ function expectScopedGctInput(tool: ToolContract) {
 
 it("GCT catalog: exposes activity-scoped side input and Coach 1.5/1.6/1.7/1.8 in actual registrations", () => {
   for (const mode of modes) {
-    expect(requireTool(mode.tools, "coach_input").description).toBe(approvedCoachDescription);
+    expectCoachPresentationContract(requireTool(mode.tools, "coach_input"));
     if (!mode.writes) {
       expect(mode.tools.some(tool => tool.name === "add_activity_context")).toBe(false);
       continue;
@@ -223,7 +252,10 @@ function beforeExplicitInspection(tool: ToolContract): ToolContract {
   }
   if (tool.name === "coach_input") {
     const previous = structuredClone(tool);
-    expect(previous.description).toBe(approvedCoachDescription);
+    expectCoachPresentationContract(previous);
+    // Remove only the explicitly checked optional additions for OLD digests.
+    delete (previous.inputSchema.properties as Record<string, unknown>).format;
+    delete (previous.outputSchema!.properties as Record<string, unknown>).presentation;
     previous.description = "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context.";
     return previous;
   }

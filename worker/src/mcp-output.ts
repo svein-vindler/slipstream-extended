@@ -472,6 +472,15 @@ export const outputSchemas = {
     activity_id: z.string().optional(),
     activity: activitySummary.optional(),
     analysis: openObject.optional(),
+    presentation: z.object({
+      version: z.literal("1.0.0"),
+      format: z.literal("coach_text"),
+      source_analysis_id: z.string(),
+      source_analyzer_version: z.string(),
+      scope: z.literal("selected_fields"),
+      text: z.string(),
+      full_data_hint: z.literal("format=full"),
+    }).optional(),
     message: z.string(),
   }),
   refresh_today: z.object({

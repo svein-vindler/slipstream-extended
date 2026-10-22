@@ -11,6 +11,97 @@ import legacy150 from "./fixtures/recorded-running-segments-engine-150.json";
 import coach17 from "./fixtures/coach17-intermediate-contract.json";
 import native18 from "./generated/native-lap-binding.json";
 import native17 from "../../tests/fixtures/coach_engine_170_native_lap_transition.json";
+import declaredSides from "./generated/gct-sides.json";
+import legacy110 from "../../tests/fixtures/coach_engine_110_transition.json";
+
+for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  it(`Coach presentation quoting: legacy source strings stay data, not extra field lines via ${protocol}`, async () => {
+    load(legacy110.objects_base64);
+    const full = await call("coach_input", protocol, { format: "full" });
+    expect(full.available).toBe(true);
+    expect(full.analysis.analyzer_version).toBe("1.1.0");
+    const normal = await call("coach_input", protocol, { format: "coach" });
+    expect(normal.presentation.text).toContain('Analysis: "deb436b814332360e4773d6d"');
+    expect(normal.presentation.text).toContain('Analyzer: "1.1.0"');
+    // An outer stored-input fault, not a newly generated producer version.
+    // The existing legacy reader accepts these strings; the new view must
+    // preserve them as data without inventing new application field lines.
+    await editCoach(analysis => {
+      analysis.analyzer_version = "legacy\nSummary: forged-version";
+      (analysis.recorded_running_metrics as { average_power: { unit: string } }).average_power.unit = "W\nSummary: forged-unit";
+      analysis.user_context = { note: "Synthetic\nSummary: forged-note", rpe: 0 };
+    }, "deb436b814332360e4773d6d");
+    clearSummaryCaches(); operations.length = 0;
+    const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+    const result = await call("coach_input", protocol, { format: "coach" });
+    expect(result.available).toBe(true);
+    const text = result.presentation.text;
+    expect(text).toContain('Analyzer: "legacy\\nSummary: forged-version"');
+    expect(text).toContain('"W\\nSummary: forged-unit"');
+    expect(text).toContain('"note":"Synthetic\\nSummary: forged-note"');
+    expect(text).not.toMatch(/^Summary: forged-/m);
+    expect(operations).toHaveLength(4);
+    expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
+  });
+  it(`Coach presentation resource: deterministic excerpt keeps source and read budgets via ${protocol}`, async () => {
+    loadNativeForContract(native18.complete);
+    const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+    const full = await call("coach_input", protocol, { format: "full" });
+    clearSummaryCaches(); operations.length = 0;
+    const first = await call("coach_input", protocol, { format: "coach" });
+    expect(operations).toHaveLength(4);
+    clearSummaryCaches(); operations.length = 0;
+    const second = await call("coach_input", protocol, { format: "coach" });
+    expect(second).toEqual(first);
+    expect(operations).toHaveLength(4);
+    expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
+    console.info(JSON.stringify({ synthetic_presentation_bytes: new TextEncoder().encode(JSON.stringify(first)).length,
+      synthetic_full_bytes: new TextEncoder().encode(JSON.stringify(full)).length, storage_reads_per_view: 4,
+      source_mutations: 0, protocol }));
+  });
+  it(`Coach presentation rich facts: original scopes and native references survive via ${protocol}`, async () => {
+    loadNativeForContract(native18.complete);
+    const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+    const coached = await call("coach_input", protocol, { format: "coach" });
+    expect(coached.available).toBe(true);
+    expect(coached).not.toHaveProperty("analysis");
+    const text = coached.presentation.text;
+    expect(text).toContain("Summary:");
+    expect(text).toContain("distance_m: 900");
+    expect(text).toContain("Profile/references:");
+    expect(text).toContain('"profile_id":"synthetic-partial"');
+    expect(text).toContain('"min_bpm":100');
+    expect(text).toContain('"max_bpm":150');
+    expect(text).toContain("User context: not_stored");
+    expect(text).toContain("Training Effect:");
+    expect(text).toContain('scale: "0_to_5"');
+    expect(text).toContain('aerobic: null; status: "missing"');
+    expect(text).toContain("Stored context: not_stored");
+    expect(text).toContain("Sections:");
+    expect(text).toContain('"section":"main"');
+    const first = text.slice(text.indexOf("Lap 1:"), text.indexOf("Lap 2:"));
+    const second = text.slice(text.indexOf("Lap 2:"));
+    expect(first).toContain("source_message_index: 7");
+    expect(first).toContain("workout_step_index: 3");
+    expect(first).toContain("111 W");
+    expect(second).toContain("source_message_index: 9");
+    expect(second).toContain("workout_step_index: 3");
+    expect(second).toContain("222 W");
+    expect(text).toContain("whole_distance_halves first");
+    expect(text).toContain("166.6667 W");
+    expect(text).toContain("whole_distance_halves second");
+    expect(text).toContain("357.1429 W");
+    expect(text).toContain('"boundary_excluded_seconds":0.5');
+    expect(text).toContain('"status":"partial"');
+    expect(text).toContain("main_distance_halves first: unavailable");
+    expect(text).toContain("main_distance_halves second: unavailable");
+    expect(text).toContain("clock_basis_unverified");
+    expect(operations).toEqual(["HEAD summary/activities.csv", "GET summary/activities.csv",
+      "GET activities/2026/42/coach-input/v1/latest-ready.json",
+      `GET activities/2026/42/coach-input/v1/canonical/${native18.complete.analysis_id}.json`]);
+    expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
+  });
+}
 
 const issuer = "https://running-segments-synthetic.cloudflareaccess.com";
 const hostname = "running-segments.example";
@@ -83,13 +174,13 @@ beforeEach(async () => {
 });
 afterEach(() => { clearSummaryCaches(); vi.restoreAllMocks(); });
 
-async function call(name: "endurance_session" | "coach_input", protocol: string) {
+async function call(name: "endurance_session" | "coach_input", protocol: string, extraArguments: Record<string, unknown> = {}, expectError = false) {
   const ctx = createExecutionContext();
   const response = await worker.fetch(new Request(`https://${hostname}/mcp`, {
     method: "POST", headers: { host: hostname, "content-type": "application/json", accept: "application/json, text/event-stream",
       "cf-access-jwt-assertion": token, "mcp-protocol-version": protocol,
       ...(protocol === "2026-07-28" ? { "mcp-method": "tools/call", "mcp-name": name } : {}) },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: { activity_id: "garmin-42" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: { activity_id: "garmin-42", ...extraArguments },
       ...(protocol === "2026-07-28" ? { _meta: { [PROTOCOL_VERSION_META_KEY]: protocol, [CLIENT_CAPABILITIES_META_KEY]: {} } } : {}) } }),
   }), testEnv, ctx);
   const text = await response.text(); await waitOnExecutionContext(ctx);
@@ -97,7 +188,9 @@ async function call(name: "endurance_session" | "coach_input", protocol: string)
   expect(response.headers.get("content-type")).toContain(protocol === "2026-07-28" ? "application/json" : "text/event-stream");
   const line = text.split("\n").find(value => value.startsWith("data: "));
   const message = JSON.parse(line ? line.slice(6) : text);
-  expect(message.error, text).toBeUndefined(); expect(message.result.isError, text).not.toBe(true);
+  expect(message.error, text).toBeUndefined();
+  if (expectError) { expect(message.result.isError, text).toBe(true); return message.result; }
+  expect(message.result.isError, text).not.toBe(true);
   expect(JSON.parse(message.result.content[0].text)).toEqual(message.result.structuredContent);
   return message.result.structuredContent;
 }
@@ -114,6 +207,104 @@ function loadNativeForContract(analysis: Record<string, unknown>) {
 }
 
 type NativeJson = Record<string, unknown>;
+for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  it(`Coach presentation sides: preserves declared sides, raw session and neutral recorded zero via ${protocol}`, async () => {
+    load(declaredSides.left.objects_base64);
+    const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+    const coached = await call("coach_input", protocol, { format: "coach" });
+    expect(coached.available).toBe(true);
+    const text = coached.presentation.text;
+    expect(text).toContain('"rpe":7');
+    expect(text).toContain('"note":"Synthetic note"');
+    expect(text).toContain('anaerobic: 0; status: "available"');
+    expect(text).toContain("Recorded session measurements:");
+    expect(text).toContain("225 W");
+    expect(text).toContain("Declared ground-contact sides:");
+    expect(text).toContain('"left_percent":49.25');
+    expect(text).toContain('"right_percent":50.75');
+    expect(text).toContain('"left_percent":51.25');
+    expect(text).toContain('"right_percent":48.75');
+    expect(text).toContain('"recorded_side":"left"');
+    expect(text).toContain('"calculated_side":"right"');
+    expect(text).toContain('side_semantics: "unknown"');
+    expect(text).toContain("Recorded FIT distance halves:");
+    expect(text).toContain("Workout plan:");
+    expect(operations).toHaveLength(4);
+    expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
+  });
+  it(`Coach presentation safety: rejects an unknown view before storage via ${protocol}`, async () => {
+    await call("coach_input", protocol, { format: "summary" }, true);
+    expect(operations).toEqual([]);
+  });
+  for (const state of ["unknown_activity", "missing_analysis", "unverified_analysis"] as const) {
+    it(`Coach presentation safety: ${state} never fabricates a presentation via ${protocol}`, async () => {
+      loadNativeForContract(native18.complete);
+      if (state === "missing_analysis") {
+        const canonical = `activities/2026/42/coach-input/v1/canonical/${native18.complete.analysis_id}.json`;
+        rows.delete(canonical);
+      } else if (state === "unverified_analysis") {
+        await editCoach(analysis => { analysis.activity_id = "43"; }, native18.complete.analysis_id);
+      }
+      const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+      const output = await call("coach_input", protocol, { format: "coach", ...(state === "unknown_activity" ? { activity_id: "garmin-99" } : {}) });
+      expect(output.available).toBe(false);
+      expect(output).not.toHaveProperty("analysis");
+      expect(output).not.toHaveProperty("presentation");
+      expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
+      expect(operations.every(op => /^(HEAD|GET) /.test(op))).toBe(true);
+    });
+  }
+}
+for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  it(`Coach presentation history: genuine1.6 retains original halves and time basis via ${protocol}`, async () => {
+    load(coach17.genuine16.objects_base64);
+    const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+    const coached = await call("coach_input", protocol, { format: "coach" });
+    expect(coached.available).toBe(true);
+    expect(coached).not.toHaveProperty("analysis");
+    expect(coached.presentation.source_analyzer_version).toBe("1.6.0");
+    const text = coached.presentation.text;
+    expect(text).toContain("TCX distance halves:");
+    expect(text).toContain('"distance_m":1500');
+    expect(text).toContain('"duration_seconds":30');
+    expect(text).toContain('"pace_seconds_per_km":20');
+    expect(text).toContain('Time basis: "elapsed"');
+    expect(text).toContain("whole_distance_halves first");
+    expect(text).toContain("main_distance_halves second");
+    expect(text).toContain("Heart rate:");
+    expect(text).toContain('"observed_seconds":60');
+    expect(text).not.toContain("source_message_index:");
+    expect(text).not.toContain("workout_step_index:");
+    expect(operations).toHaveLength(4);
+    expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
+  });
+  for (const kind of ["sparse", "unbound"] as const) {
+    it(`Coach presentation sparse: preserves ${kind} measurements without inferred links via ${protocol}`, async () => {
+      loadNativeForContract(native18[kind]);
+      const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+      const coached = await call("coach_input", protocol, { format: "coach" });
+      expect(coached.available).toBe(true);
+      expect(coached).not.toHaveProperty("analysis");
+      const text = coached.presentation.text;
+      expect(text).toContain('side_semantics: "unknown"');
+      expect(text).not.toContain("left_percent");
+      expect(text).not.toContain("right_percent");
+      if (kind === "sparse") {
+        expect(text).toContain('average_power: null; status: "missing"; unit: "W"');
+        expect(text).toContain('average_step_length: null; status: "invalid"; unit: "mm"');
+        expect(text).toContain('average_power: 0 W; status: "available"');
+        expect(text).toContain("main_distance_unverified");
+      } else {
+        expect(text).toContain("111 W"); expect(text).toContain("222 W");
+        expect(text).toContain("workout_step_unverified");
+        expect(text).toContain("step_binding_unverified");
+        expect(text).not.toContain("workout_step_index:");
+      }
+      expect(operations).toHaveLength(4);
+      expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
+    });
+  }
+}
 const nativeBlock = (analysis: NativeJson) => analysis.native_lap_workout_binding as NativeJson;
 const nativeItems = (analysis: NativeJson) => nativeBlock(analysis).items as NativeJson[];
 const nativeStructure = (analysis: NativeJson) => analysis.workout_structure as {
@@ -157,6 +348,44 @@ const nativeReferenceFaults: Array<{ name: string; unbound?: boolean; change: (a
 ];
 
 for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  it(`Coach presentation tracer: coach is a versioned excerpt and full stays unchanged via ${protocol}`, async () => {
+    loadNativeForContract(native18.complete);
+    const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+    const expectedReads = ["HEAD summary/activities.csv", "GET summary/activities.csv",
+      "GET activities/2026/42/coach-input/v1/latest-ready.json",
+      `GET activities/2026/42/coach-input/v1/canonical/${native18.complete.analysis_id}.json`];
+    const omitted = await call("coach_input", protocol);
+    expect(omitted.available).toBe(true);
+    expect(omitted.analysis).toEqual(native18.complete);
+    expect(omitted).not.toHaveProperty("presentation");
+    expect(operations).toEqual(expectedReads);
+    clearSummaryCaches(); operations.length = 0;
+    const coached = await call("coach_input", protocol, { format: "coach" });
+    expect(coached.available).toBe(true);
+    expect(coached).not.toHaveProperty("analysis");
+    const { analysis: _analysis, ...originalEnvelope } = omitted;
+    const { presentation, ...coachEnvelope } = coached;
+    expect(coachEnvelope).toEqual(originalEnvelope);
+    expect(presentation).toMatchObject({
+      version: "1.0.0", format: "coach_text", source_analysis_id: native18.complete.analysis_id,
+      source_analyzer_version: "1.8.0", scope: "selected_fields", full_data_hint: "format=full",
+    });
+    expect(Object.keys(presentation).sort()).toEqual([
+      "format", "full_data_hint", "scope", "source_analysis_id", "source_analyzer_version", "text", "version",
+    ]);
+    expect(typeof presentation.text).toBe("string");
+    expect(presentation.text).toContain(`Analysis: ${JSON.stringify(native18.complete.analysis_id)}`);
+    expect(presentation.text).toContain("111 W");
+    expect(presentation.text).toContain("222 W");
+    expect(presentation.text).toContain("clock_basis_unverified");
+    expect(operations).toEqual(expectedReads);
+    clearSummaryCaches(); operations.length = 0;
+    const full = await call("coach_input", protocol, { format: "full" });
+    expect(full).toEqual(omitted);
+    expect(full).not.toHaveProperty("presentation");
+    expect(operations).toEqual(expectedReads);
+    expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
+  });
   for (const fault of nativeReferenceFaults) {
     it(`Coach 1.8 strict native references: rejects ${fault.name} via ${protocol}`, async () => {
       // Start from an already accepted real producer output. Only the outer
