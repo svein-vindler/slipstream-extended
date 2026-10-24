@@ -76,7 +76,7 @@ def test_authenticated_backup_reads_real19_and_preserves_genuine18_history(tmp_p
     current_key = json.loads(store.objects[POINTER])["analysis_key"]
     analysis = json.loads(gzip.decompress(store.objects[current_key]))
     assert generated["blocked_activities"] == []
-    assert analysis["analyzer_version"] == "1.9.0"
+    assert analysis["analyzer_version"] == "1.9.1"
     assert analysis["logical_bouts"]["status"] == "available"
     assert all(store.objects[key] == body for key, body in before.items() if key != POINTER)
     document, archived = _archive_input(store.objects, current_key)

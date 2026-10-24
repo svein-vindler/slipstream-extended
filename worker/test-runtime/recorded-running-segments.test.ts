@@ -1576,7 +1576,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     expect(coachEnvelope).toEqual(originalEnvelope);
     expect(presentation).toMatchObject({
       version: "1.0.0", format: "coach_text", source_analysis_id: native18.complete.analysis_id,
-      source_analyzer_version: "1.9.0", scope: "selected_fields", full_data_hint: "format=full",
+      source_analyzer_version: "1.9.1", scope: "selected_fields", full_data_hint: "format=full",
     });
     expect(Object.keys(presentation).sort()).toEqual([
       "format", "full_data_hint", "scope", "source_analysis_id", "source_analyzer_version", "text", "version",
@@ -1624,7 +1624,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       const output = await call("coach_input", protocol);
       expect(output.available).toBe(true);
       expect(output.analysis).toEqual(fixture);
-      expect(output.analysis.analyzer_version).toBe("1.9.0");
+      expect(output.analysis.analyzer_version).toBe("1.9.1");
       const block = output.analysis.native_lap_workout_binding;
       expect(block).toMatchObject({
         schema_version: 1, method: "fit_lap_wkt_step_index",
@@ -1828,7 +1828,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
     const output = await call("coach_input", protocol);
     expect(output.available).toBe(true);
-    expect(output.analysis.analyzer_version).toBe("1.9.0");
+    expect(output.analysis.analyzer_version).toBe("1.9.1");
     expect(output.analysis).toEqual(produced16.complete.analysis);
     const block = output.analysis.segment_running_metrics;
     // Independent worked values from the accepted FIT tracer, not a second implementation.
@@ -1934,7 +1934,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       const output = await call("coach_input", protocol);
       expect(output.available).toBe(true);
       expect(output.analysis).toEqual(expected);
-      expect(output.analysis).toMatchObject({ analyzer_version: "1.9.0", activity_id: "42", analysis_id: fixture.analysis_id,
+      expect(output.analysis).toMatchObject({ analyzer_version: "1.9.1", activity_id: "42", analysis_id: fixture.analysis_id,
         workout_structure: { has_structured_workout: false } });
       const block = output.analysis.segment_running_metrics;
       expect(block.main_distance_halves.distance_basis).toBe("tcx_endurance_distance_continuous_main");
@@ -2080,7 +2080,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       kilometer_splits: { status: "available", method: "fit_record_time_weighted_mean",
         interval_policy: "left_sample_hold_distance_progressing_max_30s", distance_allocation: "linear_between_record_distances" },
       distance_halves: { status: "available", method: "fit_record_time_weighted_mean" } });
-    expect(coach.analysis.analyzer_version).toBe("1.9.0");
+    expect(coach.analysis.analyzer_version).toBe("1.9.1");
     expect(detail.recorded_running_metrics).toEqual(coach.analysis.recorded_running_metrics);
     expect(outputSchemas.endurance_session.parse(detail)).toEqual(detail);
     expect(outputSchemas.coach_input.parse(coach)).toEqual(coach);
@@ -2224,7 +2224,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
     const output = await call("coach_input", protocol);
     expect(output.available).toBe(true);
-    expect(output.analysis).toMatchObject({ analyzer_version: "1.9.0", activity_id: "42",
+    expect(output.analysis).toMatchObject({ analyzer_version: "1.9.1", activity_id: "42",
       analysis_id: produced.source_error.analysis_id, summary: { distance_m: 2000 },
       recorded_running_metrics: { schema_version: 2, association: "decode_errors", source_fit_sha256: null,
         average_power: { status: "unavailable", value: null },

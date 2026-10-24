@@ -330,7 +330,73 @@ def _profile_shape(value):
         raise BackupError("invalid_profile")
 
 
-def _analysis_shape(value):
+def _legacy_section_hr_rounding(analysis, section):
+    """Recognize only the source-reconstructible 1.9.0 complete-lap rounding bug."""
+    if not isinstance(analysis, dict) or analysis.get("analyzer_version") != "1.9.0":
+        return False
+
+    def number(value):
+        return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+    def sequential_sum(values):
+        total = 0.0
+        for item in values:
+            total += item
+        return total
+
+    try:
+        structure = analysis["workout_structure"]
+        name = section["section"]
+        if (analysis["time_basis"] != "elapsed" or structure["source"] != "garmin_workout"
+                or structure["has_structured_workout"] is not True or not structure["planned_steps"]
+                or name not in ("warmup", "main", "cooldown")
+                or section["source"] != "garmin_executed_laps"
+                or sum(item["section"] == name for item in analysis["sections"]) != 1):
+            return False
+        rows = structure["executed_laps"]
+        if any(type(row["lap"]) not in (int, float) or row["lap"] != index
+               for index, row in enumerate(rows, 1)):
+            return False
+        selected = [row for row in rows if row["section"] == name]
+        durations = [row["elapsed_seconds"] for row in selected]
+        if not selected or section["laps"] != len(selected) or not all(number(item) for item in durations):
+            return False
+        positive = [row for row in selected if row["elapsed_seconds"] > 0]
+        if not positive or not all(number(row["average_heart_rate_bpm"]) for row in positive):
+            return False
+        heart = section["heart_rate_coverage"]
+        if (heart["basis"] != "lap_elapsed" or heart["status"] != "partial"
+                or heart["contributing_laps"] != len(positive)
+                or section["measurement_coverage"]["elapsed_seconds"] != {
+                    "status": "complete", "observed_laps": len(selected), "total_laps": len(selected)}):
+            return False
+        distances = [row["distance_m"] for row in selected if number(row["distance_m"])]
+        distance_status = ("complete" if len(distances) == len(selected)
+                           else "partial" if distances else "unknown")
+        if section["measurement_coverage"]["distance_m"] != {
+                "status": distance_status, "observed_laps": len(distances), "total_laps": len(selected)}:
+            return False
+        # Both supported historical Python summation orders must reproduce exact
+        # published values; this is not a tolerance or a repaired validation view.
+        for total in (sum, sequential_sum):
+            elapsed = total(durations)
+            covered = total([row["elapsed_seconds"] for row in positive])
+            weighted = total([row["average_heart_rate_bpm"] * row["elapsed_seconds"] for row in positive])
+            if not number(elapsed) or not number(covered) or not number(weighted):
+                continue
+            published = round(elapsed, 3)
+            distance = round(total(distances), 3) if distance_status == "complete" else None
+            if (covered > 0 and covered == elapsed and covered != published
+                    and section["elapsed_seconds"] == published == heart["covered_seconds"]
+                    and section["distance_m"] == distance
+                    and section["average_heart_rate_bpm"] == round(weighted / covered, 2)):
+                return True
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    return False
+
+
+def _analysis_shape(value, *, original_analysis=None):
     if (
         not isinstance(value["analyzer_version"], str)
         or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value["analyzer_version"])
@@ -482,7 +548,8 @@ def _analysis_shape(value):
             if (heart["status"] in {"complete", "partial"}
                     and (not laps or not finite_elapsed
                          or (heart["status"] == "complete" and abs(seconds - elapsed) > 0.001)
-                         or (heart["status"] == "partial" and not 0 < seconds < elapsed))):
+                         or (heart["status"] == "partial" and not 0 < seconds < elapsed
+                             and not _legacy_section_hr_rounding(original_analysis, section)))):
                 raise BackupError("invalid_section_hr_coverage")
         if value["analyzer_version"] == "1.4.0" and "laps" in section:
             totals = section["measurement_coverage"]
@@ -1629,8 +1696,10 @@ def _workout_targets_shape(value):
                     raise BackupError("invalid_workout_targets")
 
 
-def _validate_value(key: str, value: Any):
+def _validate_value(key: str, value: Any, *, _original_analysis=None):
     kind, parts = key_info(key)
+    if kind == "analysis" and _original_analysis is None:
+        _original_analysis = value
     if kind == "context" and isinstance(value, dict) and type(value.get("schema_version")) is int and value["schema_version"] == 2:
         from .gct_sides import valid_declaration
 
@@ -1642,7 +1711,7 @@ def _validate_value(key: str, value: Any):
                 or not valid_declaration(value["gct_balance_side"])):
             raise BackupError("invalid_gct_declaration")
         return
-    if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") == "1.9.0":
+    if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") in ("1.9.0", "1.9.1"):
         legacy = {name: item for name, item in value.items() if name not in ("logical_bouts", "recorded_cadence", "workout_targets")}
         sides = value.get("ground_contact_sides")
         derived_sides = isinstance(sides, dict) and type(sides.get("schema_version")) is int and sides["schema_version"] == 2
@@ -1652,7 +1721,7 @@ def _validate_value(key: str, value: Any):
             legacy["ground_contact_sides"] = {
                 **{name: item for name, item in sides.items() if name != "record_aggregates"}, "schema_version": 1,
             }
-        _validate_value(key, {**legacy, "analyzer_version": "1.8.0"})
+        _validate_value(key, {**legacy, "analyzer_version": "1.8.0"}, _original_analysis=_original_analysis)
         _logical_bouts_shape(value)
         if "recorded_cadence" in value:
             _recorded_cadence_shape(value)
@@ -1668,14 +1737,14 @@ def _validate_value(key: str, value: Any):
         return
     if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") == "1.8.0":
         legacy = {name: item for name, item in value.items() if name != "native_lap_workout_binding"}
-        _validate_value(key, {**legacy, "analyzer_version": "1.7.0"})
+        _validate_value(key, {**legacy, "analyzer_version": "1.7.0"}, _original_analysis=_original_analysis)
         _native_lap_binding_shape(value)
         return
     if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") == "1.7.0":
         from .coach_segment_metrics import validate_partial_segment_metrics
 
         legacy = {name: item for name, item in value.items() if name != "segment_running_metrics"}
-        _validate_value(key, {**legacy, "analyzer_version": "1.5.0"})
+        _validate_value(key, {**legacy, "analyzer_version": "1.5.0"}, _original_analysis=_original_analysis)
         try:
             validate_partial_segment_metrics(value.get("segment_running_metrics"), value)
         except (KeyError, TypeError, ValueError, OverflowError, StopIteration) as exc:
@@ -1685,7 +1754,7 @@ def _validate_value(key: str, value: Any):
         from .coach_segment_metrics import validate_segment_metrics
 
         legacy = {name: item for name, item in value.items() if name != "segment_running_metrics"}
-        _validate_value(key, {**legacy, "analyzer_version": "1.5.0"})
+        _validate_value(key, {**legacy, "analyzer_version": "1.5.0"}, _original_analysis=_original_analysis)
         try:
             validate_segment_metrics(value.get("segment_running_metrics"), value)
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
@@ -1696,7 +1765,7 @@ def _validate_value(key: str, value: Any):
 
         legacy = {name: item for name, item in value.items() if name != "ground_contact_sides"}
         # Reuse the complete 1.4 shape without broadening historical allowlists.
-        _validate_value(key, {**legacy, "analyzer_version": "1.4.0"})
+        _validate_value(key, {**legacy, "analyzer_version": "1.4.0"}, _original_analysis=_original_analysis)
         expected = ground_contact_sides(value["recorded_running_metrics"], value["user_context"])
         if _json_bytes(value.get("ground_contact_sides")) != _json_bytes(expected):
             raise BackupError("invalid_gct_sides")
@@ -1751,7 +1820,7 @@ def _validate_value(key: str, value: Any):
             if text is not None and (not isinstance(text, str) or not 1 <= len(text) <= maximum):
                 raise BackupError("invalid_context_text")
     else:
-        _analysis_shape(value)
+        _analysis_shape(value, original_analysis=_original_analysis)
         if value["analysis_id"] != parts[2] or value["activity_id"] != parts[1]:
             raise BackupError("analysis_reference_mismatch")
         activity = value["activity"]

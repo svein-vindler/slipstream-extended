@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_functional_fix_contract.py", "worker/test-runtime/generated/functional-fix-contract.json",
+], { cwd: root, stdio: "inherit" });
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
   "scripts/build_gct_sides_contract.py", "worker/test-runtime/generated/gct-sides.json",
   "worker/test-runtime/generated/gct-sides-work",
 ], { cwd: root, stdio: "inherit" });

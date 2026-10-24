@@ -18,6 +18,7 @@ from .coach import (
     NATIVE_LAP_ANALYZER_VERSION,
     PARTIAL_SEGMENT_ANALYZER_VERSION,
     RECORDED_CADENCE_SCHEMA_VERSION,
+    SECTION_COVERAGE_ANALYZER_VERSION,
     SEGMENT_ANALYZER_VERSION,
     STORED_CONTEXT_ANALYZER_VERSION,
     TRAINING_EFFECT_ANALYZER_VERSION,
@@ -39,7 +40,7 @@ LEGACY_ANALYZER_VERSION = "1.0.0"
 SUPPORTED_ANALYZER_VERSIONS = (
     LEGACY_ANALYZER_VERSION, "1.0.1", "1.1.0", ANALYZER_VERSION, STORED_CONTEXT_ANALYZER_VERSION,
     TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION, PARTIAL_SEGMENT_ANALYZER_VERSION,
-    NATIVE_LAP_ANALYZER_VERSION, LOGICAL_BOUT_ANALYZER_VERSION,
+    NATIVE_LAP_ANALYZER_VERSION, LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION,
 )
 BULK_REUSE_VERSION = 1
 
@@ -237,7 +238,7 @@ def _source_signature(
         "manifest_revision": manifest_revision,
     }
     if recorded_cadence_schema_version is not None:
-        if (analyzer_version != LOGICAL_BOUT_ANALYZER_VERSION
+        if (analyzer_version not in (LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION)
                 or type(recorded_cadence_schema_version) is not int
                 or recorded_cadence_schema_version not in (1, RECORDED_CADENCE_SCHEMA_VERSION)):
             return None
@@ -267,27 +268,27 @@ def _single_input_signature(
         "revisions": {key: revisions[key] for key in selected},
     }
     if logical_schema_version is not None:
-        if (analyzer_version != LOGICAL_BOUT_ANALYZER_VERSION or type(logical_schema_version) is not int
+        if (analyzer_version not in (LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION) or type(logical_schema_version) is not int
                 or logical_schema_version not in (1, LOGICAL_BOUT_SCHEMA_VERSION)):
             return None
         # Schema1 used the original1.9 signature with no marker. Retain it as-is.
         if logical_schema_version != 1:
             value["logical_bouts_schema_version"] = logical_schema_version
     if recorded_cadence_schema_version is not None:
-        if (analyzer_version != LOGICAL_BOUT_ANALYZER_VERSION
+        if (analyzer_version not in (LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION)
                 or type(recorded_cadence_schema_version) is not int
                 or recorded_cadence_schema_version not in (1, RECORDED_CADENCE_SCHEMA_VERSION)):
             return None
         value["recorded_cadence_schema_version"] = recorded_cadence_schema_version
     if workout_targets_schema_version is not None:
-        if (analyzer_version != LOGICAL_BOUT_ANALYZER_VERSION or type(workout_targets_schema_version) is not int
+        if (analyzer_version not in (LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION) or type(workout_targets_schema_version) is not int
                 or workout_targets_schema_version != WORKOUT_TARGET_SCHEMA_VERSION):
             return None
         value["workout_targets_schema_version"] = workout_targets_schema_version
     if ((analyzer_version or ANALYZER_VERSION) == STORED_CONTEXT_ANALYZER_VERSION
             or analyzer_version in (TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
                                     PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION,
-                                    LOGICAL_BOUT_ANALYZER_VERSION)
+                                    LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION)
             and input_source_revisions is not None):
         if not valid_source_proof(input_source_revisions, activity["date"]):
             return None
@@ -342,10 +343,10 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
         stored = pointer.get("input_signature")
         current_engine = engine in (ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
                                     PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION,
-                                    LOGICAL_BOUT_ANALYZER_VERSION)
+                                    LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION)
         if engine is None and pointer.get("analyzer_version") in (
                 ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
-                PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION, LOGICAL_BOUT_ANALYZER_VERSION):
+                PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION, LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION):
             return "conflict", None
         marked = type(pointer.get("selection_version")) is int and pointer["selection_version"] == 1
         unmarked = "selection_version" not in pointer
@@ -357,11 +358,11 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
                 or type(candidate.get("schema_version")) is not int or candidate["schema_version"] != 1
                 or candidate.get("analysis_id") != key[len(canonical):-5]
                 or str(candidate.get("activity_id")) != activity["id"]
-                or (engine not in (NATIVE_LAP_ANALYZER_VERSION, LOGICAL_BOUT_ANALYZER_VERSION)
+                or (engine not in (NATIVE_LAP_ANALYZER_VERSION, LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION)
                     and "native_lap_workout_binding" in candidate)
-                or (engine != LOGICAL_BOUT_ANALYZER_VERSION and "logical_bouts" in candidate)
-                or (engine != LOGICAL_BOUT_ANALYZER_VERSION and "recorded_cadence" in candidate)
-                or (engine != LOGICAL_BOUT_ANALYZER_VERSION and "workout_targets" in candidate)
+                or (engine not in (LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION) and "logical_bouts" in candidate)
+                or (engine not in (LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION) and "recorded_cadence" in candidate)
+                or (engine not in (LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION) and "workout_targets" in candidate)
                 ):
             return "unknown", None
         # Validate the C3 content identity, restoring its builder seed before hashing.
@@ -377,7 +378,7 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
         has_context = (engine == STORED_CONTEXT_ANALYZER_VERSION
                        or engine in (TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
                                      PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION,
-                                     LOGICAL_BOUT_ANALYZER_VERSION)
+                                     LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION)
                        and "stored_context_snapshot" in candidate)
         if has_context:
             snapshot = candidate.get("stored_context_snapshot")
@@ -387,29 +388,29 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
             seed["stored_context_snapshot"] = snapshot
         elif engine in (TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
                         PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION,
-                        LOGICAL_BOUT_ANALYZER_VERSION) and context_sources is not None:
+                        LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION) and context_sources is not None:
             return "unknown", None
         if engine in (TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
-                      PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION, LOGICAL_BOUT_ANALYZER_VERSION):
+                      PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION, LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION):
             if pointer.get("analyzer_version") != engine or not isinstance(candidate.get("training_effect"), dict):
                 return "unknown", None
             seed["training_effect"] = candidate["training_effect"]
         if engine in (GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
-                      PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION, LOGICAL_BOUT_ANALYZER_VERSION):
+                      PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION, LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION):
             if not isinstance(candidate.get("ground_contact_sides"), dict):
                 return "unknown", None
             seed["ground_contact_sides"] = candidate["ground_contact_sides"]
         if engine in (SEGMENT_ANALYZER_VERSION, PARTIAL_SEGMENT_ANALYZER_VERSION,
-                      NATIVE_LAP_ANALYZER_VERSION, LOGICAL_BOUT_ANALYZER_VERSION):
+                      NATIVE_LAP_ANALYZER_VERSION, LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION):
             if not isinstance(candidate.get("segment_running_metrics"), dict):
                 return "unknown", None
             seed["segment_running_metrics"] = candidate["segment_running_metrics"]
-        if engine in (NATIVE_LAP_ANALYZER_VERSION, LOGICAL_BOUT_ANALYZER_VERSION):
+        if engine in (NATIVE_LAP_ANALYZER_VERSION, LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION):
             if not isinstance(candidate.get("native_lap_workout_binding"), dict):
                 return "unknown", None
             seed["native_lap_workout_binding"] = candidate["native_lap_workout_binding"]
         logical_schema_version = None
-        if engine == LOGICAL_BOUT_ANALYZER_VERSION:
+        if engine in (LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION):
             if not isinstance(candidate.get("logical_bouts"), dict):
                 return "unknown", None
             seed["logical_bouts"] = candidate["logical_bouts"]
@@ -440,7 +441,7 @@ def _bulk_selection_proof(store, activity, profile, required, revisions, keys,
         if checked["analysis_id"] != candidate["analysis_id"]:
             if engine in (TRAINING_EFFECT_ANALYZER_VERSION, GCT_SIDES_ANALYZER_VERSION, SEGMENT_ANALYZER_VERSION,
                           PARTIAL_SEGMENT_ANALYZER_VERSION, NATIVE_LAP_ANALYZER_VERSION,
-                          LOGICAL_BOUT_ANALYZER_VERSION) and has_context:
+                          LOGICAL_BOUT_ANALYZER_VERSION, SECTION_COVERAGE_ANALYZER_VERSION) and has_context:
                 # As with1.3, damaged retrospective snapshots are unknown. They
                 # cannot authorize repair, historical regeneration or writes.
                 return "unknown", None
@@ -666,7 +667,7 @@ def run_one(*, activity: dict[str, Any], store: R2Store, force: bool = False) ->
     # moving time. Repeated calls with the same metadata reuse that successful result.
     signature = _single_input_signature(
         activity, profile, required, revisions, context_key,
-        analyzer_version=LOGICAL_BOUT_ANALYZER_VERSION,
+        analyzer_version=SECTION_COVERAGE_ANALYZER_VERSION,
         input_source_revisions=context_sources,
         logical_schema_version=LOGICAL_BOUT_SCHEMA_VERSION,
         recorded_cadence_schema_version=RECORDED_CADENCE_SCHEMA_VERSION,
@@ -946,7 +947,7 @@ def run(
             profile or {},
             context_key=context_key,
             manifest_revision=manifest_revisions.get(activity["id"]),
-            analyzer_version=LOGICAL_BOUT_ANALYZER_VERSION,
+            analyzer_version=SECTION_COVERAGE_ANALYZER_VERSION,
             recorded_cadence_schema_version=RECORDED_CADENCE_SCHEMA_VERSION,
         )
 
@@ -1071,7 +1072,7 @@ def run(
             item["source_signature"] = _source_signature(
                 activity, item["profile"], context_key=item["context_key"],
                 manifest_revision=manifest_revisions.get(activity["id"]),
-                analyzer_version=LOGICAL_BOUT_ANALYZER_VERSION,
+                analyzer_version=SECTION_COVERAGE_ANALYZER_VERSION,
                 recorded_cadence_schema_version=RECORDED_CADENCE_SCHEMA_VERSION,
             )
             clock_revisions[activity["id"]] = {

@@ -72,7 +72,7 @@ def test_historical_exact_repair_uses_real_coach_and_preserves_old_bytes(
     assert persisted["activity_id"] == "garmin-42" and persisted["activity_date"] == DAY
     assert persisted["source_checked"] is False
     assert not any(key.startswith("refresh/checks/") for key in store.objects)
-    assert analysis["analyzer_version"] == "1.9.0"
+    assert analysis["analyzer_version"] == "1.9.1"
     assert analysis["activity_id"] == "42" and analysis["activity"]["date"] == DAY
     assert pointer["analysis_key"] != old_pointer["analysis_key"]
     assert set(store.objects) - set(before) == {

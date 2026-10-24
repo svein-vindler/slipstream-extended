@@ -100,7 +100,7 @@ function exactJson(actual: unknown, expected: unknown): boolean {
 
 export function validGroundContactSides(analysis: Record<string, unknown>, metrics: Metrics): boolean {
   const derived = object(analysis.ground_contact_sides).schema_version === 2;
-  if (derived && analysis.analyzer_version !== "1.9.0") return false;
+  if (derived && !["1.9.0", "1.9.1"].includes(String(analysis.analyzer_version))) return false;
   return exactJson(analysis.ground_contact_sides, expectedGctSides(metrics, analysis.user_context,
     derived ? analysis.segment_running_metrics : undefined));
 }
