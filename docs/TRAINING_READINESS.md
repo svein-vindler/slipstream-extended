@@ -31,7 +31,7 @@ or leaves selection `unknown` without earlier observations. Last collection
 outcome is separate and takes precedence in the day status. There is never
 another-device fallback. MCP input cannot change configuration or transport.
 
-The pinned Garmin Connect 0.3.17 SDK supplies existing DI or JWT_WEB headers via
+The pinned Garmin Connect 0.3.20 SDK supplies existing DI or JWT_WEB headers via
 its reviewed `get_api_headers()`. There is **at most one fitness HTTP attempt and
 zero component auth HTTP**, with no auth adapter, auth POST, token parser,
 mutation, token file, proactive renewal, `_refresh_session()` or 401 replay.
@@ -174,7 +174,12 @@ all 31 ordinary one-device rows, including distinct morning/latest observations.
 Complex legal multi-device/retained-field cases can still exceed these same limits.
 
 `training-history-compact-v1` shares source, SDK/normalizer version and metric_units
-at result level. `as_of` is the clock used for ages. Each day has these local references:
+at result level. Each canonical day's provenance also carries its SDK version:
+`0.3.17`, `0.3.20`, or `mixed` when old measurements are retained alongside new
+ones. The result-level SDK is `mixed` across different observed versions, or null
+when no valid canonical day was read. It never relabels historical data as the
+currently installed SDK. See [SDK upgrade compatibility](GARMIN_SDK_COMPATIBILITY.md).
+`as_of` is the clock used for ages. Each day has these local references:
 
 | Reference | Resolve within the same day | Meaning |
 | --- | --- | --- |

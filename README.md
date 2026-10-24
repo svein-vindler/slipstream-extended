@@ -335,6 +335,10 @@ Garmin does not provide an official personal API. Slipstream uses the community
 interfaces. It is intentionally single-tenant and read-only with respect to
 Garmin.
 
+The reviewed Garmin client is pinned to `garminconnect` 0.3.20. This is a
+compatibility update, not an expansion of exposed Garmin methods, collection or
+permissions. See [SDK compatibility and safe upgrade order](docs/GARMIN_SDK_COMPATIBILITY.md).
+
 ## License and non-affiliation
 
 [MIT](LICENSE). Slipstream Extended is an independent derivative of

@@ -17,6 +17,7 @@ import requests
 from garminconnect.client import Client, GarminConnectAuthenticationError
 from requests.adapters import HTTPAdapter
 
+from ..garmin_sdk import CURRENT_SDK_VERSION
 from .activity_page import page_params
 from .garmin_policy import GarminReadOnlyViolation
 from .training_readiness import ReadinessRead, bounded_read
@@ -145,7 +146,7 @@ def _install_transport_policy(sdk):
     def readiness_transport_valid():
         # Pin the reviewed SDK/session/header surface. No saved, unguarded send
         # is exposed to the application; the lower guard is always traversed.
-        if (version("garminconnect") != "0.3.17" or type(client) is not Client
+        if (version("garminconnect") != CURRENT_SDK_VERSION or type(client) is not Client
                 or type(session) is not requests.Session
                 or sdk.client is not client or client._run_request is not read_request
                 or client._api_session is not session or session.request is not send_read

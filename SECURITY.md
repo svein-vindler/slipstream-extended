@@ -112,7 +112,7 @@ Hosted pipeline logs project fixed event names, controlled status/error categori
 and validated aggregates. Activity names, source dates, object keys, stored
 reports and provider exception text are excluded. CLI failures retain failed
 exit codes without exposing raw arguments or tracebacks; private in-process
-callers still receive the original errors. The pinned Garmin SDK's two loggers
+callers still receive the original errors. The pinned Garmin SDK's reviewed loggers
 are temporarily projected during the hosted CLI invocation, without changing
 levels, handlers or propagation; their prior filters are restored on exit.
 

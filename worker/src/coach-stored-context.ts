@@ -1,6 +1,7 @@
 /** Read only the producer's bounded, GPS/device-free retrospective snapshot. */
 import { z } from "zod";
 import { validCalendarDay } from "./lib";
+import { trainingSdkVersion } from "./training-history";
 
 const day = z.string().refine(validCalendarDay, "Invalid context calendar day.");
 const utc = z.string().max(40).regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)$/)
@@ -71,7 +72,7 @@ const timeProvenance = z.strictObject({ observation_local: local.nullable(),
 const training = z.union([
   z.strictObject({ status: emptyStatus, selection_status: z.literal("unknown"), selected_slot: z.null(),
     temporal_status: z.literal("selection_unavailable"), ...trainingMetrics }),
-  z.strictObject({ status: z.literal("stored"), source: z.literal("garmin-connect"), sdk_version: z.literal("0.3.17"),
+  z.strictObject({ status: z.literal("stored"), source: z.literal("garmin-connect"), sdk_version: trainingSdkVersion,
     normalizer_revision: z.literal(1), source_revision: z.string().regex(/^[a-f0-9]{64}$/), date: day,
     timezone: z.string().min(1).max(128),
     selection_status: z.enum(["available", "ambiguous", "no_observation", "selected_device_unavailable", "unknown"]),

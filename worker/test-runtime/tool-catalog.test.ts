@@ -213,6 +213,38 @@ it("GCT catalog: exposes activity-scoped side input and Coach 1.5/1.6/1.7/1.8 in
   }
 });
 
+function beforeGarminSdkUpgrade(tool: ToolContract): ToolContract {
+  if (tool.name !== "training_history" && tool.name !== "coach_input") return tool;
+  const previous = structuredClone(tool);
+  const reviewedSdk = { type: "string", enum: ["0.3.17", "0.3.20", "mixed"] };
+  if (tool.name === "training_history") {
+    const properties = previous.outputSchema!.properties as {
+      source: { properties: Record<string, unknown> };
+      days: { items: { properties: { provenance: { properties: Record<string, unknown>; required: string[] } } } };
+    };
+    expect(properties.source.properties.sdk_version).toEqual({ anyOf: [reviewedSdk, { type: "null" }] });
+    properties.source.properties.sdk_version = { type: "string", const: "0.3.17" };
+    const provenance = properties.days.items.properties.provenance;
+    expect(provenance.properties.sdk_version).toEqual(reviewedSdk);
+    expect(provenance.required).toContain("sdk_version");
+    delete provenance.properties.sdk_version;
+    provenance.required = provenance.required.filter((name: string) => name !== "sdk_version");
+  }
+  function restore(value: unknown) {
+    if (Array.isArray(value)) { value.forEach(restore); return; }
+    if (!value || typeof value !== "object") return;
+    const schema = value as Record<string, unknown>;
+    const properties = schema.properties as Record<string, unknown> | undefined;
+    if (properties?.sdk_version && tool.name === "coach_input") {
+      expect(properties.sdk_version).toEqual(reviewedSdk);
+      properties.sdk_version = { type: "string", const: "0.3.17" };
+    }
+    Object.values(schema).forEach(restore);
+  }
+  restore(previous.outputSchema);
+  return previous;
+}
+
 function beforeExplicitInspection(tool: ToolContract): ToolContract {
   if (tool.name === "add_activity_context") {
     // Only the reviewed side field/description are removed for OLD digests.
@@ -286,8 +318,9 @@ it("advertises the explicit terminal inspection input only in refresh registrati
   }
 });
 
-it.each([false, true])("preserves catalog bytes apart from D4 metric leaves with writes=%s", async writes => {
-  const tools = structuredClone(modes.find(mode => mode.writes === writes && mode.refresh)!.tools).map(beforeExplicitInspection);
+it.each([false, true])("preserves catalog bytes apart from reviewed SDK provenance and D4 metric leaves with writes=%s", async writes => {
+  const tools = structuredClone(modes.find(mode => mode.writes === writes && mode.refresh)!.tools)
+    .map(beforeGarminSdkUpgrade).map(beforeExplicitInspection);
   const schema = requireTool(tools, "strength_session").outputSchema as {
     properties: { session: { properties: { sets: { items: { properties: Record<string, unknown> } } } } };
   };

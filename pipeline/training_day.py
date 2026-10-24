@@ -8,6 +8,7 @@ import re
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .garmin_sdk import CURRENT_SDK_VERSION, STORED_SDK_VERSIONS
 from .sources.training_readiness import strict_json
 
 MAX_DAY_BYTES = 16 * 1024
@@ -186,7 +187,7 @@ def decode_day(body, day):
     value = strict_json(body)
     if (not isinstance(value, dict) or type(value.get("schema_version")) is not int or value.get("schema_version") != 1
             or type(value.get("normalizer_revision")) is not int or value.get("normalizer_revision") != 1 or value.get("kind") != "training-day"
-            or value.get("source") != "garmin-connect" or value.get("sdk_version") != "0.3.17"
+            or value.get("source") != "garmin-connect" or value.get("sdk_version") not in STORED_SDK_VERSIONS
             or value.get("calendar_date") != day or value.get("requested_date") != day
             or not isinstance(value.get("devices"), list) or len(value["devices"]) > MAX_DEVICES
             or not isinstance(value.get("last_attempt"), dict)
@@ -261,7 +262,7 @@ def decode_day(body, day):
 def merge_day(previous, devices, status, config, checked):
     day = copy.deepcopy(previous) if previous else {
         "schema_version": 1, "kind": "training-day", "normalizer_revision": 1,
-        "source": "garmin-connect", "sdk_version": "0.3.17", "requested_date": config["date"],
+        "source": "garmin-connect", "sdk_version": CURRENT_SDK_VERSION, "requested_date": config["date"],
         "calendar_date": config["date"], "source_checked_at": None, "devices": [],
     }
     day["date_resolution"] = {"timezone": config["timezone"], "basis": "configured_timezone"}
@@ -293,6 +294,17 @@ def merge_day(previous, devices, status, config, checked):
                     after[field]["retained_previous"] = True
         merged.append(item)
     day["devices"] = merged
+    # A new SDK may update only one field or device. Keep retained data's
+    # provenance instead of attributing the entire object to the latest SDK.
+    versions = {previous["sdk_version"] if metric["retained_previous"] and previous else CURRENT_SDK_VERSION
+                for item in merged for slot in ("morning", "latest") if item.get(slot)
+                for metric in (item[slot]["readiness"], item[slot]["recovery"])}
+    if versions:
+        day["sdk_version"] = "mixed" if len(versions) > 1 or "mixed" in versions else next(iter(versions))
+    elif previous and status not in {"available", "no_observation"}:
+        day["sdk_version"] = previous["sdk_version"]
+    else:
+        day["sdk_version"] = CURRENT_SDK_VERSION
     if status in {"available", "no_observation"}:
         day["source_checked_at"] = checked
     selected = config.get("device_id")
