@@ -45,6 +45,16 @@ This asks for the Garmin password and MFA code interactively, then stores only
 the refreshable session token in the ignored local file. Never commit or share
 `.env` or the token file.
 
+Local token output is staged in a private temporary file in the destination
+directory before atomically replacing the requested file. On POSIX, the new
+file has mode `0600` before any session content is written; a protection or
+write failure stops the command and preserves any previous destination token.
+The destination directory must be writable. Use a trusted private directory:
+this does not change existing directory permissions or establish Windows ACL
+isolation. Remove leftover `garmin_tokens.tmp-*.txt` files after an interrupted
+login only when they are no longer needed; they also contain session secrets
+and remain excluded from Git and public releases.
+
 ## 2. Pause cloud jobs
 
 Local and GitHub Garmin jobs must not overlap. Disable these scheduled workflows

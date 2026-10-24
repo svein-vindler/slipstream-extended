@@ -14,6 +14,7 @@ import getpass
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from garminconnect import Garmin
@@ -38,11 +39,23 @@ def detect_repo() -> str | None:
 
 def _write_local_token(path: Path, blob: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(blob, encoding="utf-8")
+    descriptor, temporary = tempfile.mkstemp(
+        prefix="garmin_tokens.tmp-", suffix=".txt", dir=path.parent
+    )
     try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+        # mkstemp creates a private inode; enforce POSIX protection before writing.
+        if os.name == "posix":
+            os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1  # The stream now owns and closes the descriptor.
+            stream.write(blob)
+        os.replace(temporary, path)
+    finally:
+        try:
+            if descriptor != -1:
+                os.close(descriptor)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
     print(f"✓ Wrote local Garmin token to {path} (gitignored).", file=sys.stderr)
 
 
