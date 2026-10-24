@@ -120,9 +120,13 @@ class _ProviderLogProjection(logging.Filter):
 
 @contextmanager
 def _private_provider_logs():
-    # Scope the two known pinned SDK loggers to this CLI invocation. Leave
+    # Scope the reviewed 0.3.20 SDK loggers to this CLI invocation. Leave
     # levels/handlers/propagation and all unrelated loggers untouched.
-    loggers = [logging.getLogger(name) for name in ("garminconnect", "garminconnect.client")]
+    loggers = [logging.getLogger(name) for name in (
+        "garminconnect", "garminconnect.client", "garminconnect.api._common",
+        "garminconnect.client.sso", "garminconnect.client.session",
+        "garminconnect.client.tokens", "garminconnect.client.transport",
+    )]
     projection = _ProviderLogProjection()
     for logger in loggers:
         logger.addFilter(projection)

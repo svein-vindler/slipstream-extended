@@ -3,6 +3,7 @@ import io
 import json
 import socket
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -89,6 +90,55 @@ def make_day(rows=None, checked=CHECK, previous=None, config=None):
     config = config or CONFIG
     devices, status = normalize([DTO] if rows is None else rows, config, checked)
     return merge_day(previous, devices, status, config, checked)
+
+
+def test_new_collection_records_the_reviewed_sdk_without_changing_measurements():
+    day = decode_day(encode_day(make_day()), DAY)
+    assert day["sdk_version"] == "0.3.20"
+    assert day["devices"][0]["latest"]["readiness"]["value"] == 80
+    assert day["devices"][0]["latest"]["recovery"]["value"] == 0
+
+
+@pytest.mark.parametrize("sdk_version", ["0.3.19", "0.4.0", None, {}, []])
+def test_unreviewed_or_malformed_stored_sdk_version_is_rejected(sdk_version):
+    day = {**make_day(), "sdk_version": sdk_version}
+    with pytest.raises(ValueError, match="Unverified training day"):
+        decode_day(encode_day(day), DAY)
+
+
+def test_legacy_retention_and_new_collection_do_not_relabel_each_other():
+    # Captured from the real f4346f18 producer before this upgrade, not a
+    # current-generation object relabelled as historical data.
+    raw = (Path(__file__).parent / "fixtures/training_day_sdk0317.json").read_bytes()
+    previous = decode_day(raw, DAY)
+    original = encode_day(previous)
+    retained = merge_day(previous, [], "source_error", CONFIG, CHECK)
+    assert retained["sdk_version"] == "0.3.17"
+    row = {**DTO, "score": 90, "recoveryTime": None,
+           "timestamp": "2026-10-08T06:30:00Z", "timestampLocal": "2026-10-08T08:30:00"}
+    mixed = decode_day(encode_day(make_day([row], previous=previous)), DAY)
+    assert mixed["sdk_version"] == "mixed"
+    observation = mixed["devices"][0]["latest"]
+    assert observation["readiness"]["value"] == 90
+    assert observation["recovery"]["value"] == 0
+    assert observation["recovery"]["retained_previous"] is True
+    assert observation["recovery"]["source_checked_at"] == CHECK
+    replaced = make_day([{**row, "recoveryTime": 30}], previous=previous)
+    assert replaced["sdk_version"] == "0.3.20"
+    assert encode_day(previous) == original
+    assert (Path(__file__).parent / "fixtures/training_day_sdk0317.json").read_bytes() == raw
+
+
+def test_failed_check_does_not_relabel_an_empty_legacy_day():
+    previous = json.loads((Path(__file__).parent / "fixtures/training_day_sdk0317.json").read_bytes())
+    previous.update(devices=[], selection={"device_id": None, "status": "no_observation"},
+                    last_attempt={"status": "no_observation", "attempted_at": CHECK},
+                    source_revision=hashlib.sha256(b"[]").hexdigest())
+    previous = decode_day(encode_day(previous), DAY)
+    after = merge_day(previous, [], "source_error", CONFIG, "2026-10-08T08:00:00+00:00")
+    assert after["sdk_version"] == "0.3.17"
+    assert after["source_checked_at"] == CHECK
+    assert after["source_revision"] == previous["source_revision"]
 
 
 def provider(payload=None, status="available"):

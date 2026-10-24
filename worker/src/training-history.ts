@@ -28,9 +28,10 @@ const observation = z.object({ calendar_date: dayString, observation_local: loca
   input_context: z.literal("AFTER_WAKEUP_RESET").nullable(), readiness: metric, recovery: metric });
 const slotStatus = z.enum(["available", "ambiguous", "no_observation"]);
 const selectionStatus = z.enum(["available", "ambiguous", "no_observation", "selected_device_unavailable", "unknown"]);
+export const trainingSdkVersion = z.enum(["0.3.17", "0.3.20", "mixed"]);
 
 export const trainingDaySchema = z.object({ schema_version: z.literal(1), kind: z.literal("training-day"),
-  normalizer_revision: z.literal(1), source: z.literal("garmin-connect"), sdk_version: z.literal("0.3.17"),
+  normalizer_revision: z.literal(1), source: z.literal("garmin-connect"), sdk_version: trainingSdkVersion,
   requested_date: dayString, calendar_date: dayString, source_checked_at: utcTime.nullable(),
   source_revision: z.string().regex(/^[a-f0-9]{64}$/),
   date_resolution: z.object({ timezone: z.string().min(1).max(128), basis: z.literal("configured_timezone") }),
@@ -76,7 +77,7 @@ const outputCheck = z.object({ check_ref: checkRef, source_checked_at: utcTime,
 const outputDay = z.object({ date: dayString,
   status: z.enum(["available", "partial", "no_observation", "not_collected", "schema_unverified", "source_error", "oversize", "auth_required", "timeout", "wrong_date", "ambiguous", "selected_device_unavailable"]),
   basis: z.enum(["canonical_object", "canonical_object_absent", "canonical_read_failed"]), support: z.literal("unknown"),
-  provenance: z.object({ source_revision: z.string(),
+  provenance: z.object({ source_revision: z.string(), sdk_version: trainingSdkVersion,
     source_checked_at: utcTime.nullable(), last_attempt: z.object({ status: attemptStatus, attempted_at: utcTime }),
     timezone: z.string() }).optional(),
   selection_status: selectionStatus.optional(), selected_candidate: z.string().nullable().optional(),
@@ -86,7 +87,7 @@ const outputDay = z.object({ date: dayString,
 });
 export const trainingHistorySchema = z.object({ start_date: dayString, end_date: dayString,
   projection: z.literal("training-history-compact-v1"), as_of: utcTime,
-  source: z.object({ name: z.literal("garmin-connect"), sdk_version: z.literal("0.3.17"), normalizer_revision: z.literal(1) }),
+  source: z.object({ name: z.literal("garmin-connect"), sdk_version: trainingSdkVersion.nullable(), normalizer_revision: z.literal(1) }),
   metric_units: z.object({ readiness: z.literal("score_1_100"), recovery: z.literal("minutes") }),
   days_requested: z.number().int().min(1).max(31), source_objects_read: z.number().int().min(0).max(31),
   object_bytes_read: z.number().int().nonnegative(),
@@ -167,7 +168,7 @@ function project(day: z.infer<typeof trainingDaySchema>, now: number): z.infer<t
       : day.devices.length === 0 ? day.last_attempt.status
       : day.last_attempt.status === "available" ? "available" : "partial";
   return { date: day.calendar_date, status, basis: "canonical_object", support: "unknown",
-    provenance: { source_revision: day.source_revision, source_checked_at: day.source_checked_at,
+    provenance: { source_revision: day.source_revision, sdk_version: day.sdk_version, source_checked_at: day.source_checked_at,
       last_attempt: day.last_attempt, timezone: day.date_resolution.timezone }, selection_status: selection,
     selected_candidate: day.selection.device_id === null ? null : (() => {
       const index = day.devices.findIndex(d => d.device_id === day.selection.device_id);
@@ -225,9 +226,11 @@ export async function readTrainingHistory(bucket: Pick<R2Bucket, "get">, start: 
     }
   }
   await Promise.all(Array.from({ length: Math.min(4, dates.length) }, () => reader()));
+  const versions = new Set(days.flatMap(day => day.provenance ? [day.provenance.sdk_version] : []));
+  const sdkVersion = versions.size === 1 ? [...versions][0] : versions.size === 0 ? null : "mixed" as const;
   return { start_date: start, end_date: end, days_requested: dates.length, source_objects_read: dates.length,
     projection: "training-history-compact-v1" as const, as_of: new Date(now).toISOString(),
-    source: { name: "garmin-connect" as const, sdk_version: "0.3.17" as const, normalizer_revision: 1 as const },
+    source: { name: "garmin-connect" as const, sdk_version: sdkVersion, normalizer_revision: 1 as const },
     metric_units: { readiness: "score_1_100" as const, recovery: "minutes" as const },
     object_bytes_read: bytesRead, display_policy: { id: "training-observation-8h-v1" as const,
       max_age_seconds: 28800 as const, semantics: "stored_observation_not_live_freshness" as const }, days, status: "complete" as const };

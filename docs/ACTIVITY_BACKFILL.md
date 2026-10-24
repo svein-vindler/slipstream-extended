@@ -69,7 +69,7 @@ The reviewed GET route is `/activitylist-service/activities/search/activities`
 with fixed `startDate`, `endDate`, `start`, `limit` and descending `sortOrder`.
 The native transport still enforces the existing host, path, GET and redirect
 guards. No URL, SDK method, header override or arbitrary query enters the adapter.
-Pinned `garminconnect` 0.3.17's date helper itself loops in 20-row pages until an
+Pinned `garminconnect` 0.3.20's date helper itself loops in 20-row pages until an
 empty response; a method named `get` is not evidence of one call.
 
 Garmin offsets are not a snapshot. On resume the first page and previous-page

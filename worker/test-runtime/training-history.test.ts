@@ -5,6 +5,7 @@ import worker from "../src/index";
 import { boundedTrainingResult, readTrainingHistory, trainingDates, trainingDayKey, trainingHistorySchema,
   TRAINING_STRUCTURED_BYTES, TRAINING_RESULT_BYTES } from "../src/training-history";
 import contract from "./generated/training-day.json";
+import legacySdk from "../../tests/fixtures/training_day_sdk0317.json";
 
 const start = "2026-10-01", end = "2026-10-31";
 const issuer = "https://synthetic-training-history.cloudflareaccess.com";
@@ -78,10 +79,45 @@ it("reads Python canonical bytes through authenticated read-only MCP with no pri
   expect(latest(output.days[0]).readiness.value).toBe(80);
   expect(latest(output.days[0]).recovery).toMatchObject({ value: 60, status: "conflicting", effective_remaining_minutes: null });
   expect(output.metric_units).toEqual({ readiness: "score_1_100", recovery: "minutes" });
-  expect(output.source).toEqual({ name: "garmin-connect", sdk_version: "0.3.17", normalizer_revision: 1 });
+  expect(output.source).toEqual({ name: "garmin-connect", sdk_version: "0.3.20", normalizer_revision: 1 });
   expect(output.days[0].observations).toHaveLength(1); expect(output.days[0].clocks).toHaveLength(1);
   expect(output.days[0].candidates[0].latest_observation).toBe(output.days[0].candidates[0].morning_observation);
   expect(JSON.stringify(output)).not.toMatch(/device_id|900000|123456|userProfile|feedbackLong|private|\.json/);
+  expect(counts).toEqual({ get: 1, head: 0, list: 0, put: 0, delete: 0 });
+});
+
+it("preserves genuine legacy and current SDK provenance in the same bounded history", async () => {
+  const oldBytes = JSON.stringify(legacySdk), currentBytes = JSON.stringify(fixture("2026-10-09"));
+  await env.SLIPSTREAM_DATA.put(trainingDayKey("2026-10-08"), oldBytes);
+  await env.SLIPSTREAM_DATA.put(trainingDayKey("2026-10-09"), currentBytes);
+  const output = (await call({ start_date: "2026-10-08", end_date: "2026-10-09" })).result.structuredContent;
+  expect(output.source.sdk_version).toBe("mixed");
+  expect(output.days.map((day: HistoryDay) => day.provenance!.sdk_version)).toEqual(["0.3.17", "0.3.20"]);
+  expect(latest(output.days[0]).recovery.value).toBe(0);
+  expect(latest(output.days[1]).readiness.value).toBe(80);
+  expect(trainingHistorySchema.parse(output)).toEqual(output);
+  expect(counts).toEqual({ get: 2, head: 0, list: 0, put: 0, delete: 0 });
+  expect(await (await env.SLIPSTREAM_DATA.get(trainingDayKey("2026-10-08")))!.text()).toBe(oldBytes);
+  expect(await (await env.SLIPSTREAM_DATA.get(trainingDayKey("2026-10-09")))!.text()).toBe(currentBytes);
+});
+
+it("reads a real Python mixed-SDK retention result without relabelling the retained measurement", async () => {
+  const value = contract.field_cases.sdk_mixed;
+  expect(value.sdk_version).toBe("mixed");
+  await env.SLIPSTREAM_DATA.put(trainingDayKey("2026-10-08"), JSON.stringify(value));
+  const output = (await call({ start_date: "2026-10-08", end_date: "2026-10-08" })).result.structuredContent;
+  expect(output.source.sdk_version).toBe("mixed");
+  expect(output.days[0].provenance.sdk_version).toBe("mixed");
+  expect(latest(output.days[0]).readiness.value).toBe(90);
+  expect(latest(output.days[0]).recovery).toMatchObject({ value: 0, retained_previous: true });
+  expect(counts).toEqual({ get: 1, head: 0, list: 0, put: 0, delete: 0 });
+});
+
+it.each(["0.3.19", "0.4.0", null, {}])("rejects unreviewed or malformed stored SDK provenance: %s", async version => {
+  await env.SLIPSTREAM_DATA.put(trainingDayKey("2026-10-08"), JSON.stringify({ ...fixture(), sdk_version: version }));
+  const output = (await call({ start_date: "2026-10-08", end_date: "2026-10-08" })).result.structuredContent;
+  expect(output.days[0].status).toBe("schema_unverified");
+  expect(output.source.sdk_version).toBeNull();
   expect(counts).toEqual({ get: 1, head: 0, list: 0, put: 0, delete: 0 });
 });
 
@@ -105,7 +141,7 @@ it.each([
     expect(result.isError).not.toBe(true);
     expect(trainingHistorySchema.parse(output)).toEqual(output);
     expect(output.metric_units).toEqual({ readiness: "score_1_100", recovery: "minutes" });
-    expect(output.source).toEqual({ name: "garmin-connect", sdk_version: "0.3.17", normalizer_revision: 1 });
+    expect(output.source).toEqual({ name: "garmin-connect", sdk_version: "0.3.20", normalizer_revision: 1 });
     expect(day.support).toBe("unknown"); expect(day.selection_status).toBe("available");
     expect(day.provenance.last_attempt.status).toBe(attempt);
     expect(day.status).toBe(attempt === "no_observation" ? "partial" : attempt);

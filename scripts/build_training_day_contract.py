@@ -58,6 +58,7 @@ def field_cases():
     both = build([row])
     updated = {**row, "timestamp": "2026-10-08T06:30:00Z", "timestampLocal": "2026-10-08T08:30:00"}
     complementary = [readiness, {**recovery, "deviceId": 900001}]
+    legacy = json.loads((Path(__file__).resolve().parents[1] / "tests/fixtures/training_day_sdk0317.json").read_text())
     return {"both": both, "readiness_only": build([readiness]), "recovery_only": build([recovery]),
         "recovery_zero": build([{**recovery, "recoveryTime": 0}]), "empty": build([]),
         "empty_retained": build([], previous=both, later=True),
@@ -68,7 +69,8 @@ def field_cases():
         "source_error_retained": build([], previous=both, failure="source_error", later=True),
         "multiple_complementary": build(complementary),
         "selected_readiness_only": build(complementary, device="900000"),
-        "selected_recovery_only": build(complementary, device="900001")}
+        "selected_recovery_only": build(complementary, device="900001"),
+        "sdk_mixed": build([{**updated, "deviceId": 42, "score": 90, "recoveryTime": None}], previous=legacy)}
 
 
 if __name__ == "__main__":

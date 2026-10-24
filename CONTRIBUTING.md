@@ -39,7 +39,7 @@ under Python 3.12 or newer, then run `pip-audit -r requirements.txt
 --disable-pip`. Do not hand-edit only the generated lock files.
 
 The development lock is shared with Windows. Linux lock regeneration can omit
-Windows-only dependencies such as Pytest's `colorama`. Preserve their platform
+Windows-only dependencies such as Pytest's `colorama` and Garmin's `tzdata`. Preserve their platform
 markers and verified wheel hashes; `tests/test_dependency_locks.py` checks this
 even when CI runs on Linux.
 

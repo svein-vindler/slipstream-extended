@@ -41,6 +41,7 @@ from .backup_source import (
 )
 from .coach import validate_profile
 from .coach_stored_context import HRV_METRICS, SLEEP_METRICS
+from .garmin_sdk import STORED_SDK_VERSIONS
 
 MAGIC = b"SLIPSTREAM-BACKUP-1\n"
 FORMAT = "slipstream-user-backup"
@@ -894,7 +895,7 @@ def _stored_training_shape(value, day, reference, checked_clocks):
     if stored:
         _date(value["date"])
         _context_digest(value["source_revision"], nullable=False)
-        if (value["source"] != "garmin-connect" or value["sdk_version"] != "0.3.17"
+        if (value["source"] != "garmin-connect" or value["sdk_version"] not in STORED_SDK_VERSIONS
                 or value["normalizer_revision"] != 1 or value["date"] != day
                 or value["selection_status"] not in {
                     "available", "ambiguous", "no_observation", "selected_device_unavailable", "unknown"}

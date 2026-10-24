@@ -98,6 +98,12 @@ def mutate_analysis(objects, changes):
     return result
 
 
+def test_authenticated_backup_accepts_explicit_mixed_sdk_contract(tmp_path):
+    # Invented mixed-provenance contract; genuine historical fixtures stay unchanged.
+    objects = mutate_analysis(context_objects(), [(('training_day', 'sdk_version'), 'mixed')])
+    assert backup.verify_backup(_write_document(tmp_path, document(objects)), PASSWORD).objects == objects
+
+
 @pytest.mark.parametrize("changes", [
     [(('private_feedback',), 'synthetic private extra')],
     [(('schema_version',), True)],
@@ -118,6 +124,7 @@ def mutate_analysis(objects, changes):
     [(('hrv', 'metrics', 'weekly_avg_ms', 'value'), -1)],
     [(('hrv', 'metrics', 'last_night_avg_ms', 'status'), 'estimated')],
     [(('training_day', 'last_attempt', 'feedback'), 'synthetic private extra')],
+    [(('training_day', 'sdk_version'), '0.3.19')],
     [(('training_day', 'readiness', 'value'), 101)],
     [(('training_day', 'recovery', 'value'), -1)],
     [(('training_day', 'recovery', 'value'), 2**31)],
@@ -135,7 +142,7 @@ def mutate_analysis(objects, changes):
     'snapshot-older-than-check', 'score-over-100', 'percent-over-100', 'wrong-health-unit',
     'bool-health-value', 'unbounded-health-int', 'raw-readings', 'wrong-local-night',
     'unverified-source', 'future-night-attributed-as-pre-activity', 'negative-hrv', 'unknown-value-status',
-    'private-attempt-extra', 'readiness-over-100', 'negative-recovery', 'recovery-over-existing-domain',
+    'private-attempt-extra', 'unreviewed-sdk', 'readiness-over-100', 'negative-recovery', 'recovery-over-existing-domain',
     'noninteger-recovery', 'future-readiness-attributed-as-pre-activity', 'wrong-training-unit',
     'nonboolean-retention', 'wrong-training-day', 'invalid-timezone-identifier', 'inconsistent-selection',
     'wrong-local-observation-day', 'nonlocal-observation-clock',

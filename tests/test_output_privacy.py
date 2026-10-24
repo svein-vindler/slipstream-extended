@@ -260,13 +260,16 @@ socket.socket.connect = blocked
 attempts = []
 def fail(*args, **kwargs):
     attempts.append(1)
-    logging.getLogger('garminconnect.client').warning('Token rejected: %s', 'SYNTHETIC_PRIVATE')
+    for name in names:
+        logging.getLogger(name).warning('Token rejected: %s', 'SYNTHETIC_PRIVATE')
     raise requests.ReadTimeout('SYNTHETIC_PRIVATE token email@example.invalid key/private\\n' + 'x' * 1000)
 api = garminconnect.Garmin()
 api.client = SimpleNamespace(connectapi=fail, download=fail)
 api.retry_attempts = 1
 api.retry_min_wait = api.retry_max_wait = 0
-names = ['garminconnect', 'garminconnect.client']
+names = ['garminconnect', 'garminconnect.client', 'garminconnect.api._common',
+         'garminconnect.client.sso', 'garminconnect.client.session',
+         'garminconnect.client.tokens', 'garminconnect.client.transport']
 state = [(logging.getLogger(name).level, list(logging.getLogger(name).handlers), list(logging.getLogger(name).filters), logging.getLogger(name).propagate) for name in names]
 def operation(*args, **kwargs):
     getattr(api, sys.argv[1])('/hrv-service/hrv/2041-02-03')
