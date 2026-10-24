@@ -32,8 +32,18 @@
       "@modelcontextprotocol/sdk": "$@modelcontextprotocol/sdk",
       "@modelcontextprotocol/client": "$@modelcontextprotocol/client"
     },
+    "express@5.2.1": {
+      "body-parser": "2.4.0"
+    },
+    "ajv@8.20.0": {
+      "fast-uri": "3.1.9"
+    },
     "miniflare": {
-      "sharp": "0.35.5"
+      "sharp": "0.35.5",
+      "undici": "7.30.1"
+    },
+    "@cloudflare/vitest-plugin@1.4.2": {
+      "zod": "$zod"
     },
     "hono": "4.13.11",
     "vite": "8.1.6"

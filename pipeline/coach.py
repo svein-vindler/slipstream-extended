@@ -13,12 +13,18 @@ import math
 from datetime import date
 from typing import Any
 
+from . import logical_bouts as _logical_bouts
+from . import recorded_cadence as _recorded_cadence
+from . import workout_targets as _workout_targets
 from .coach_segment_metrics import segment_running_metrics
 from .coach_stored_context import stored_context_snapshot as project_stored_context
 from .gct_sides import ground_contact_sides
+from .logical_bouts import logical_bouts as project_logical_bouts
 from .native_lap_workout_binding import native_lap_workout_binding
+from .recorded_cadence import recorded_cadence as project_recorded_cadence
 from .recorded_running_metrics import expanded_recorded_running_metrics
 from .training_effect import recorded_training_effect
+from .workout_targets import workout_targets as project_workout_targets
 
 COACH_SCHEMA_VERSION = 1
 ANALYZER_VERSION = "1.2.0"
@@ -28,6 +34,12 @@ GCT_SIDES_ANALYZER_VERSION = "1.5.0"
 SEGMENT_ANALYZER_VERSION = "1.6.0"
 PARTIAL_SEGMENT_ANALYZER_VERSION = "1.7.0"
 NATIVE_LAP_ANALYZER_VERSION = "1.8.0"
+LOGICAL_BOUT_ANALYZER_VERSION = "1.9.0"
+
+# Keep the existing schema exports consumed by coach_backfill explicit.
+LOGICAL_BOUT_SCHEMA_VERSION = _logical_bouts.SCHEMA_VERSION
+RECORDED_CADENCE_SCHEMA_VERSION = _recorded_cadence.SCHEMA_VERSION
+WORKOUT_TARGET_SCHEMA_VERSION = _workout_targets.SCHEMA_VERSION
 
 
 def _number(value: Any) -> float | None:
@@ -307,10 +319,14 @@ def analysis_id(
     gct_sides: dict[str, Any] | None = None,
     segment_metrics: dict[str, Any] | None = None,
     native_lap_workout_binding: dict[str, Any] | None = None,
+    logical_bouts: dict[str, Any] | None = None,
+    recorded_cadence: dict[str, Any] | None = None,
+    workout_targets: dict[str, Any] | None = None,
 ) -> str:
     value = {
         "activity_id": activity_id,
-        "analyzer_version": (NATIVE_LAP_ANALYZER_VERSION if native_lap_workout_binding is not None
+        "analyzer_version": (LOGICAL_BOUT_ANALYZER_VERSION if logical_bouts is not None or recorded_cadence is not None
+                             else NATIVE_LAP_ANALYZER_VERSION if native_lap_workout_binding is not None
                              else PARTIAL_SEGMENT_ANALYZER_VERSION if segment_metrics is not None and segment_metrics.get("schema_version") == 2
                              else SEGMENT_ANALYZER_VERSION if segment_metrics is not None
                              else GCT_SIDES_ANALYZER_VERSION if gct_sides is not None
@@ -332,6 +348,12 @@ def analysis_id(
         value["segment_running_metrics"] = segment_metrics
     if native_lap_workout_binding is not None:
         value["native_lap_workout_binding"] = native_lap_workout_binding
+    if logical_bouts is not None:
+        value["logical_bouts"] = logical_bouts
+    if recorded_cadence is not None:
+        value["recorded_cadence"] = recorded_cadence
+    if workout_targets is not None:
+        value["workout_targets"] = workout_targets
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(canonical).hexdigest()[:24]
 
@@ -347,13 +369,19 @@ def build_coach_input(
     context_revision = str(context.get("context_id")) if context else None
     metrics = expanded_recorded_running_metrics(activity, decoded_fit, endurance)
     training_effect = recorded_training_effect(activity, decoded_fit, endurance)
-    sides = ground_contact_sides(metrics, context)
     stored_context = (project_stored_context(stored_context_snapshot, metrics)
                       if stored_context_snapshot is not None else None)
     structure = workout_structure(decoded_fit)
     native_binding = native_lap_workout_binding(metrics, decoded_fit, structure)
+    targets = project_workout_targets(metrics, decoded_fit, structure)
     segments = segment_running_metrics(activity, decoded_fit, endurance, recorded=metrics,
                                        structure=structure, tcx_sha256=tcx_sha256, partial=True)
+    bouts = project_logical_bouts(metrics, decoded_fit, structure, native_binding, segments)
+    cadence = project_recorded_cadence(
+        metrics, decoded_fit, endurance=endurance, tcx_sha256=tcx_sha256,
+        structure=structure, segments=segments, logical=bouts,
+    )
+    sides = ground_contact_sides(metrics, context, segments=segments)
     identifier = analysis_id(
         activity_id=activity_id,
         fit_sha256=decoded_fit.get("source_fit_sha256"),
@@ -365,6 +393,9 @@ def build_coach_input(
         gct_sides=sides,
         segment_metrics=segments,
         native_lap_workout_binding=native_binding,
+        logical_bouts=bouts,
+        recorded_cadence=cadence,
+        workout_targets=targets,
     )
     summary = endurance.get("summary") if isinstance(endurance.get("summary"), dict) else {}
     bpm_seconds = endurance.get("heart_rate_seconds_by_bpm")
@@ -383,7 +414,7 @@ def build_coach_input(
             drift = round(second_hr - first_hr, 2)
     return {
         "schema_version": COACH_SCHEMA_VERSION,
-        "analyzer_version": NATIVE_LAP_ANALYZER_VERSION,
+        "analyzer_version": LOGICAL_BOUT_ANALYZER_VERSION,
         "analysis_id": identifier,
         "activity_id": activity_id,
         "activity": {
@@ -404,6 +435,9 @@ def build_coach_input(
         "ground_contact_sides": sides,
         "segment_running_metrics": segments,
         "native_lap_workout_binding": native_binding,
+        "logical_bouts": bouts,
+        "recorded_cadence": cadence,
+        "workout_targets": targets,
         **({"stored_context_snapshot": stored_context} if stored_context is not None else {}),
         "time_basis": "elapsed",
         "summary": {

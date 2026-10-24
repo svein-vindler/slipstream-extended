@@ -25,7 +25,7 @@ def test_native_laps_bind_explicit_step_even_when_derived_lap_clocks_are_unverif
             {"lap": 2, "source_message_index": 9, "status": "bound", "reason": None, "workout_step_index": 3},
         ],
     }
-    assert analysis["analyzer_version"] == "1.8.0"
+    assert analysis["analyzer_version"] == "1.9.0"
     assert [row["average_power"]["value"] for row in analysis["recorded_running_metrics"]["laps"]["items"]] == [111, 222]
     assert analysis["recorded_running_metrics"]["laps"]["items"][0]["average_ground_contact_balance"]["side_semantics"] == "unknown"
     assert source == before
@@ -151,7 +151,7 @@ def test_unverified_source_leaves_only_native_link_metadata_unavailable(mode):
     else:
         source["activity"]["date"] = "2026-01-02"
     analysis = build_coach_input(**source)
-    assert analysis["analyzer_version"] == "1.8.0"
+    assert analysis["analyzer_version"] == "1.9.0"
     assert analysis["native_lap_workout_binding"] == {
         "schema_version": 1, "method": "fit_lap_wkt_step_index",
         "measurement_source": "recorded_running_metrics.laps", "activity_id": "42",
@@ -182,9 +182,23 @@ def test_genuine17_fields_and_seed_stay_unchanged_while_new_identity_binds_metad
     before = json.loads((Path(__file__).parent / "fixtures/coach_engine_170_native_lap_transition.json").read_text())
     after = build_coach_input(**native_source_case())
     assert before["analyzer_version"] == "1.7.0" and "native_lap_workout_binding" not in before
-    assert {key: value for key, value in after.items()
-            if key not in ("analysis_id", "analyzer_version", "native_lap_workout_binding")} == {
-                key: value for key, value in before.items() if key not in ("analysis_id", "analyzer_version")}
+    original_fields = {key: value for key, value in after.items() if key not in (
+        "analysis_id", "analyzer_version", "native_lap_workout_binding",
+        "logical_bouts", "recorded_cadence", "workout_targets",
+    )}
+    current_gct = original_fields["ground_contact_sides"]
+    assert current_gct["schema_version"] == 2
+    assert set(current_gct) == set(before["ground_contact_sides"]) | {"record_aggregates"}
+    assert set(current_gct["record_aggregates"]) == {
+        "executed_intervals", "whole_distance_halves", "main_distance_halves",
+    }
+    # Only the schema marker and declared additive record groups differ from GCT1.
+    original_fields["ground_contact_sides"] = {
+        **{key: value for key, value in current_gct.items() if key not in ("schema_version", "record_aggregates")},
+        "schema_version": 1,
+    }
+    assert original_fields == {key: value for key, value in before.items()
+                               if key not in ("analysis_id", "analyzer_version")}
     seed = {
         "activity_id": before["activity_id"], "fit_sha256": before["source"]["fit_sha256"],
         "tcx_sha256": before["source"]["tcx_sha256"], "profile_id": before["profile"]["profile_id"],
@@ -192,7 +206,14 @@ def test_genuine17_fields_and_seed_stay_unchanged_while_new_identity_binds_metad
         "gct_sides": before["ground_contact_sides"], "segment_metrics": before["segment_running_metrics"],
     }
     assert analysis_id(**seed) == before["analysis_id"]
-    assert analysis_id(**seed, native_lap_workout_binding=after["native_lap_workout_binding"]) == after["analysis_id"]
+    current_seed = {
+        **seed, "gct_sides": after["ground_contact_sides"],
+        "segment_metrics": after["segment_running_metrics"],
+        "native_lap_workout_binding": after["native_lap_workout_binding"],
+        "logical_bouts": after["logical_bouts"], "recorded_cadence": after["recorded_cadence"],
+        "workout_targets": after["workout_targets"],
+    }
+    assert analysis_id(**current_seed) == after["analysis_id"]
     assert after["analysis_id"] != before["analysis_id"]
     assert build_coach_input(**native_source_case()) == after
     changed = native_source_case()
@@ -207,7 +228,7 @@ def test_genuine17_fields_and_seed_stay_unchanged_while_new_identity_binds_metad
 def test_exported_contract_cases_are_actual_sparse_complete_and_unbound_producer_outputs():
     cases = build_cases()
     assert set(cases) == {"complete", "sparse", "unbound"}
-    assert all(analysis["analyzer_version"] == "1.8.0" for analysis in cases.values())
+    assert all(analysis["analyzer_version"] == "1.9.0" for analysis in cases.values())
     assert cases["complete"]["native_lap_workout_binding"]["status"] == "available"
     assert cases["sparse"]["native_lap_workout_binding"]["status"] == "available"
     assert cases["sparse"]["recorded_running_metrics"]["laps"]["items"][0]["average_power"]["value"] is None

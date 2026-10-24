@@ -1045,6 +1045,589 @@ def _native_lap_binding_shape(value):
         raise BackupError("invalid_native_lap_binding")
 
 
+def _logical_bouts_shape(value):
+    """Validate stored references, without fetching FIT or reanalysing history."""
+    from .coach_segment_metrics import _epoch, _frame
+
+    block = value.get("logical_bouts")
+    if isinstance(block, dict) and type(block.get("schema_version")) is int and block["schema_version"] == 2:
+        _source_order_bouts_shape(value)
+        return
+    _exact(block, {"schema_version", "method", "clock_basis", "activity_id", "source_fit_sha256",
+                   "status", "reason", "occurrence_basis", "items", "unassigned_laps"})
+    if (type(block["schema_version"]) is not int or block["schema_version"] != 1
+            or block["method"] != "verified_native_lap_contiguity"
+            or block["clock_basis"] != "fit_start_time_plus_total_elapsed_time"
+            or block["activity_id"] != value["activity_id"]
+            or block["source_fit_sha256"] not in (None, value["source"]["fit_sha256"])
+            or block["occurrence_basis"] != "derived_verified_bout_order_per_step"
+            or not isinstance(block["items"], list) or not isinstance(block["unassigned_laps"], list)):
+        raise BackupError("invalid_logical_bouts")
+    recorded = value["recorded_running_metrics"]
+    ready = recorded["association"] == "matched" and recorded["source_fit_sha256"] is not None
+    if block["source_fit_sha256"] != (recorded["source_fit_sha256"] if ready else None):
+        raise BackupError("invalid_logical_bouts")
+    if not ready or recorded["laps"]["status"] != "available":
+        reason = "source_unavailable" if not ready else "recorded_laps_unavailable"
+        if (block["status"] != "unavailable" or block["reason"] != reason
+                or block["items"] or block["unassigned_laps"]):
+            raise BackupError("invalid_logical_bouts")
+        return
+    native = {row["lap"]: row for row in recorded["laps"]["items"]}
+    bindings = {row["lap"]: row for row in value["native_lap_workout_binding"]["items"]}
+    planned = {row["step_index"]: row for row in value["workout_structure"]["planned_steps"]}
+    executions = {row["lap"]: row for row in value["workout_structure"]["executed_laps"]}
+    segments = value["segment_running_metrics"]["executed_intervals"]
+    intervals = {row["interval"]: row for row in segments["items"]}
+    roles = {"active": "work", "rest": "recovery", "recovery": "recovery",
+             "warmup": "warmup", "cooldown": "cooldown"}
+    covered, occurrences, previous = [], {}, None
+    for ordinal, group in enumerate(block["items"], 1):
+        _exact(group, {"bout", "role", "source_intensity", "source_laps", "source_message_indices",
+                       "workout_step_index", "observed_step_occurrence", "planned_repeat_iteration",
+                       "start_time_utc", "end_time_utc", "record_aggregate"})
+        laps, indices, step = group["source_laps"], group["source_message_indices"], group["workout_step_index"]
+        start, end = _epoch(group["start_time_utc"]), _epoch(group["end_time_utc"])
+        if (type(group["bout"]) is not int or group["bout"] != ordinal
+                or not isinstance(laps, list) or not laps or any(type(lap) is not int for lap in laps)
+                or laps != list(range(laps[0], laps[0] + len(laps)))
+                or not isinstance(indices, list) or len(indices) != len(laps)
+                or any(type(index) is not int or index < 0 for index in indices)
+                or type(step) is not int or step < 0 or step not in planned
+                or not isinstance(group["source_intensity"], str) or not isinstance(group["role"], str)
+                or group["role"] != roles.get(group["source_intensity"])
+                or group["role"] not in roles.values()
+                or planned[step].get("intensity") != group["source_intensity"]
+                or group["planned_repeat_iteration"] is not None
+                or start is None or end is None or end <= start):
+            raise BackupError("invalid_logical_bouts")
+        occurrences[step] = occurrences.get(step, 0) + 1
+        if (type(group["observed_step_occurrence"]) is not int
+                or group["observed_step_occurrence"] != occurrences[step]):
+            raise BackupError("invalid_logical_bouts")
+        elapsed_end = None
+        for lap, index in zip(laps, indices, strict=True):
+            binding, execution = bindings.get(lap), executions.get(lap)
+            if (lap not in native or binding is None or execution is None
+                    or binding["status"] != "bound" or binding["source_message_index"] != index
+                    or binding["workout_step_index"] != step or execution["workout_step_index"] != step
+                    or execution["intensity"] != group["source_intensity"]):
+                raise BackupError("invalid_logical_bouts")
+            frame = _frame({"start_time": execution.get("start_time"),
+                            "total_elapsed_time": execution.get("elapsed_seconds")})
+            if (frame is None or frame["end"] <= frame["start"]
+                    or elapsed_end is not None and frame["start_time_utc"] != elapsed_end):
+                raise BackupError("invalid_logical_bouts")
+            elapsed_end = frame["end_time_utc"]
+        if group["end_time_utc"] != elapsed_end:
+            raise BackupError("invalid_logical_bouts")
+        if (group["start_time_utc"] != native[laps[0]]["start_time_utc"]
+                or previous is not None and (laps[0] <= previous["source_laps"][-1]
+                                            or start < _epoch(previous["end_time_utc"]))):
+            raise BackupError("invalid_logical_bouts")
+        if (previous is not None and previous["source_laps"][-1] + 1 == laps[0]
+                and previous["workout_step_index"] == step and previous["role"] == group["role"]
+                and previous["end_time_utc"] == group["start_time_utc"]):
+            raise BackupError("invalid_logical_bouts")
+        reference = group["record_aggregate"]
+        _exact(reference, {"status", "interval", "reason"})
+        if reference["status"] == "available":
+            row = intervals.get(reference["interval"]) if type(reference["interval"]) is int else None
+            if (row is None or group["role"] != "work" or segments["status"] != "available"
+                    or row["source_laps"] != laps or row["workout_step_index"] != step
+                    or row["start_time_utc"] != group["start_time_utc"]
+                    or row["end_time_utc"] != group["end_time_utc"] or reference["reason"] is not None):
+                raise BackupError("invalid_logical_bouts")
+        elif (reference["status"] != "unavailable" or reference["interval"] is not None
+              or not isinstance(reference["reason"], str) or not reference["reason"]):
+            raise BackupError("invalid_logical_bouts")
+        covered.extend(laps)
+        previous = group
+    unassigned = []
+    for row in block["unassigned_laps"]:
+        _exact(row, {"lap", "reason"})
+        if (type(row["lap"]) is not int or row["lap"] not in native
+                or row["reason"] not in ("native_binding_unverified", "role_unverified", "clock_basis_unverified")):
+            raise BackupError("invalid_logical_bouts")
+        unassigned.append(row["lap"])
+    if len(set(covered + unassigned)) != len(covered + unassigned):
+        raise BackupError("invalid_logical_bouts")
+    if sorted(covered + unassigned) != sorted(native):
+        raise BackupError("invalid_logical_bouts")
+    if block["items"]:
+        expected_status = "partial" if unassigned else "available"
+        expected_reason = "some_laps_unassigned" if unassigned else None
+        if (block["source_fit_sha256"] is None
+                or block["status"] != expected_status or block["reason"] != expected_reason):
+            raise BackupError("invalid_logical_bouts")
+    elif block["status"] != "unavailable" or block["reason"] != "no_verified_bouts":
+        raise BackupError("invalid_logical_bouts")
+
+
+def _source_order_bouts_shape(value):
+    """Stored source order is independent of elapsed timing and numeric scope."""
+    from .coach_segment_metrics import _epoch, _frame
+
+    block = value["logical_bouts"]
+    _exact(block, {"schema_version", "method", "grouping_basis", "activity_id", "source_fit_sha256",
+                   "status", "reason", "occurrence_basis", "items", "unassigned_laps", "source_coverage"})
+    if (block["method"] != "verified_native_source_order"
+            or block["grouping_basis"] != "verified_native_source_order"
+            or block["occurrence_basis"] != "derived_verified_source_order_per_step"
+            or block["activity_id"] != value["activity_id"]
+            or not isinstance(block["items"], list) or not isinstance(block["unassigned_laps"], list)):
+        raise BackupError("invalid_logical_bouts")
+    recorded = value["recorded_running_metrics"]
+    ready = recorded["association"] == "matched" and recorded["source_fit_sha256"] is not None
+    if block["source_fit_sha256"] != (recorded["source_fit_sha256"] if ready else None):
+        raise BackupError("invalid_logical_bouts")
+    coverage = block["source_coverage"]
+    if not ready or recorded["laps"]["status"] != "available":
+        reason = "source_unavailable" if not ready else "recorded_laps_unavailable"
+        if (coverage != {"status": "unavailable", "reason": reason}
+                or block["status"] != "unavailable" or block["reason"] != reason
+                or block["items"] or block["unassigned_laps"]):
+            raise BackupError("invalid_logical_bouts")
+        return
+    native = {row["lap"]: row for row in recorded["laps"]["items"]}
+    bindings = {row["lap"]: row for row in value["native_lap_workout_binding"]["items"]}
+    structure = value["workout_structure"]
+    executions = {row["lap"]: row for row in structure["executed_laps"]}
+    planned = {row["step_index"]: row for row in structure["planned_steps"]}
+    _exact(coverage, {"status", "reason", "raw_lap_count", "native_lap_count", "binding_count", "execution_count"})
+    counts = [coverage[name] for name in ("raw_lap_count", "native_lap_count", "binding_count", "execution_count")]
+    if (any(count is not None and (type(count) is not int or count < 0) for count in counts)
+            or counts[1:] != [len(native), len(bindings), len(structure["executed_laps"])]):
+        raise BackupError("invalid_logical_bouts")
+    if coverage["status"] == "unavailable":
+        if (coverage["reason"] != "source_coverage_unverified" or block["items"]
+                or block["status"] != "unavailable" or block["reason"] != "source_coverage_unverified"
+                or block["unassigned_laps"] != [{"lap": lap, "reason": "source_coverage_unverified"} for lap in native]):
+            raise BackupError("invalid_logical_bouts")
+        return
+    if coverage["status"] != "complete" or coverage["reason"] is not None or counts != [len(native)] * 4 or not native:
+        raise BackupError("invalid_logical_bouts")
+    if any(isinstance(group, dict) and isinstance(group.get("timing"), dict)
+           and group["timing"].get("status") == "available" for group in block["items"]):
+        # A local lap frame does not prove the complete session clock contract.
+        # Summarytimestamp is deliberately not used as an elapsed-end fallback.
+        segment = value["segment_running_metrics"]
+        start, end = _epoch(segment["session_start_time_utc"]), _epoch(segment["session_end_time_utc"])
+        if (segment["association"] != "matched" or segment["activity_id"] != block["activity_id"]
+                or segment["source_fit_sha256"] != block["source_fit_sha256"]
+                or segment["session_start_time_utc"] != recorded["session_start_time_utc"]
+                or start is None or end is None or end <= start):
+            raise BackupError("invalid_logical_bouts")
+        previous_end = start
+        for ordinal, (execution, lap) in enumerate(zip(structure["executed_laps"], recorded["laps"]["items"], strict=True), 1):
+            frame = _frame({"start_time": execution.get("start_time"),
+                            "total_elapsed_time": execution.get("elapsed_seconds")})
+            if (execution.get("lap") != ordinal or lap["lap"] != ordinal or frame is None
+                    or frame["start_time_utc"] != lap["start_time_utc"] or frame["end"] <= frame["start"]
+                    or frame["start"] < previous_end or frame["end"] > end):
+                raise BackupError("invalid_logical_bouts")
+            previous_end = frame["end"]
+    segments = value["segment_running_metrics"]["executed_intervals"]
+    intervals = {row["interval"]: row for row in segments["items"]}
+    roles = {"active": "work", "rest": "recovery", "recovery": "recovery", "warmup": "warmup", "cooldown": "cooldown"}
+    covered, occurrences, previous = set(), {}, None
+    for ordinal, group in enumerate(block["items"], 1):
+        _exact(group, {"bout", "role", "source_intensity", "source_laps", "source_message_indices",
+                       "workout_step_index", "observed_step_occurrence", "planned_repeat_iteration", "timing", "record_aggregate"})
+        laps, indices, step = group["source_laps"], group["source_message_indices"], group["workout_step_index"]
+        if (type(group["bout"]) is not int or group["bout"] != ordinal
+                or not isinstance(laps, list) or not laps or any(type(lap) is not int or lap < 1 for lap in laps)
+                or laps != list(range(laps[0], laps[0] + len(laps)))
+                or not isinstance(indices, list) or len(indices) != len(laps)
+                or any(type(index) is not int or index < 0 or index > 9007199254740991 for index in indices)
+                or type(step) is not int or step not in planned
+                or not isinstance(group["source_intensity"], str) or not isinstance(group["role"], str)
+                or group["role"] != roles.get(group["source_intensity"]) or group["role"] not in roles.values()
+                or planned[step].get("intensity") != group["source_intensity"] or group["planned_repeat_iteration"] is not None):
+            raise BackupError("invalid_logical_bouts")
+        occurrences[step] = occurrences.get(step, 0) + 1
+        if type(group["observed_step_occurrence"]) is not int or group["observed_step_occurrence"] != occurrences[step]:
+            raise BackupError("invalid_logical_bouts")
+        timing = group["timing"]
+        _exact(timing, {"status", "basis", "reason", "start_time_utc", "end_time_utc"})
+        if timing["basis"] != "fit_start_time_plus_total_elapsed_time":
+            raise BackupError("invalid_logical_bouts")
+        elapsed_end = None
+        for lap, index in zip(laps, indices, strict=True):
+            binding, execution = bindings.get(lap), executions.get(lap)
+            if (lap not in native or lap in covered or binding is None or execution is None
+                    or binding["status"] != "bound" or binding["source_message_index"] != index
+                    or binding["workout_step_index"] != step or execution["workout_step_index"] != step
+                    or execution["intensity"] != group["source_intensity"]):
+                raise BackupError("invalid_logical_bouts")
+            if timing["status"] == "available":
+                frame = _frame({"start_time": execution.get("start_time"), "total_elapsed_time": execution.get("elapsed_seconds")})
+                if (frame is None or frame["end"] <= frame["start"]
+                        or elapsed_end is not None and frame["start_time_utc"] != elapsed_end):
+                    raise BackupError("invalid_logical_bouts")
+                elapsed_end = frame["end_time_utc"]
+            covered.add(lap)
+        if timing["status"] == "available":
+            if (timing["reason"] is not None or timing["start_time_utc"] != native[laps[0]]["start_time_utc"]
+                    or timing["end_time_utc"] != elapsed_end):
+                raise BackupError("invalid_logical_bouts")
+        elif (timing["status"] != "unavailable" or timing["reason"] != "clock_basis_unverified"
+              or timing["start_time_utc"] is not None or timing["end_time_utc"] is not None):
+            raise BackupError("invalid_logical_bouts")
+        if (previous is not None and (laps[0] <= previous["source_laps"][-1]
+                or previous["source_laps"][-1] + 1 == laps[0] and previous["workout_step_index"] == step
+                and previous["role"] == group["role"])):
+            raise BackupError("invalid_logical_bouts")
+        reference = group["record_aggregate"]
+        _exact(reference, {"status", "interval", "reason"})
+        if reference["status"] == "available":
+            row = intervals.get(reference["interval"]) if type(reference["interval"]) is int else None
+            if (row is None or timing["status"] != "available" or group["role"] != "work"
+                    or segments["status"] != "available" or reference["reason"] is not None
+                    or row["source_laps"] != laps or row["workout_step_index"] != step
+                    or row["start_time_utc"] != timing["start_time_utc"] or row["end_time_utc"] != timing["end_time_utc"]):
+                raise BackupError("invalid_logical_bouts")
+        elif (reference["status"] != "unavailable" or reference["interval"] is not None
+              or not isinstance(reference["reason"], str) or not reference["reason"]
+              or timing["status"] == "unavailable" and reference["reason"] != timing["reason"]):
+            raise BackupError("invalid_logical_bouts")
+        previous = group
+    for row in block["unassigned_laps"]:
+        _exact(row, {"lap", "reason"})
+        if (type(row["lap"]) is not int or row["lap"] not in native or row["lap"] in covered
+                or row["reason"] not in ("native_binding_unverified", "role_unverified")):
+            raise BackupError("invalid_logical_bouts")
+        covered.add(row["lap"])
+    status = "partial" if block["items"] and block["unassigned_laps"] else "available" if block["items"] else "unavailable"
+    reason = "some_laps_unassigned" if status == "partial" else None if status == "available" else "no_verified_bouts"
+    if covered != set(native) or block["status"] != status or block["reason"] != reason:
+        raise BackupError("invalid_logical_bouts")
+
+
+def _recorded_cadence_shape(value):
+    """Validate the additive native running-cadence contract, never infer values."""
+    block = value["recorded_cadence"]
+    if isinstance(block, dict) and type(block.get("schema_version")) is int and block["schema_version"] == 2:
+        _exact(block, {"schema_version", "method", "activity_id", "source_fit_sha256", "association", "session", "laps", "record_aggregates"})
+        native = {**{name: item for name, item in block.items() if name != "record_aggregates"}, "schema_version": 1}
+        _recorded_cadence_shape({**value, "recorded_cadence": native})
+        _record_cadence_halves_shape(value)
+        return
+    _exact(block, {"schema_version", "method", "activity_id", "source_fit_sha256", "association", "session", "laps"})
+    if (type(block["schema_version"]) is not int or block["schema_version"] != 1
+            or block["method"] != "fit_running_native_cadence_conversion" or block["activity_id"] != value["activity_id"]):
+        raise BackupError("invalid_recorded_cadence")
+    source_reasons = {"source_unmatched", "source_identity_unverified", "session_ambiguous",
+                      "session_identity_unverified", "running_sport_unverified"}
+    precision = {"unverified", "base_unavailable", "base_invalid", "conflicting_base", "fraction_unavailable", "fraction_invalid"}
+    reasons = source_reasons | {"base_missing_or_invalid", "base_invalid", "base_alias_conflict", "fraction_missing_or_invalid", "fraction_invalid"}
+
+    def metric(row, name):
+        _exact(row, {"status", "value", "unit", "source_fields", "precision", "reason"})
+        prefix = "avg" if name == "average" else "max"
+        fields = row["source_fields"]
+        allowed = {f"{prefix}_cadence", f"{prefix}_running_cadence", f"{prefix}_fractional_cadence"}
+        if (row["unit"] != "steps_per_minute" or not isinstance(fields, list)
+                or any(not isinstance(field, str) or field not in allowed for field in fields)
+                or len(fields) != len(set(fields)) or len(fields) > 2):
+            raise BackupError("invalid_recorded_cadence")
+        if row["status"] == "available":
+            number = row["value"]
+            # FIT uint8 base/fraction encoding, not a physiological cutoff.
+            if (type(number) not in (int, float) or not math.isfinite(number) or not 0 <= number <= 511.96875
+                    or number * 64 != int(number * 64) or row["reason"] is not None
+                    or row["precision"] != "recorded_base_and_fraction"
+                    or fields not in ([f"{prefix}_cadence", f"{prefix}_fractional_cadence"],
+                                      [f"{prefix}_running_cadence", f"{prefix}_fractional_cadence"])):
+                raise BackupError("invalid_recorded_cadence")
+        elif (row["status"] != "unavailable" or row["value"] is not None
+              or not isinstance(row["reason"], str) or row["reason"] not in reasons
+              or not isinstance(row["precision"], str) or row["precision"] not in precision):
+            raise BackupError("invalid_recorded_cadence")
+
+    _exact(block["session"], {"average", "maximum"})
+    _exact(block["laps"], {"status", "reason", "items"})
+    for name in ("average", "maximum"):
+        metric(block["session"][name], name)
+    laps, recorded = block["laps"], value["recorded_running_metrics"]
+    if not isinstance(laps["items"], list):
+        raise BackupError("invalid_recorded_cadence")
+    if block["association"] != "matched":
+        reason = block["association"]
+        if (not isinstance(reason, str) or reason not in source_reasons or block["source_fit_sha256"] is not None
+                or laps != {"status": "unavailable", "reason": reason, "items": []}
+                or any(row["status"] != "unavailable" or row["reason"] != reason for row in block["session"].values())):
+            raise BackupError("invalid_recorded_cadence")
+        return
+    if (recorded["association"] != "matched" or not block["source_fit_sha256"]
+            or block["source_fit_sha256"] != recorded["source_fit_sha256"]):
+        raise BackupError("invalid_recorded_cadence")
+    if laps["status"] == "unavailable":
+        if laps["reason"] not in ("native_laps_unavailable", "lap_identity_unverified") or laps["items"]:
+            raise BackupError("invalid_recorded_cadence")
+        return
+    native = recorded["laps"]
+    if (laps["status"] != "available" or laps["reason"] is not None or native["status"] != "available"
+            or len(laps["items"]) != len(native["items"])):
+        raise BackupError("invalid_recorded_cadence")
+    for row, original in zip(laps["items"], native["items"], strict=True):
+        _exact(row, {"lap", "average", "maximum"})
+        if type(row["lap"]) is not int or row["lap"] != original["lap"]:
+            raise BackupError("invalid_recorded_cadence")
+        for name in ("average", "maximum"):
+            metric(row[name], name)
+
+
+def _record_cadence_halves_shape(value):
+    groups = value["recorded_cadence"]["record_aggregates"]
+    if not isinstance(groups, dict) or not {"whole_distance_halves"} <= set(groups) <= {"whole_distance_halves", "main_distance_halves", "executed_intervals", "recovery_bouts", "kilometer_splits"}:
+        raise BackupError("invalid_recorded_cadence")
+    for name in groups:
+        _record_cadence_half_shape(value, name)
+
+
+def _recovery_cadence_references(value):
+    """Bind cadence to already validated logical recovery and elapsed lap facts."""
+    from .coach_segment_metrics import _epoch, _frame
+
+    logical = value["logical_bouts"]
+    if (logical["schema_version"] != 2 or logical["status"] != "available"
+            or logical["source_coverage"]["status"] != "complete" or logical["unassigned_laps"]
+            or value["workout_structure"]["has_structured_workout"] is not True):
+        raise BackupError("invalid_recorded_cadence")
+    executed = {row["lap"]: row for row in value["workout_structure"]["executed_laps"]}
+    items = []
+    for row in logical["items"]:
+        if row["role"] != "recovery":
+            continue
+        timing = row["timing"]
+        selected = [executed[lap] for lap in row["source_laps"]]
+        frames = [_frame({"start_time": source["start_time"], "total_elapsed_time": source["elapsed_seconds"]})
+                  for source in selected]
+        if (timing["status"] != "available" or not selected
+                or any(frame is None or frame["end"] <= frame["start"] for frame in frames)
+                or any(source["workout_step_index"] != row["workout_step_index"]
+                       or source["intensity"] not in ("recovery", "rest") for source in selected)
+                or any(left["end"] != right["start"] for left, right in zip(frames, frames[1:], strict=False))
+                or _epoch(timing["start_time_utc"]) != frames[0]["start"]
+                or _epoch(timing["end_time_utc"]) != frames[-1]["end"]):
+            raise BackupError("invalid_recorded_cadence")
+        distance = sum(source["distance_m"] for source in selected)
+        if not math.isfinite(distance) or distance <= 0:
+            raise BackupError("invalid_recorded_cadence")
+        items.append({"bout": row["bout"], "source_laps": row["source_laps"],
+                      "workout_step_index": row["workout_step_index"], "distance_m": distance,
+                      "start_time_utc": timing["start_time_utc"], "end_time_utc": timing["end_time_utc"],
+                      "elapsed_seconds": frames[-1]["end"] - frames[0]["start"]})
+    return {"status": "available", "distance_basis": "fit_verified_recovery_bout_distance", "items": items}
+
+
+def _record_cadence_half_shape(value, group_name):
+    """Check stored record scope/coverage against the unchanged strict geometry."""
+    block = value["recorded_cadence"]
+    group = block["record_aggregates"][group_name]
+    if not isinstance(group, dict):
+        raise BackupError("invalid_recorded_cadence")
+    work, recovery = group_name == "executed_intervals", group_name == "recovery_bouts"
+    kilometers = group_name == "kilometer_splits"
+    basis = ("tcx_endurance_kilometer_splits" if kilometers else "fit_verified_recovery_bout_distance"
+             if recovery else "fit_executed_active_distance" if work else "tcx_endurance_distance")
+    if group_name == "main_distance_halves":
+        basis = group.get("distance_basis")
+        if basis not in ("fit_executed_main_distance", "tcx_endurance_distance_continuous_main"):
+            raise BackupError("invalid_recorded_cadence")
+    references = group_name == "main_distance_halves" and basis == "fit_executed_main_distance" and group.get("status") == "available"
+    literals = {"method": "fit_record_time_weighted_mean", "distance_basis": basis,
+                "clock_basis": "fit_start_time_plus_total_elapsed_time",
+                "interval_policy": "left_sample_hold_distance_progressing_max_30s",
+                "distance_allocation": "linear_between_record_distances", "input_unit": "rpm", "unit": "steps_per_minute",
+                "conversion": "2 * (cadence + fractional_cadence)", "valid_record_precision": "recorded_base_and_fraction"}
+    _exact(group, set(literals) | {"status", "reason", "items", "source_tcx_sha256", "source_fields", "session_start_time_utc",
+                                  "session_end_time_utc", "session_summary_timestamp_utc", "source_window"}
+           | ({"source_laps", "source_windows"} if references else set()))
+    if (any(group[name] != item for name, item in literals.items())
+            or group["source_tcx_sha256"] != value["source"]["tcx_sha256"]
+            or group["source_fields"] != ["cadence", "fractional_cadence"] or not isinstance(group["items"], list)):
+        raise BackupError("invalid_recorded_cadence")
+    window = group["source_window"]
+    _exact(window, {"disposition", "original_record_count", "boundary_excluded_record_count", "boundary_excluded_pair_count"})
+    count, excluded, pairs = window["original_record_count"], window["boundary_excluded_record_count"], window["boundary_excluded_pair_count"]
+    if (type(excluded) is not int or type(pairs) is not int or excluded not in (0, 1) or pairs != excluded
+            or count is not None and (type(count) is not int or count < 2)
+            or window["disposition"] != ("unverified" if count is None else "verified_terminal_exclusion" if excluded else "verified_in_frame")
+            or count is None and excluded != 0):
+        raise BackupError("invalid_recorded_cadence")
+    segment = value["segment_running_metrics"]
+    for name in ("session_start_time_utc", "session_end_time_utc", "session_summary_timestamp_utc"):
+        if group[name] is not None and group[name] != segment[name]:
+            raise BackupError("invalid_recorded_cadence")
+    if group["status"] != "available":
+        if (group["status"] != "unavailable" or not isinstance(group["reason"], str) or not group["reason"] or group["items"]):
+            raise BackupError("invalid_recorded_cadence")
+        return
+    original = ({**value["recorded_running_metrics"]["kilometer_splits"], "distance_basis": basis} if kilometers
+                else _recovery_cadence_references(value) if recovery else segment[group_name])
+    if (block["association"] != "matched" or group["reason"] is not None or original["status"] != "available"
+            or original["distance_basis"] != basis or len(group["items"]) != (len(original["items"]) if work or recovery or kilometers else 2)
+            or (work or recovery or kilometers) and not group["items"] or window != segment["source_window"]
+            or any(group[name] is None or group[name] != segment[name]
+                   for name in ("session_start_time_utc", "session_end_time_utc"))):
+        raise BackupError("invalid_recorded_cadence")
+    if references:
+        from .coach_segment_metrics import _epoch, _frame
+
+        structure = value["workout_structure"]
+        selected = [row for row in structure["executed_laps"] if row["section"] == "main"]
+        if (structure["has_structured_workout"] is not True or not selected
+                or group["source_laps"] != [row["lap"] for row in selected]
+                or not isinstance(group["source_windows"], list) or len(group["source_windows"]) != len(selected)):
+            raise BackupError("invalid_recorded_cadence")
+        for row, source in zip(group["source_windows"], selected, strict=True):
+            _exact(row, {"lap", "workout_step_index", "start_time_utc", "end_time_utc", "distance_m"})
+            frame = _frame({"start_time": source["start_time"], "total_elapsed_time": source["elapsed_seconds"]})
+            if (frame is None or type(row["lap"]) is not int or row["lap"] != source["lap"]
+                    or type(row["workout_step_index"]) is not int or row["workout_step_index"] != source["workout_step_index"]
+                    or type(row["distance_m"]) not in (int, float) or row["distance_m"] != source["distance_m"]
+                    or _epoch(row["start_time_utc"]) != frame["start"] or _epoch(row["end_time_utc"]) != frame["end"]):
+                raise BackupError("invalid_recorded_cadence")
+    elif group_name == "main_distance_halves" and value["workout_structure"]["has_structured_workout"] is not False:
+        raise BackupError("invalid_recorded_cadence")
+    identity = ({"bout" if recovery else "interval", "source_laps", "workout_step_index", "distance_m", "start_time_utc", "end_time_utc"}
+                if work or recovery else {"split" if kilometers else "segment", "start_distance_m", "end_distance_m", "distance_m"})
+    for row, source in zip(group["items"], original["items"], strict=True):
+        _exact(row, identity | {"average_cadence"})
+        if _json_bytes({name: row[name] for name in identity}) != _json_bytes({name: source[name] for name in identity}):
+            raise BackupError("invalid_recorded_cadence")
+        metric = row["average_cadence"]
+        _exact(metric, {"status", "value", "unit", "source_fields", "coverage"})
+        if metric["unit"] != "steps_per_minute" or metric["source_fields"] != ["cadence", "fractional_cadence"]:
+            raise BackupError("invalid_recorded_cadence")
+        coverage = metric["coverage"]
+        _exact(coverage, {"valid_seconds", "eligible_seconds", "excluded_gap_seconds", "contributing_intervals", "status", "boundary_excluded_seconds"})
+        times = [coverage[name] for name in ("valid_seconds", "eligible_seconds", "excluded_gap_seconds", "boundary_excluded_seconds")]
+        contributions = coverage["contributing_intervals"]
+        reference = None if recovery else source["average_power"]["coverage"]
+        if (any(type(number) not in (int, float) or not math.isfinite(number) or number < 0 for number in times)
+                or type(contributions) is not int or contributions < 0 or count is None or contributions > count - 1 - excluded
+                or coverage["valid_seconds"] > coverage["eligible_seconds"] + 0.001
+                or not recovery and not kilometers and any(coverage[name] != reference[name] for name in ("eligible_seconds", "excluded_gap_seconds", "boundary_excluded_seconds"))
+                or recovery and (sum(coverage[name] for name in ("eligible_seconds", "excluded_gap_seconds", "boundary_excluded_seconds"))
+                                 > source["elapsed_seconds"] + 0.001
+                                 or contributions > count - 1 - excluded
+                                 or not excluded and coverage["boundary_excluded_seconds"] != 0)
+                or coverage["status"] not in ("none", "partial", "complete")
+                or (coverage["status"] == "none") != (contributions == 0)
+                or contributions == 0 and coverage["valid_seconds"] != 0
+                or coverage["status"] == "complete" and (coverage["excluded_gap_seconds"] or coverage["boundary_excluded_seconds"]
+                    or abs(coverage["valid_seconds"] - coverage["eligible_seconds"]) > 0.001)):
+            raise BackupError("invalid_recorded_cadence")
+        if kilometers and (
+                contributions > count - 1 - excluded
+                or not excluded and (coverage["boundary_excluded_seconds"] != 0
+                    or any(coverage[name] != reference[name] for name in ("eligible_seconds", "excluded_gap_seconds")))
+                # Legacy km coverage includes the entire terminal pair; strict
+                # elapsed allocation may only remove time, never borrow it.
+                or excluded and sum(times[1:]) > reference["eligible_seconds"] + reference["excluded_gap_seconds"] + 0.001):
+            raise BackupError("invalid_recorded_cadence")
+        if metric["status"] == "available":
+            number = metric["value"]
+            if type(number) not in (int, float) or not math.isfinite(number) or not 0 <= number <= 511.9688 or not contributions:
+                raise BackupError("invalid_recorded_cadence")
+        elif metric["status"] not in ("missing", "invalid") or metric["value"] is not None or contributions:
+            raise BackupError("invalid_recorded_cadence")
+
+
+def _workout_targets_shape(value):
+    """Validate explicit stored typed units; never expand unknown target codes."""
+    block = value["workout_targets"]
+    _exact(block, {"schema_version", "method", "activity_id", "source_fit_sha256", "status", "reason", "items"})
+    if (type(block["schema_version"]) is not int or block["schema_version"] != 1
+            or block["method"] != "fit_active_typed_workout_fields" or block["activity_id"] != value["activity_id"]
+            or not isinstance(block["items"], list)):
+        raise BackupError("invalid_workout_targets")
+    if block["status"] == "unavailable":
+        reason = block["reason"]
+        if (not isinstance(reason, str) or reason not in ("source_unavailable", "no_planned_steps", "step_identity_unverified")
+                or block["items"] or reason == "source_unavailable" and block["source_fit_sha256"] is not None
+                or reason != "source_unavailable" and block["source_fit_sha256"] != value["source"]["fit_sha256"]):
+            raise BackupError("invalid_workout_targets")
+        return
+    planned = value["workout_structure"]["planned_steps"]
+    if (block["status"] != "available" or block["reason"] is not None or not block["items"]
+            or len(block["items"]) != len(planned) or value["recorded_running_metrics"]["association"] != "matched"
+            or not block["source_fit_sha256"] or block["source_fit_sha256"] != value["source"]["fit_sha256"]):
+        raise BackupError("invalid_workout_targets")
+
+    def number(item):
+        return type(item) in (int, float) and math.isfinite(item) and item >= 0
+
+    def raw(item):
+        return item is None or type(item) is int and 0 <= item < 4294967295 or isinstance(item, str) and len(item) <= 80
+
+    seen = set()
+    for row, original in zip(block["items"], planned, strict=True):
+        _exact(row, {"step_index", "duration", "target"})
+        step = row["step_index"]
+        if type(step) is not int or not 0 <= step < 65535 or step in seen or step != original["step_index"]:
+            raise BackupError("invalid_workout_targets")
+        seen.add(step)
+        duration = row["duration"]
+        _exact(duration, {"status", "type", "value", "unit", "source_field", "reason"})
+        kind = duration["type"]
+        if kind != original["duration_type"] or kind is not None and not isinstance(kind, str):
+            raise BackupError("invalid_workout_targets")
+        expected = {"time": ("duration_time", "s"), "repetition_time": ("duration_time", "s"),
+                    "distance": ("duration_distance", "m")}.get(kind, (None, None))
+        if (duration["source_field"], duration["unit"]) != expected:
+            raise BackupError("invalid_workout_targets")
+        if duration["status"] == "available":
+            if expected[0] is None or not number(duration["value"]) or duration["reason"] is not None:
+                raise BackupError("invalid_workout_targets")
+        elif (duration["status"] != "unavailable" or duration["value"] is not None
+              or duration["reason"] != ("active_duration_missing_or_invalid" if expected[0] else "duration_unit_unverified")):
+            raise BackupError("invalid_workout_targets")
+        target = row["target"]
+        if not isinstance(target, dict):
+            raise BackupError("invalid_workout_targets")
+        kind = target.get("type")
+        extra = {"unverified_source_values"} if kind not in ("open", "speed") else set()
+        _exact(target, {"type", "mode", "raw_value", "range"} | extra)
+        if kind != original["target_type"] or kind is not None and not isinstance(kind, str) or not raw(target["raw_value"]):
+            raise BackupError("invalid_workout_targets")
+        if target["raw_value"] is not None and target["raw_value"] != original["target_value"]:
+            raise BackupError("invalid_workout_targets")
+        span = target["range"]
+        _exact(span, {"status", "low", "high", "unit", "source_fields", "reason"})
+        if kind == "speed":
+            mode = target["mode"]
+            if (mode not in ("custom", "zone", "unverified") or span["unit"] != "m/s"
+                    or span["source_fields"] != ["custom_target_speed_low", "custom_target_speed_high"]
+                    or mode == "custom" and target["raw_value"] != 0
+                    or mode == "zone" and (type(target["raw_value"]) is not int or not 0 < target["raw_value"] < 65535)):
+                raise BackupError("invalid_workout_targets")
+            if span["status"] == "available":
+                if (mode != "custom" or not number(span["low"]) or not number(span["high"])
+                        or span["low"] > span["high"] or span["reason"] is not None):
+                    raise BackupError("invalid_workout_targets")
+            elif (span["status"] != "unavailable" or span["low"] is not None or span["high"] is not None
+                  or span["reason"] != {"custom": "custom_range_missing_or_invalid", "zone": "zone_not_expanded",
+                                        "unverified": "active_target_unverified"}[mode]):
+                raise BackupError("invalid_workout_targets")
+        else:
+            reason = "open_target" if kind == "open" else "target_unit_unverified"
+            if (target["mode"] != ("open" if kind == "open" else "unverified")
+                    or span != {"status": "unavailable", "low": None, "high": None, "unit": None,
+                                "source_fields": [], "reason": reason}):
+                raise BackupError("invalid_workout_targets")
+            if extra:
+                values = target["unverified_source_values"]
+                names = {"custom_target_value_low", "custom_target_value_high", "custom_target_heart_rate_low",
+                         "custom_target_heart_rate_high", "custom_target_power_low", "custom_target_power_high",
+                         "custom_target_cadence_low", "custom_target_cadence_high"}
+                if not isinstance(values, dict) or not set(values) <= names or not all(raw(item) for item in values.values()):
+                    raise BackupError("invalid_workout_targets")
+
+
 def _validate_value(key: str, value: Any):
     kind, parts = key_info(key)
     if kind == "context" and isinstance(value, dict) and type(value.get("schema_version")) is int and value["schema_version"] == 2:
@@ -1057,6 +1640,30 @@ def _validate_value(key: str, value: Any):
         if (value["date_source"] not in ("garmin_local", "utc_fallback")
                 or not valid_declaration(value["gct_balance_side"])):
             raise BackupError("invalid_gct_declaration")
+        return
+    if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") == "1.9.0":
+        legacy = {name: item for name, item in value.items() if name not in ("logical_bouts", "recorded_cadence", "workout_targets")}
+        sides = value.get("ground_contact_sides")
+        derived_sides = isinstance(sides, dict) and type(sides.get("schema_version")) is int and sides["schema_version"] == 2
+        if derived_sides:
+            # Validate the unchanged native subset with the old strict contract.
+            # This is only a validation view; stored bytes and old schemas stay untouched.
+            legacy["ground_contact_sides"] = {
+                **{name: item for name, item in sides.items() if name != "record_aggregates"}, "schema_version": 1,
+            }
+        _validate_value(key, {**legacy, "analyzer_version": "1.8.0"})
+        _logical_bouts_shape(value)
+        if "recorded_cadence" in value:
+            _recorded_cadence_shape(value)
+        if "workout_targets" in value:
+            _workout_targets_shape(value)
+        if derived_sides:
+            from .gct_sides import ground_contact_sides
+
+            expected = ground_contact_sides(value["recorded_running_metrics"], value["user_context"],
+                                            segments=value["segment_running_metrics"])
+            if _json_bytes(sides) != _json_bytes(expected):
+                raise BackupError("invalid_gct_sides")
         return
     if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") == "1.8.0":
         legacy = {name: item for name, item in value.items() if name != "native_lap_workout_binding"}
