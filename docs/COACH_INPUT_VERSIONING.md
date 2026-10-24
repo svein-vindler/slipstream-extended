@@ -42,6 +42,36 @@ limits remain in force. Maintainers must align catalog descriptions and
 registered schemas with the actual implemented interface before publishing;
 this documentation change does not generate catalog snapshots.
 
+## Complete recorded-lap heart-rate coverage (1.9.1)
+
+New generation determines complete section heart-rate coverage from actual valid
+contributions: every lap with a finite positive elapsed duration must have a
+finite recorded heart rate. Recorded zero remains a value; zero duration adds
+no weighted contribution. Missing or negative duration remains unknown, and a
+missing heart rate on a positive duration remains partial. Published times keep
+three decimal places and the observed weighted heart-rate mean keeps two.
+
+The same unpublished patch also retains a recorded enhanced lap speed of zero.
+Only absent/null enhanced speed selects the base field; a supplied invalid
+enhanced value stays unknown under the existing numeric conversion contract.
+
+Engine 1.9.1 participates in builder/content identities and input signatures.
+It retains the 1.9 family feature/schema checks. Genuine earlier engines,
+canonical keys, IDs and bytes are unchanged. Bulk eligibility does not advance
+because of the engine alone; an explicit targeted calculation can publish a new
+immutable version under the existing selection/reuse contract.
+
+Strict readers additionally recognize the original 1.9.0 rounding variant only
+when its structured executed laps prove complete positive-duration coverage,
+exact section membership/counts, recorded weighted mean, measurement coverage
+and published times/distance. A historical Python summation order and exact
+binary64 decimal rounding must reproduce those values and the original raw
+versus rounded time inequality. Equal published times alone are insufficient.
+The exception never applies to 1.9.1, missing pulse contributions or malformed
+metadata. Validation retains the stored partial label and never mutates history.
+Compatible readers and backup validation must precede producer activation;
+this source change does not authorize activation, regeneration or backfill.
+
 ## Source-ordered bouts, cadence and typed plan fields (1.9.0)
 
 New generation separates logical source grouping from measurement availability.

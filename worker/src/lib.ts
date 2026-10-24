@@ -73,6 +73,25 @@ export function parseDate(s: string): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
+/** Physical newlines inside a quoted field belong to the same CSV record. */
+function csvRecords(text: string): string[] {
+  const records: string[] = [];
+  let quoted = false;
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '"') {
+      if (quoted && text[i + 1] === '"') i++;
+      else quoted = !quoted;
+    } else if (!quoted && text[i] === "\n") {
+      const record = text.slice(start, text[i - 1] === "\r" ? i - 1 : i);
+      if (record.length) records.push(record);
+      start = i + 1;
+    }
+  }
+  if (start < text.length) records.push(text.slice(start));
+  return records;
+}
+
 /** The source calendar is independent of the UTC instant and home timezone. */
 export function activityCalendarDay(a: Activity): string | null {
   return validCalendarDay(a.localDate) ?? (a.date ? a.date.toISOString().slice(0, 10) : null);
@@ -86,7 +105,7 @@ export function validCalendarDay(value: unknown): string | undefined {
 }
 
 export function parseCsv(text: string): Activity[] {
-  const lines = text.split(/\r?\n/).filter((l) => l.length > 0);
+  const lines = csvRecords(text);
   if (lines.length < 2) return [];
   const header = parseCsvLine(lines[0]);
   const ix = (name: string) => header.indexOf(name);
@@ -115,7 +134,7 @@ export function parseCsv(text: string): Activity[] {
 }
 
 export function parseHealthCsv(text: string): HealthDay[] {
-  const lines = text.split(/\r?\n/).filter((line) => line.length > 0);
+  const lines = csvRecords(text);
   if (lines.length < 2) return [];
   const header = parseCsvLine(lines[0]);
   const ix = (name: string) => header.indexOf(name);

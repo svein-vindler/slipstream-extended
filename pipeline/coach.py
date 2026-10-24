@@ -35,6 +35,7 @@ SEGMENT_ANALYZER_VERSION = "1.6.0"
 PARTIAL_SEGMENT_ANALYZER_VERSION = "1.7.0"
 NATIVE_LAP_ANALYZER_VERSION = "1.8.0"
 LOGICAL_BOUT_ANALYZER_VERSION = "1.9.0"
+SECTION_COVERAGE_ANALYZER_VERSION = "1.9.1"
 
 # Keep the existing schema exports consumed by coach_backfill explicit.
 LOGICAL_BOUT_SCHEMA_VERSION = _logical_bouts.SCHEMA_VERSION
@@ -188,7 +189,8 @@ def workout_structure(decoded_fit: dict[str, Any]) -> dict[str, Any]:
             "elapsed_seconds": _number(row.get("total_elapsed_time")),
             "moving_seconds": _number(row.get("total_timer_time")),
             "distance_m": _number(row.get("total_distance")),
-            "average_speed_mps": _number(row.get("enhanced_avg_speed") or row.get("avg_speed")),
+            "average_speed_mps": _number(row.get("enhanced_avg_speed")
+                                         if row.get("enhanced_avg_speed") is not None else row.get("avg_speed")),
             "average_heart_rate_bpm": _number(row.get("avg_heart_rate")),
             "maximum_heart_rate_bpm": _number(row.get("max_heart_rate")),
             "ascent_m": _number(row.get("total_ascent")),
@@ -250,7 +252,7 @@ def _section_summaries(structure: dict[str, Any], summary: dict[str, Any]):
         coverage = (
             "unknown" if any(seconds is None or seconds < 0 for seconds in durations)
             else "none" if not covered
-            else "complete" if covered == elapsed else "partial"
+            else "complete" if len(observed) == sum(seconds > 0 for seconds in durations) else "partial"
         )
         output.append({
             "section": section,
@@ -325,7 +327,7 @@ def analysis_id(
 ) -> str:
     value = {
         "activity_id": activity_id,
-        "analyzer_version": (LOGICAL_BOUT_ANALYZER_VERSION if logical_bouts is not None or recorded_cadence is not None
+        "analyzer_version": (SECTION_COVERAGE_ANALYZER_VERSION if logical_bouts is not None or recorded_cadence is not None
                              else NATIVE_LAP_ANALYZER_VERSION if native_lap_workout_binding is not None
                              else PARTIAL_SEGMENT_ANALYZER_VERSION if segment_metrics is not None and segment_metrics.get("schema_version") == 2
                              else SEGMENT_ANALYZER_VERSION if segment_metrics is not None
@@ -414,7 +416,7 @@ def build_coach_input(
             drift = round(second_hr - first_hr, 2)
     return {
         "schema_version": COACH_SCHEMA_VERSION,
-        "analyzer_version": LOGICAL_BOUT_ANALYZER_VERSION,
+        "analyzer_version": SECTION_COVERAGE_ANALYZER_VERSION,
         "analysis_id": identifier,
         "activity_id": activity_id,
         "activity": {

@@ -259,6 +259,8 @@ def run(
         sample = select_activity_sample(
             activities, cardio_count=cardio_count, strength_count=strength_count
         )
+    if len(sample) > min(cardio_count + strength_count, MAX_ACTIVITY_SAMPLE_PER_RUN):
+        raise ValueError("Activity sample exceeds requested or per-run limit")
     for activity in sample:
         try:
             record = export_activity(activity, garmin, store, output)

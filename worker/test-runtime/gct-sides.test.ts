@@ -159,7 +159,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       const output = result.structuredContent;
       expect(output.available).toBe(true);
       const block = output.analysis.ground_contact_sides;
-      expect(output.analysis.analyzer_version).toBe("1.9.0");
+      expect(output.analysis.analyzer_version).toBe("1.9.1");
       expect(block.session.left_percent).toBe(mode === "left" ? 49.25 : mode === "right" ? 50.75 : null);
       expect(block.session.right_percent).toBe(mode === "left" ? 50.75 : mode === "right" ? 49.25 : null);
       expect(block.laps.items[1].left_percent).toBe(mode === "left" ? 51.25 : mode === "right" ? 48.75 : null);

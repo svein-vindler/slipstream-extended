@@ -56,7 +56,7 @@ function object(value: unknown): Record<string, unknown> | null {
     ? value as Record<string, unknown> : null;
 }
 
-function sourceUtcClock(value: unknown): Date | null {
+export function sourceUtcClock(value: unknown): Date | null {
   if (typeof value !== "string" || !localCalendarDay(value)) return null;
   const normalized = value.replace(" ", "T");
   const date = new Date(normalized + (/(?:Z|[+-][0-9]{2}:[0-9]{2})$/.test(normalized) ? "" : "Z"));

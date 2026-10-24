@@ -2,7 +2,7 @@ import { DispatchReader } from "./dispatch-reader";
 import { dispatchStatus, dispatchStatusSchema } from "./dispatch-status";
 import type { DispatchClaim, DispatchDescriptor, DispatchOperation } from "./dispatch-operations";
 import { readCurrentCoachInput } from "./coach-selection";
-import { activityCalendarYears, localCalendarDay, supportedActivityCalendarContract } from "./activity-clock";
+import { activityCalendarYears, localCalendarDay, sourceUtcClock, supportedActivityCalendarContract } from "./activity-clock";
 /** R2-first, explicitly authorized recent activity/night retrieval. */
 import { z } from "zod";
 import { Activity, hrvObjectKeys, rawGarminActivityId, sleepObjectKeys } from "./lib";
@@ -301,7 +301,7 @@ export class FreshDataService {
         .sort((a, b) => b.uploaded.getTime() - a.uploaded.getTime()).slice(0, 20);
       ids = recent.map((a) => a.key.split("/")[2]);
     }
-    const candidates: Array<{ id: string; local: string; prefix: string; decoded: Json }> = [];
+    const candidates: Array<{ id: string; local: string; utc: number | null; prefix: string; decoded: Json }> = [];
     for (const id of [...new Set(ids)]) {
       if (!/^\d{1,20}$/.test(id)) continue;
       for (const year of years) {
@@ -324,7 +324,11 @@ export class FreshDataService {
           try { validateRecentDate(local.slice(0, 10), this.now()); } catch { continue; }
         }
         if (/run|cycl|bik|walk|hik|swim|cardio|row|ski|elliptical|stair|snow|paddle|kayak|canoe|triathlon|multisport|strength/.test(String(activity.type))) {
-          candidates.push({ id, local, prefix, decoded });
+          const clock = typeof activity.start_time_gmt === "string" && /[T ]\d{2}:\d{2}/.test(activity.start_time_gmt)
+            ? sourceUtcClock(activity.start_time_gmt) : null;
+          const utc = clock && Math.abs(Date.parse(`${localDay}T00:00:00Z`)
+            - Date.parse(`${clock.toISOString().slice(0, 10)}T00:00:00Z`)) <= 86_400_000 ? clock.getTime() : null;
+          candidates.push({ id, local, utc, prefix, decoded });
         } else result.status = "unsupported_sport";
       }
     }
@@ -333,7 +337,19 @@ export class FreshDataService {
       result.package = { candidate_ids: candidates.map((a) => `garmin-${a.id}`) };
       result.missing_components = ["unambiguous_activity_id"]; return;
     }
-    candidates.sort((a, b) => b.local.localeCompare(a.local));
+    const unanchored = !request.activityId && !request.date && !(result.source_fresh
+      && typeof check.activity_id === "string" && check.activity_id.startsWith("garmin-"));
+    if (unanchored && candidates.some(candidate => candidate.utc === null)) {
+      result.status = "activity_date_unknown";
+      result.missing_components = ["verified_activity_utc"]; return;
+    }
+    candidates.sort((a, b) => (b.utc ?? -Infinity) - (a.utc ?? -Infinity));
+    if (unanchored && candidates.length > 1 && candidates[0].utc === candidates[1].utc) {
+      result.status = "ambiguous_activity";
+      result.package = { candidate_ids: candidates.filter(candidate => candidate.utc === candidates[0].utc)
+        .map(candidate => `garmin-${candidate.id}`) };
+      result.missing_components = ["unambiguous_activity_id"]; return;
+    }
     const selected = candidates[0];
     if (!selected) { result.missing_components = ["matching_local_activity"]; return; }
     validateRecentDate(selected.local.slice(0, 10), this.now());

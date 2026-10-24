@@ -18,7 +18,7 @@ def test_real_source_segments_keep_main_recovery_and_raw_scalar_policy(tmp_path,
     coach_backfill.run_one(activity=SEGMENT_ACTIVITY, store=store)
     _, analysis = selected(store)
     block = analysis["segment_running_metrics"]
-    assert analysis["analyzer_version"] == "1.9.0"
+    assert analysis["analyzer_version"] == "1.9.1"
     assert block["schema_version"] == 2 and block["activity_id"] == "42"
     assert block["source_fit_sha256"] == analysis["source"]["fit_sha256"]
     assert block["source_tcx_sha256"] == analysis["source"]["tcx_sha256"]
@@ -341,7 +341,7 @@ def test_genuine15_history_stays_readable_and_is_not_bulk_queued_by_engine_only(
     store.reset_counts()
     coach_backfill.run_one(activity=ACTIVITY, store=store)
     new_pointer, new = selected(store)
-    assert new["analyzer_version"] == "1.9.0"
+    assert new["analyzer_version"] == "1.9.1"
     assert new_pointer["analysis_key"] != old_pointer["analysis_key"]
     original_fields = {key: new[key] for key in old if key not in ("analysis_id", "analyzer_version")}
     current_gct = original_fields["ground_contact_sides"]

@@ -143,7 +143,7 @@ def test_current_recorded_analysis_backup_verify_restore_preserves_producer_byte
             objects[f"coach/profiles/v1/{profile['effective_from']}/{profile['profile_id']}.json"] = (
                 backup._json_bytes(profile)
             )
-    assert analysis["analyzer_version"] == "1.9.0"
+    assert analysis["analyzer_version"] == "1.9.1"
     assert analysis["analyzer_version"] != NATIVE_LAP_ANALYZER_VERSION
     assert analysis["stored_context_snapshot"]["reference_time_utc"] == "2026-10-07T23:30:00.000Z"
     assert analysis["recorded_running_metrics"]["association"] == "matched"

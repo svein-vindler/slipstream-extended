@@ -198,6 +198,8 @@ def select_activity_sample(
     seen: set[str] = set()
 
     def take(predicate, limit: int):
+        if limit <= 0:
+            return
         count = 0
         for item in activities:
             activity_id = str(item.get("activityId") or "")
@@ -304,13 +306,18 @@ def normalize_strength_session(activity_id: str, exercise_sets: Any) -> dict[str
     external_volume = 0.0
     total_active = 0.0
     total_rest = 0.0
+
+    def add_known(total, contribution):
+        return total + contribution if total is not None and contribution is not None else None
+
     for item in normalized:
         category = item["exercise"].get("category") or "UNKNOWN"
         exercise_name = item["exercise"].get("name") or category
-        reps = item.get("repetitions") or 0
-        weight = item.get("weight_kg") or 0
-        duration = item.get("active_duration_seconds") or 0
-        rest = item.get("rest_after_seconds") or 0
+        reps = item.get("repetitions")
+        weight = item.get("weight_kg")
+        duration = item.get("active_duration_seconds")
+        rest = item.get("rest_after_seconds")
+        volume = reps * weight if reps is not None and weight is not None else None
         for bucket, key in (
             (by_exercise, exercise_name),
             (by_category, category),
@@ -319,12 +326,12 @@ def normalize_strength_session(activity_id: str, exercise_sets: Any) -> dict[str
                 "sets": 0, "repetitions": 0, "external_volume_kg": 0.0,
             })
             summary["sets"] += 1
-            summary["repetitions"] += reps
-            summary["external_volume_kg"] += reps * weight
-        total_reps += reps
-        external_volume += reps * weight
-        total_active += duration
-        total_rest += rest
+            summary["repetitions"] = add_known(summary["repetitions"], reps)
+            summary["external_volume_kg"] = add_known(summary["external_volume_kg"], volume)
+        total_reps = add_known(total_reps, reps)
+        external_volume = add_known(external_volume, volume)
+        total_active = add_known(total_active, duration)
+        total_rest = add_known(total_rest, rest)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -333,9 +340,9 @@ def normalize_strength_session(activity_id: str, exercise_sets: Any) -> dict[str
         "summary": {
             "active_sets": len(normalized),
             "total_repetitions": total_reps,
-            "external_volume_kg": round(external_volume, 3),
-            "active_duration_seconds": round(total_active, 3),
-            "rest_duration_seconds": round(total_rest, 3),
+            "external_volume_kg": round(external_volume, 3) if external_volume is not None else None,
+            "active_duration_seconds": round(total_active, 3) if total_active is not None else None,
+            "rest_duration_seconds": round(total_rest, 3) if total_rest is not None else None,
             "by_exercise": by_exercise,
             "by_category": by_category,
         },

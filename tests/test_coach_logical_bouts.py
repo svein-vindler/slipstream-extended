@@ -49,7 +49,7 @@ def test_real_fit_groups_split_work_but_separates_the_same_step_after_recovery(t
     assert result["blocked_activities"] == []
 
     block = analysis["logical_bouts"]
-    assert analysis["analyzer_version"] == "1.9.0"
+    assert analysis["analyzer_version"] == "1.9.1"
     assert block["schema_version"] == 2
     assert block["method"] == "verified_native_source_order"
     assert block["activity_id"] == "42"

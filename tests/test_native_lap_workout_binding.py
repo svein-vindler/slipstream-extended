@@ -25,7 +25,7 @@ def test_native_laps_bind_explicit_step_even_when_derived_lap_clocks_are_unverif
             {"lap": 2, "source_message_index": 9, "status": "bound", "reason": None, "workout_step_index": 3},
         ],
     }
-    assert analysis["analyzer_version"] == "1.9.0"
+    assert analysis["analyzer_version"] == "1.9.1"
     assert [row["average_power"]["value"] for row in analysis["recorded_running_metrics"]["laps"]["items"]] == [111, 222]
     assert analysis["recorded_running_metrics"]["laps"]["items"][0]["average_ground_contact_balance"]["side_semantics"] == "unknown"
     assert source == before
@@ -151,7 +151,7 @@ def test_unverified_source_leaves_only_native_link_metadata_unavailable(mode):
     else:
         source["activity"]["date"] = "2026-01-02"
     analysis = build_coach_input(**source)
-    assert analysis["analyzer_version"] == "1.9.0"
+    assert analysis["analyzer_version"] == "1.9.1"
     assert analysis["native_lap_workout_binding"] == {
         "schema_version": 1, "method": "fit_lap_wkt_step_index",
         "measurement_source": "recorded_running_metrics.laps", "activity_id": "42",
@@ -228,7 +228,7 @@ def test_genuine17_fields_and_seed_stay_unchanged_while_new_identity_binds_metad
 def test_exported_contract_cases_are_actual_sparse_complete_and_unbound_producer_outputs():
     cases = build_cases()
     assert set(cases) == {"complete", "sparse", "unbound"}
-    assert all(analysis["analyzer_version"] == "1.9.0" for analysis in cases.values())
+    assert all(analysis["analyzer_version"] == "1.9.1" for analysis in cases.values())
     assert cases["complete"]["native_lap_workout_binding"]["status"] == "available"
     assert cases["sparse"]["native_lap_workout_binding"]["status"] == "available"
     assert cases["sparse"]["recorded_running_metrics"]["laps"]["items"][0]["average_power"]["value"] is None

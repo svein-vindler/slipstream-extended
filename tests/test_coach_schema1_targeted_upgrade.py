@@ -47,7 +47,7 @@ def test_targeted_upgrades_genuine_schema1_preserves_history_and_replays_without
     }, sort_keys=True), encoding="utf-8")
 
     assert generated["blocked_activities"] == [] and generated["reused_sources"] == {}
-    assert current_analysis["analyzer_version"] == current_pointer["analyzer_version"] == "1.9.0"
+    assert current_analysis["analyzer_version"] == current_pointer["analyzer_version"] == "1.9.1"
     assert current_analysis["logical_bouts"]["schema_version"] == 2
     assert current_analysis["logical_bouts"]["method"] == "verified_native_source_order"
     assert current_key != old_key and current_analysis["analysis_id"] != old_analysis["analysis_id"]

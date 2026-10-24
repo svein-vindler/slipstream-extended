@@ -69,7 +69,7 @@ def test_source_order_groups_keep_complete_native_refs_without_claiming_elapsed_
 
     block = analysis["logical_bouts"]
     assert block["grouping_basis"] == "verified_native_source_order"
-    assert block["schema_version"] == 2 and analysis["analyzer_version"] == "1.9.0"
+    assert block["schema_version"] == 2 and analysis["analyzer_version"] == "1.9.1"
     assert block["status"] == "available" and block["reason"] is None
     assert block["unassigned_laps"] == []
     assert block["occurrence_basis"] == "derived_verified_source_order_per_step"
