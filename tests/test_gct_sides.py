@@ -28,7 +28,7 @@ def test_source_bound_session_and_actual_lap_sides(tmp_path, record_property):
         key: base64.b64encode(body).decode() for key, body in store.objects.items()
     }, sort_keys=True))
     sides = analysis["ground_contact_sides"]
-    assert analysis["analyzer_version"] == "1.8.0"
+    assert analysis["analyzer_version"] == "1.9.0"
     assert sides["session"] == {
         "status": "available", "left_percent": 49.25, "right_percent": 50.75,
         "recorded_side": "left", "calculated_side": "right", "method": "recorded_and_complement",
@@ -117,7 +117,7 @@ def test_genuine140_checkpoint_upgrade_retains_canonical_bytes(tmp_path, record_
     record_property("legacy_noop_counts", json.dumps(store.counts))
     coach_backfill.run_one(activity=ACTIVITY, store=store)
     new_pointer, new = selected(store)
-    assert new["analyzer_version"] == "1.8.0"
+    assert new["analyzer_version"] == "1.9.0"
     assert new_pointer["analysis_key"] != old_pointer["analysis_key"]
     assert store.objects[old_pointer["analysis_key"]] == before[old_pointer["analysis_key"]]
     store.reset_counts()

@@ -228,17 +228,18 @@ def test_legacy_analysis_profile_and_context_bytes_remain_readable_after_new_pub
     context_key = f"{PREFIX}/context/v1/2026-09-30T12-00-00.json"
     context_bytes = b'{"context_id":"synthetic-legacy-context","rpe":6}'
     client.objects[context_key] = context_bytes
-    # Explicit old-format/seed fixture, not today's1.4 builder relabelled as
-    # genuine historical producer evidence. Genuine legacy bytes have their own
-    # transition fixtures and retention tests.
+    # Explicit synthetic 1.2-format/seed projection from the current builder,
+    # not genuine historical producer evidence. Genuine legacy bytes have their
+    # own transition fixtures and retention tests.
     legacy = build_coach_input(
         activity=ACTIVITY, decoded_fit=client.read(f"{PREFIX}/activity.v1.json"),
         endurance=client.read(f"{PREFIX}/activity.endurance.v1.json"),
         profile=client.read(profile_key), tcx_sha256=hashlib.sha256(b"synthetic tcx").hexdigest(),
         context=client.read(context_key),
     )
-    del legacy["training_effect"]
-    del legacy["native_lap_workout_binding"]
+    for field in ("training_effect", "ground_contact_sides", "segment_running_metrics",
+                  "native_lap_workout_binding", "logical_bouts", "recorded_cadence", "workout_targets"):
+        del legacy[field]
     legacy["analyzer_version"] = "1.2.0"
     legacy["analysis_id"] = analysis_id(
         activity_id=ACTIVITY["id"], fit_sha256=legacy["source"]["fit_sha256"],
@@ -251,7 +252,9 @@ def test_legacy_analysis_profile_and_context_bytes_remain_readable_after_new_pub
     client.objects[f"{PREFIX}/coach-input/v1/latest-ready.json"] = json.dumps({
         "schema_version": 1, "analysis_key": old_key,
     }).encode()
-    new = coach_backfill.run(store=client.store())["completed_this_run"][0]
+    publication = coach_backfill.run(store=client.store())
+    assert publication["blocked_activities"] == []
+    new = publication["completed_this_run"][0]
     targeted = coach_backfill.run_one(activity=ACTIVITY, store=client.store())
     assert new["key"] != old_key
     assert targeted["processed_sources"]["1"] == new["analysis_id"]

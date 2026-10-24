@@ -42,6 +42,53 @@ limits remain in force. Maintainers must align catalog descriptions and
 registered schemas with the actual implemented interface before publishing;
 this documentation change does not generate catalog snapshots.
 
+## Source-ordered bouts, cadence and typed plan fields (1.9.0)
+
+New generation separates logical source grouping from measurement availability.
+`logical_bouts` schema 2 accounts for the complete ordered native, binding and
+execution lists before grouping consecutive verified same-step work or recovery
+laps. A derived occurrence is labelled `derived_verified_source_order_per_step`,
+not an explicit FIT repeat iteration. Unbound or conflicting laps break groups;
+unknown elapsed timing does not erase verified source membership. Timing and
+record-value references keep their independent session/lap elapsed-frame gates.
+Source grouping alone does not establish physical continuity, a combined mean,
+planned completion or the athlete's intent.
+
+`recorded_cadence` keeps native session/lap averages and maxima separate from
+record-derived means. For a verified running source, the already-decoded FIT
+base and fractional cadence convert once as `2 * (base + fraction)` to steps per
+minute. Missing fraction is not assumed zero, conflicting aliases are not added,
+and a cycling source is not doubled. Eligible `record_aggregates` use the existing
+strict source clocks, distance partitions, left-sample allocation, gap/terminal
+exclusion and per-field coverage. Native means never fill record-data holes;
+unknown scopes remain unavailable. The six original running metrics are retained.
+
+`workout_targets` schema 1 references explicit unique workout-step identities.
+It exposes verified active typed duration fields in seconds or metres and custom
+speed ranges in metres per second, without scaling an already-decoded value a
+second time. A recorded custom-target code zero is retained. Missing typed data
+is not inferred from a raw parent zero; mixed/unknown heart-rate, power and cadence
+target codes remain explicitly unverified raw values. The original plan remains
+separate from recorded execution, and neither block claims completion.
+
+`ground_contact_sides` schema 2 retains the earlier native projection and adds
+eligible existing record-mean references under the same activity/FIT/context/date
+declaration. Raw balance and its unknown manufacturer-side semantics are unchanged.
+Both values in a new aggregate-side row are labelled derived: a raw scalar mean
+assigned to the declared side, plus its complement. They are not two measured
+contact channels or a demonstrated total-contact-time ratio. The declaration
+does not establish a convention for another activity, FIT file or watch.
+
+New blocks participate in deterministic content identity and version-aware reuse.
+Genuine earlier canonical objects, schemas, IDs and bytes remain unchanged;
+engine advancement alone never queues historical regeneration. An explicitly
+requested calculation can publish a new immutable version; identical verified
+input is reusable without rewriting it. Compatible strict readers and backup
+validation must precede producer activation. After 1.9 storage, retain compatible
+readers or use a forward fix, never remove or relabel history for an old reader.
+No Garmin fetch, live regeneration, backfill or training advice follows from
+this version or its read-time presentation.
+
 ## Original native laps with verified workout-step references (1.8.0)
 
 New generation adds `native_lap_workout_binding`, schema 1. Its method is

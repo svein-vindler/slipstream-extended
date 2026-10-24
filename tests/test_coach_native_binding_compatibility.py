@@ -159,7 +159,7 @@ def test_native_current_bulk_reuses_new_fingerprint_without_history_rewrite():
     first = coach_backfill.run_one(activity=activity, store=store)
     pointer = json.loads(store.objects["activities/2026/1/coach-input/v1/latest-ready.json"])
     analysis = json.loads(gzip.decompress(store.objects[pointer["analysis_key"]]))
-    assert analysis["analyzer_version"] == pointer["analyzer_version"] == "1.8.0"
+    assert analysis["analyzer_version"] == pointer["analyzer_version"] == "1.9.0"
     assert analysis["native_lap_workout_binding"]["reason"] == "source_unavailable"
     before = store.objects.copy()
     store.reset_counts()

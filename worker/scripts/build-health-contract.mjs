@@ -27,6 +27,17 @@ execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
 execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
   "scripts/build_native_lap_binding_contract.py", "worker/test-runtime/generated/native-lap-binding.json",
 ], { cwd: root, stdio: "inherit" });
+// Frozen genuine generations remain distinct from the current producer.
+copyFileSync(new URL("../../tests/fixtures/coach_engine_190_logical_schema1.json", import.meta.url),
+  new URL("../test-runtime/generated/logical-bouts.json", import.meta.url));
+copyFileSync(new URL("../../tests/fixtures/coach_engine_190_source_order.json", import.meta.url),
+  new URL("../test-runtime/generated/logical-bouts-source-order.json", import.meta.url));
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_logical_bouts_contract.py", "worker/test-runtime/generated/logical-bouts-current.json",
+], { cwd: root, stdio: "inherit" });
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_logical_bouts_contract.py", "worker/test-runtime/generated/recorded-cadence-current.json", "cadence",
+], { cwd: root, stdio: "inherit" });
 execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
   "scripts/build_coach_stored_context_contract.py", "worker/test-runtime/generated/coach-stored-context.json",
 ], { cwd: root, stdio: "inherit" });

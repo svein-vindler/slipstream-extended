@@ -90,29 +90,102 @@ function expectBoundedReads(identifier = produced.analysis_id, activityId = "42"
 const contextCases = ["sparse", "missing_hrv", "after", "time_unknown", "ambiguous", "morning", "retained", "retained_unknown",
   "source_error", "garmin_residual", "partial_local", "zero", "invalid_measurement"] as const;
 for (const protocol of ["2025-03-26", "2026-07-28"]) {
-  for (const mode of ["zero", "retained", "after"] as const) {
+  for (const mode of ["zero", "retained", "after", "partial_local"] as const) {
     it(`Coach presentation frozen context: ${mode} keeps temporal status and observed values via ${protocol}`, async () => {
       const fixture = produced.cases[mode];
       load(fixture.objects_base64);
       const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+      const omitted = await call(protocol);
+      expect(omitted.available).toBe(true);
+      expectBoundedReads(fixture.analysis_id);
+      clearSummaryCaches(); operations.length = 0;
+      const full = await call(protocol, "garmin-42", { format: "full" });
+      expect(full).toEqual(omitted);
+      expect(full.analysis).toMatchObject({ analysis_id: fixture.analysis_id,
+        summary: { distance_m: 2000 } });
+      expectBoundedReads(fixture.analysis_id);
+      const original = full.analysis.stored_context_snapshot;
+      expect(original).toMatchObject({ schema_version: 1, snapshot_at: "2026-10-19T08:00:00.000Z",
+        reference_time_utc: "2026-10-19T07:00:00.000Z", semantics: "retrospective_pre_activity" });
+      clearSummaryCaches(); operations.length = 0;
       const output = await call(protocol, "garmin-42", { format: "coach" });
       expect(output.available).toBe(true);
       expect(output).not.toHaveProperty("analysis");
+      // The full source determines historical engine identity. The additional
+      // archived input is genuine1.6, never relabelled as the current producer.
+      expect(output.presentation.source_analysis_id).toBe(fixture.analysis_id);
+      expect(output.presentation.source_analyzer_version).toBe(full.analysis.analyzer_version);
       const text = output.presentation.text;
       const line = text.split("\n").find((value: string) => value.startsWith("Stored context: "));
       expect(line).toBeDefined();
       const snapshot = JSON.parse(line!.slice("Stored context: ".length));
-      expect(snapshot).toMatchObject({ reference_time_utc: "2026-10-19T07:00:00.000Z", semantics: "retrospective_pre_activity" });
+      expect(snapshot).toMatchObject({ snapshot_at: "2026-10-19T08:00:00.000Z",
+        reference_time_utc: "2026-10-19T07:00:00.000Z", semantics: "retrospective_pre_activity" });
+      expect(text).not.toContain(JSON.stringify(original));
+      const context = text.slice(text.indexOf("Stored context:"), text.indexOf("\nSections:"));
+      expect(context).toContain("  sleep:");
+      expect(context).toContain("  hrv:");
+      expect(context).toContain("  training_day:");
+      const sleep = context.slice(context.indexOf("  sleep:"), context.indexOf("  hrv:"));
+      const hrv = context.slice(context.indexOf("  hrv:"), context.indexOf("  training_day:"));
+      const training = context.slice(context.indexOf("  training_day:"));
+      const readiness = training.split("\n").find((value: string) => value.trimStart().startsWith("readiness:"));
+      const recovery = training.split("\n").find((value: string) => value.trimStart().startsWith("recovery:"));
+      for (const source of [sleep, hrv]) {
+        expect(source).toContain('"source":"garmin"');
+        expect(source).toContain('"source_checked_at":"2026-10-19T08:00:00.000Z"');
+        expect(source).toContain('"wake_date":"2026-10-19"');
+      }
+      expect(readiness).toContain('source_checked_at: "2026-10-19T08:00:00Z"');
+      expect(recovery).toContain('source_checked_at: "2026-10-19T08:00:00Z"');
       if (mode === "zero") {
-        expect(snapshot.sleep.metrics.sleep_score).toMatchObject({ value: 0, status: "available" });
-        expect(snapshot.hrv.metrics.last_night_avg_ms).toMatchObject({ value: 0, status: "available" });
-        expect(snapshot.training_day.recovery).toMatchObject({ value: 0, status: "available" });
+        expect(original.sleep.metrics.sleep_score).toMatchObject({ value: 0, status: "available", unit: "score_0_100" });
+        expect(original.hrv.metrics.last_night_avg_ms).toMatchObject({ value: 0, status: "available", unit: "ms" });
+        expect(original.training_day.recovery).toMatchObject({ value: 0, status: "available", unit: "minutes" });
+        expect(sleep).toContain('sleep_seconds: 25200 "s"; status: "available"');
+        expect(sleep).toContain('sleep_score: 0 "score_0_100"; status: "available"');
+        expect(hrv).toContain('last_night_avg_ms: 0 ms; status: "available"');
+        expect(readiness).toContain('readiness: 1 "score_1_100"; status: "available"');
+        expect(recovery).toContain('recovery: 0 "minutes"; status: "available"');
       } else if (mode === "retained") {
-        expect(snapshot.training_day).toMatchObject({ readiness: { retained_previous: true, source_checked_at: "2026-10-19T08:00:00Z" },
+        expect(original.training_day).toMatchObject({ readiness: { retained_previous: true, source_checked_at: "2026-10-19T08:00:00Z" },
           last_attempt: { status: "auth_required", attempted_at: "2026-10-19T09:00:00Z" } });
+        expect(original.training_day).toMatchObject({ readiness: { value: 80, unit: "score_1_100",
+          observation_at: "2026-10-19T06:00:00+00:00" }, recovery: { value: 0, unit: "minutes", retained_previous: true } });
+        expect(sleep).toContain('sleep_score: 82 "score_0_100"; status: "available"');
+        expect(hrv).toContain('last_night_avg_ms: 50 ms; status: "available"');
+        expect(training).toContain('"last_attempt":{"status":"auth_required","attempted_at":"2026-10-19T09:00:00Z"}');
+        expect(readiness).toContain('readiness: 80 "score_1_100"; status: "available"');
+        expect(readiness).toContain("retained_previous: true");
+        expect(recovery).toContain('recovery: 0 "minutes"; status: "available"');
+        expect(recovery).toContain("retained_previous: true");
+      } else if (mode === "after") {
+        expect(original.sleep.status).toBe("after_activity");
+        expect(original.training_day).toMatchObject({ temporal_status: "after_activity", readiness: { value: null, status: "unavailable" } });
+        expect(sleep).toContain('"status":"after_activity"');
+        expect(hrv).toContain('"status":"after_activity"');
+        expect(sleep).toContain('"observation_end_utc":"2026-10-19T08:00:00.000Z"');
+        expect(sleep).toContain('sleep_seconds: null; status: "unavailable"; unit: "s"');
+        expect(training).toContain('"temporal_status":"after_activity"');
+        expect(readiness).toContain('readiness: null; status: "unavailable"; unit: "score_1_100"');
+        expect(readiness).toContain('observation_at: "2026-10-19T08:00:00+00:00"');
       } else {
-        expect(snapshot.sleep.status).toBe("after_activity");
-        expect(snapshot.training_day).toMatchObject({ temporal_status: "after_activity", readiness: { value: null, status: "unavailable" } });
+        for (const kind of ["sleep", "hrv"]) expect(original[kind]).toMatchObject({ status: "local_time_unknown",
+          local_time_source: "unavailable", sleep_start_local: "2026-10-19T00:00:00+02:00", sleep_end_local: null,
+          observation_start_utc: "2026-10-18T22:00:20.000Z", observation_end_utc: "2026-10-19T05:00:20.000Z" });
+        for (const source of [sleep, hrv]) {
+          expect(source).toContain('"status":"local_time_unknown"');
+          expect(source).toContain('"local_time_source":"unavailable"');
+          expect(source).toContain('"observation_start_utc":"2026-10-18T22:00:20.000Z"');
+          expect(source).toContain('"observation_end_utc":"2026-10-19T05:00:20.000Z"');
+        }
+        expect(sleep).toContain('sleep_seconds: null; status: "unavailable"; unit: "s"');
+        expect(hrv).toContain('last_night_avg_ms: null; status: "unavailable"; unit: "ms"');
+        expect(readiness).toContain('readiness: 80 "score_1_100"; status: "available"');
+      }
+      if (mode !== "after") {
+        expect(readiness).toContain('observation_at: "2026-10-19T06:00:00+00:00"');
+        expect(recovery).toContain('observation_at: "2026-10-19T06:00:00+00:00"');
       }
       expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
       expectBoundedReads(fixture.analysis_id);
@@ -125,7 +198,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
       const output = await call(protocol);
       expect(output.available).toBe(true);
-      expect(output.analysis).toMatchObject({ analysis_id: fixture.analysis_id, analyzer_version: "1.8.0",
+      expect(output.analysis).toMatchObject({ analysis_id: fixture.analysis_id, analyzer_version: "1.9.0",
         summary: { distance_m: 2000 }, recorded_running_metrics: { schema_version: 2, association: "matched" } });
       const context = output.analysis.stored_context_snapshot;
       expect(context).toMatchObject({ reference_time_utc: "2026-10-19T07:00:00.000Z", semantics: "retrospective_pre_activity" });
@@ -242,7 +315,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
   it(`stored context raw-field integrity: genuine snapshot remains readable but nested raw device data fails closed via ${protocol}`, async () => {
     const original = await call(protocol);
     expect(original.available).toBe(true);
-    expect(original.analysis.analyzer_version).toBe("1.8.0");
+    expect(original.analysis.analyzer_version).toBe("1.9.0");
     expect(original.analysis.stored_context_snapshot).toMatchObject({ schema_version: 1,
       reference_time_utc: "2026-10-19T07:00:00.000Z", semantics: "retrospective_pre_activity",
       sleep: { status: "available", metrics: { sleep_seconds: { value: 25200 } } },

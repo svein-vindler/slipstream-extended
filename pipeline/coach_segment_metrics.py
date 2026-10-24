@@ -141,11 +141,12 @@ def _pieces(windows, cells):
     return pieces
 
 
-def _means(points, cells, pieces, *, frame_end=None):
+def _means(points, cells, pieces, *, frame_end=None,
+           metric_fields=_RECORD_FIELDS, metric_reader=_recorded_value):
     """An ordered record/piece sweep; no records-times-all-laps scan."""
     accumulators = [{"eligible": 0.0, "gap": 0.0, "boundary": 0.0, "geometry": True,
                      "fields": {name: {"mean": 0.0, "seconds": 0.0, "count": 0, "last_pair": None, "invalid": False}
-                                for name, _, _ in _RECORD_FIELDS}} for _ in cells]
+                                for name, _, _ in metric_fields}} for _ in cells]
     for start_d, end_d, _start_t, _end_t, index in pieces:
         if points[0][1] > start_d or points[-1][1] < end_d:
             accumulators[index]["geometry"] = False
@@ -175,8 +176,8 @@ def _means(points, cells, pieces, *, frame_end=None):
                     accumulator["gap"] += weight
                 elif weight:
                     accumulator["eligible"] += weight
-                    for name, field, unit in _RECORD_FIELDS:
-                        value = _recorded_value(left[2], field, unit)
+                    for name, field, unit in metric_fields:
+                        value = metric_reader(left[2], field, unit)
                         saved = accumulator["fields"][name]
                         if value["status"] == "available":
                             duration = saved["seconds"] + weight
@@ -190,9 +191,9 @@ def _means(points, cells, pieces, *, frame_end=None):
                             saved["invalid"] = True
             index += 1
     for cell, accumulator in zip(cells, accumulators, strict=True):
-        for name, field, unit in _RECORD_FIELDS:
+        for name, field, unit in metric_fields:
             saved = accumulator["fields"][name]
-            value = _recorded_value({}, field, unit)
+            value = metric_reader({}, field, unit)
             if saved["seconds"]:
                 value.update(status="available", value=round(saved["mean"], 4))
             elif saved["invalid"]:
