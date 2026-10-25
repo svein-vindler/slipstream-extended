@@ -46,9 +46,9 @@ def test_normal_targeted_19_preserves_genuine18_bytes_and_reuses_the_new_version
         "current_canonical_sha256": hashlib.sha256(store.objects[current_key]).hexdigest(),
     }, sort_keys=True), encoding="utf-8")
     assert generated["blocked_activities"] == []
-    assert current_analysis["analyzer_version"] == "1.9.1"
+    assert current_analysis["analyzer_version"] == "1.10.0"
     assert current_key != old_key and current_analysis["analysis_id"] != old_analysis["analysis_id"]
-    assert current_pointer["analyzer_version"] == "1.9.1"
+    assert current_pointer["analyzer_version"] == "1.10.0"
     assert current_analysis["logical_bouts"]["status"] == "available"
     assert generated["processed_sources"]["42"] == current_analysis["analysis_id"]
     assert store.objects[old_key] == old_canonical and preserved

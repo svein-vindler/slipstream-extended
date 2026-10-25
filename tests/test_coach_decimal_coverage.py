@@ -25,7 +25,7 @@ def test_decimal_fit_coverage_and_created_backup_preserve_exact_bytes(
     objects = fixture_objects(fixture)
     key = next(key for key in objects if "/canonical/" in key)
     analysis = json.loads(gzip.decompress(objects[key]))
-    assert analysis["analyzer_version"] == "1.9.1"
+    assert analysis["analyzer_version"] == "1.10.0"
     section = analysis["sections"][0]
     assert section["elapsed_seconds"] == 30.3
     assert section["average_heart_rate_bpm"] == average

@@ -65,16 +65,26 @@ def test_stored_records_supply_recovery_cadence_bound_to_verified_logical_bout(t
     (evidence / "decoded-input.actual.json").write_bytes(json_bytes(decoded))
     (evidence / "analysis.actual.json").write_bytes(gzip.decompress(canonical))
     (evidence / "canonical.actual.json.gz").write_bytes(canonical)
-    old_blocks = json_bytes({
+    prior_comparison = copy.deepcopy({
         name: analysis[name] for name in ("recorded_running_metrics", "segment_running_metrics")
     })
+    # Keep the genuine reference hash; the raw-balance addition is an explicit
+    # comparison-only projection, never a relabelled stored/current analysis.
+    for group in ("kilometer_splits", "distance_halves"):
+        assert prior_comparison["recorded_running_metrics"][group]["balance_aggregation"] == "raw_scalar_time_weighted_mean_side_unknown"
+        prior_comparison["recorded_running_metrics"][group]["balance_aggregation"] = "not_computed_without_verified_side_semantics"
+        for row in prior_comparison["recorded_running_metrics"][group]["items"]:
+            metric = row["average_ground_contact_balance"]
+            metric.update(status="unavailable", value=None)
+            metric["coverage"].update(valid_seconds=0.0, contributing_intervals=0, status="none")
+    old_blocks = json_bytes(prior_comparison)
     cadence_controls = copy.deepcopy(analysis["recorded_cadence"])
     cadence_controls["record_aggregates"] = {
         name: analysis["recorded_cadence"]["record_aggregates"][name]
         for name in ("whole_distance_halves", "main_distance_halves", "executed_intervals")
     }
     cadence_control_bytes = json_bytes(cadence_controls)
-    (evidence / "preserved-blocks.actual.json").write_bytes(old_blocks)
+    (evidence / "preserved-blocks.comparison.json").write_bytes(old_blocks)
     (evidence / "cadence-controls.actual.json").write_bytes(cadence_control_bytes)
     for label, objects in (("before", before), ("after", after)):
         (evidence / f"sources.{label}.json").write_text(json.dumps({

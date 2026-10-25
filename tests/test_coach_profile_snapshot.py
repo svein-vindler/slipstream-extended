@@ -150,8 +150,11 @@ def test_actual_bulk_workload_groups(group, frozen_clock, record_property):
             else:
                 client.objects["activities/2026/1/activity.endurance.v1.json"] = b'{"available":true,"summary":{"distance_m":6000}}'
                 client.objects["activities/2026/1/source-manifest.v1.json"] = b'{"schema_version":1,"synthetic_revision":"changed"}'
-            result = measured(client, change + "_invalidation", record_property)
+            result = measured(client, change + "_invalidation", record_property,
+                              generated=0 if change == "context" else 1)
             assert result["source_fingerprint"] != first["source_fingerprint"]
+            if change == "context":
+                assert selected(client) == selected(initial)
     else:
         client = ObservedS3()
         profile = json.loads(client.objects[PROFILE])

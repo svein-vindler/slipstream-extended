@@ -320,7 +320,7 @@ def test_changed_source_downloads_only_selected_activity_and_preserves_old_analy
 
 
 @pytest.mark.parametrize("changed", ["profile", "context"])
-def test_profile_or_context_edit_rebuilds_coach_without_source_downloads(incremental, changed):
+def test_profile_rebuilds_but_current_context_reuses_coach_without_source_downloads(incremental, changed):
     arguments, _, builds = incremental
     run(**arguments)
     store = arguments["store"]
@@ -333,8 +333,8 @@ def test_profile_or_context_edit_rebuilds_coach_without_source_downloads(increme
         store.objects["activities/2026/1/context/v1/2026-09-30T12-00-00.json"] = b'{"context_id":"synthetic-context","rpe":5}'
     result = run(**arguments)
     assert result["activities"][0]["file_status"] == "unchanged"
-    assert result["activities"][0]["coach_reused"] is False
-    assert len(builds) == 2
+    assert result["activities"][0]["coach_reused"] is (changed == "context")
+    assert len(builds) == (1 if changed == "context" else 2)
 
 
 def test_unknown_local_date_is_explicit_and_never_taken_from_utc_summary(incremental):

@@ -19,7 +19,7 @@ def test_terminal_pair_excludes_values_but_exposes_in_frame_boundary_time(record
     whole = block["whole_distance_halves"]
     assert whole["status"] == "available"
     assert [row["average_power"]["value"] for row in whole["items"]] == [166.6667, 357.1429]
-    assert analysis["analyzer_version"] == "1.9.1" and block["schema_version"] == 2
+    assert analysis["analyzer_version"] == "1.10.0" and block["schema_version"] == 2
     assert block["session_end_time_utc"] == "2026-01-01T00:00:08.500Z"
     assert block["source_window"] == {
         "disposition": "verified_terminal_exclusion", "original_record_count": 6,
@@ -139,7 +139,7 @@ def test_genuine16_remains_readable_bulk_unqueued_and_targeted18_versioned(tmp_p
     store.reset_counts()
     coach_backfill.run_one(activity=SEGMENT_ACTIVITY, store=store)
     pointer, current = selected(store)
-    assert current["analyzer_version"] == "1.9.1"
+    assert current["analyzer_version"] == "1.10.0"
     assert pointer["analysis_key"] != old_pointer["analysis_key"]
     assert all(store.objects[key] == body for key, body in before.items()
                if "/canonical/" in key or "/context/" in key or key.startswith("coach/profiles/"))
@@ -296,7 +296,7 @@ def test_partial_normal_bulk_targeted_and_retry_share_immutable_content(monkeypa
     coach_backfill.run_one(activity=activity, store=store)
     pointer, analysis = selected(store)
     body = store.objects[pointer["analysis_key"]]
-    assert analysis["analyzer_version"] == "1.9.1"
+    assert analysis["analyzer_version"] == "1.10.0"
     assert analysis["segment_running_metrics"]["whole_distance_halves"]["items"][1]["average_power"]["value"] == 357.1429
     record_property("partial_targeted_counts", json.dumps(store.counts))
     bulk.reset_counts()

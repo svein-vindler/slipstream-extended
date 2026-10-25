@@ -86,8 +86,9 @@ def test_split_and_half_metrics_use_original_fit_intervals_not_session_or_sample
         "valid_seconds": 20, "eligible_seconds": 20, "excluded_gap_seconds": 0,
         "contributing_intervals": 2, "status": "complete",
     }
-    assert first["average_ground_contact_balance"]["value"] is None
-    assert first["average_ground_contact_balance"]["status"] == "unavailable"
+    assert first["average_ground_contact_balance"]["value"] == 49.5
+    assert first["average_ground_contact_balance"]["status"] == "available"
+    assert second["average_ground_contact_balance"]["value"] == 51
     assert first["average_ground_contact_balance"]["side_semantics"] == "unknown"
     assert metrics["average_power"]["value"] == 999
     halves = metrics["distance_halves"]

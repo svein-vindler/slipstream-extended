@@ -1275,6 +1275,9 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
   it(`Coach presentation rich facts: original scopes and native references survive via ${protocol}`, async () => {
     loadNativeForContract(native18.complete);
     const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+    const full = await call("coach_input", protocol, { format: "full" });
+    expect(full.analysis).toEqual(native18.complete);
+    clearSummaryCaches(); operations.length = 0;
     const coached = await call("coach_input", protocol, { format: "coach" });
     expect(coached.available).toBe(true);
     expect(coached).not.toHaveProperty("analysis");
@@ -1292,10 +1295,21 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     expect(text).toContain("Stored context: not_stored");
     expect(text).toContain("Sections:");
     expect(text).toContain('"section":"main"');
-    const nativeLaps = text.slice(text.indexOf("Native recorded laps:"), text.indexOf("Record-derived executed_intervals:"));
-    expect(nativeLaps).toContain("| Lap | Source message | Step | Distance (m) | Executed elapsed (s) | Power (W) | Step length (mm) | GCT (ms) | VO (mm) | VR (%) | GCT balance (%) |");
-    expect(nativeLaps).toContain("| 1 | 7 | 3 | 400 | 4.5 | 111 | 1000 | 200 | 10 | 5 | 101 |");
-    expect(nativeLaps).toContain("| 2 | 9 | 3 | 500 | 4.5 | 222 | 1100 | 210 | 11 | 6 | 103 |");
+    // Current compact tables do not duplicate raw laps; full retains all facts.
+    expect(text).not.toContain("Native recorded laps:");
+    expect(text).toContain("Logical rep table");
+    expect(full.analysis.recorded_running_metrics.laps.items).toMatchObject([
+      { lap: 1, distance_m: 400, average_power: { value: 111 }, average_step_length: { value: 1000 },
+        average_ground_contact_time: { value: 200 }, average_vertical_oscillation: { value: 10 },
+        average_vertical_ratio: { value: 5 }, average_ground_contact_balance: { value: 101 } },
+      { lap: 2, distance_m: 500, average_power: { value: 222 }, average_step_length: { value: 1100 },
+        average_ground_contact_time: { value: 210 }, average_vertical_oscillation: { value: 11 },
+        average_vertical_ratio: { value: 6 }, average_ground_contact_balance: { value: 103 } },
+    ]);
+    expect(full.analysis.native_lap_workout_binding.items).toMatchObject([
+      { lap: 1, source_message_index: 7, workout_step_index: 3 },
+      { lap: 2, source_message_index: 9, workout_step_index: 3 },
+    ]);
     expect(text).toContain("whole_distance_halves first");
     expect(text).toContain("166.6667 W");
     expect(text).toContain("whole_distance_halves second");
@@ -1443,6 +1457,9 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
   it(`Coach presentation sides: preserves declared sides, raw session and neutral recorded zero via ${protocol}`, async () => {
     load(declaredSides.left.objects_base64);
     const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+    const full = await call("coach_input", protocol, { format: "full" });
+    expect(full.analysis.workout_structure.planned_steps).toEqual([]);
+    clearSummaryCaches(); operations.length = 0;
     const coached = await call("coach_input", protocol, { format: "coach" });
     expect(coached.available).toBe(true);
     const text = coached.presentation.text;
@@ -1461,9 +1478,10 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     }
     expect(text).toContain('"recorded_side":"left"');
     expect(text).toContain('"calculated_side":"right"');
-    expect(text).toContain('side_semantics: "unknown"');
-    expect(text).toContain("Recorded FIT distance halves:");
-    expect(text).toContain("Workout plan:");
+    expect(text).toContain('"side_semantics":{"6":"unknown"}');
+    expect(text).toContain("Record-derived whole_distance_halves:");
+    expect(text).not.toContain("Verified planned targets:");
+    expect(text).toContain("format=full");
     expect(operations).toHaveLength(4);
     expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
   });
@@ -1515,31 +1533,42 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     it(`Coach presentation sparse: preserves ${kind} measurements without inferred links via ${protocol}`, async () => {
       loadNativeForContract(native18[kind]);
       const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
+      const full = await call("coach_input", protocol, { format: "full" });
+      expect(full.analysis).toEqual(native18[kind]);
+      clearSummaryCaches(); operations.length = 0;
       const coached = await call("coach_input", protocol, { format: "coach" });
       expect(coached.available).toBe(true);
       expect(coached).not.toHaveProperty("analysis");
       const text = coached.presentation.text;
-      expect(text).toContain('side_semantics: "unknown"');
+      expect(text).toContain('"side_semantics":{"6":"unknown"}');
       expect(text).not.toContain("left_percent");
       expect(text).not.toContain("right_percent");
       if (kind === "sparse") {
-        expect(text).toContain('average_power: null; status: "missing"; unit: "W"');
-        const nativeLaps = text.slice(text.indexOf("Native recorded laps:"), text.indexOf("Record-derived executed_intervals:"));
-        expect(nativeLaps).toContain("| Lap | Source message | Step | Distance (m) | Executed elapsed (s) | Power (W) | Step length (mm) | GCT (ms) | VO (mm) | VR (%) | GCT balance (%) |");
-        expect(nativeLaps).toContain("| 1 | 7 | 3 | null | 4.5 | null | null | 200 | 10 | 5 | 101 |");
-        expect(nativeLaps).toContain("| 2 | 9 | 3 | 500 | 4.5 | 0 | 1100 | 210 | 11 | 6 | 103 |");
-        for (const [lap, status] of [[1, ["missing", "invalid", "available", "available", "available", "available"]], [2, "available"]] as const) {
-          const metadata = nativeLaps.match(new RegExp(`^Native lap ${lap}: metadata: (D\\d+);`, "m"));
-          expect(metadata).not.toBeNull();
-          expect(text.split("\n")).toContain(`  ${metadata![1]}: ${JSON.stringify({ status, side_semantics: { "6": "unknown" } })}`);
-        }
+        expect(text).toContain('Recorded session measurements: null W;');
+        expect(full.analysis.recorded_running_metrics.average_power).toMatchObject({ status: "missing", value: null, unit: "W" });
+        expect(text).not.toContain("Native recorded laps:");
+        expect(full.analysis.recorded_running_metrics.laps.items).toMatchObject([
+          { lap: 1, distance_m: null, average_power: { status: "missing", value: null },
+            average_step_length: { status: "invalid", value: null }, average_ground_contact_time: { value: 200 },
+            average_vertical_oscillation: { value: 10 }, average_vertical_ratio: { value: 5 },
+            average_ground_contact_balance: { value: 101, side_semantics: "unknown" } },
+          { lap: 2, distance_m: 500, average_power: { status: "available", value: 0 },
+            average_step_length: { value: 1100 }, average_ground_contact_time: { value: 210 },
+            average_vertical_oscillation: { value: 11 }, average_vertical_ratio: { value: 6 },
+            average_ground_contact_balance: { value: 103, side_semantics: "unknown" } },
+        ]);
         expect(text).toContain("main_distance_unverified");
       } else {
-        const nativeLaps = text.slice(text.indexOf("Native recorded laps:"), text.indexOf("Record-derived executed_intervals:"));
-        expect(nativeLaps).toContain("| Lap | Source message | Step | Distance (m) | Executed elapsed (s) | Power (W) | Step length (mm) | GCT (ms) | VO (mm) | VR (%) | GCT balance (%) |");
-        expect(nativeLaps).toContain("| 1 | 7 | not_stored | 400 | not_stored | 111 | 1000 | 200 | 10 | 5 | 101 |");
-        expect(nativeLaps).toContain("| 2 | 9 | not_stored | 500 | not_stored | 222 | 1100 | 210 | 11 | 6 | 103 |");
-        expect(text).toContain("workout_step_unverified");
+        expect(text).not.toContain("Native recorded laps:");
+        expect(full.analysis.recorded_running_metrics.laps.items).toMatchObject([
+          { lap: 1, distance_m: 400, average_power: { value: 111 }, average_ground_contact_balance: { value: 101 } },
+          { lap: 2, distance_m: 500, average_power: { value: 222 }, average_ground_contact_balance: { value: 103 } },
+        ]);
+        expect(full.analysis.native_lap_workout_binding.reason).toBe("no_verified_lap_workout_links");
+        expect(full.analysis.native_lap_workout_binding.items).toMatchObject([
+          { lap: 1, source_message_index: 7, status: "unbound", reason: "workout_step_unverified", workout_step_index: null },
+          { lap: 2, source_message_index: 9, status: "unbound", reason: "workout_step_unverified", workout_step_index: null },
+        ]);
         expect(text).toContain("step_binding_unverified");
         expect(text).not.toContain("workout_step_index:");
       }
@@ -1611,17 +1640,16 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     expectSameCoachRead(coachEnvelope, originalEnvelope);
     expect(presentation).toMatchObject({
       version: "1.0.0", format: "coach_text", source_analysis_id: native18.complete.analysis_id,
-      source_analyzer_version: "1.9.1", scope: "selected_fields", full_data_hint: "format=full",
+      source_analyzer_version: "1.10.0", scope: "selected_fields", full_data_hint: "format=full",
     });
     expect(Object.keys(presentation).sort()).toEqual([
       "format", "full_data_hint", "scope", "source_analysis_id", "source_analyzer_version", "text", "version",
     ]);
     expect(typeof presentation.text).toBe("string");
     expect(presentation.text).toContain(`Analysis: ${JSON.stringify(native18.complete.analysis_id)}`);
-    const nativeLaps = presentation.text.slice(presentation.text.indexOf("Native recorded laps:"), presentation.text.indexOf("Record-derived executed_intervals:"));
-    expect(nativeLaps).toContain("| Lap | Source message | Step | Distance (m) | Executed elapsed (s) | Power (W) | Step length (mm) | GCT (ms) | VO (mm) | VR (%) | GCT balance (%) |");
-    expect(nativeLaps).toContain("| 1 | 7 | 3 | 400 | 4.5 | 111 | 1000 | 200 | 10 | 5 | 101 |");
-    expect(nativeLaps).toContain("| 2 | 9 | 3 | 500 | 4.5 | 222 | 1100 | 210 | 11 | 6 | 103 |");
+    expect(presentation.text).not.toContain("Native recorded laps:");
+    expect(presentation.text).toContain("Logical rep table");
+    expect(omitted.analysis).toEqual(native18.complete);
     expect(presentation.text).toContain("clock_basis_unverified");
     expect(operations).toEqual(expectedReads);
     clearSummaryCaches(); operations.length = 0;
@@ -1659,7 +1687,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       const output = await call("coach_input", protocol);
       expect(output.available).toBe(true);
       expect(output.analysis).toEqual(fixture);
-      expect(output.analysis.analyzer_version).toBe("1.9.1");
+      expect(output.analysis.analyzer_version).toBe("1.10.0");
       const block = output.analysis.native_lap_workout_binding;
       expect(block).toMatchObject({
         schema_version: 1, method: "fit_lap_wkt_step_index",
@@ -1863,7 +1891,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
     const output = await call("coach_input", protocol);
     expect(output.available).toBe(true);
-    expect(output.analysis.analyzer_version).toBe("1.9.1");
+    expect(output.analysis.analyzer_version).toBe("1.10.0");
     expect(output.analysis).toEqual(produced16.complete.analysis);
     const block = output.analysis.segment_running_metrics;
     // Independent worked values from the accepted FIT tracer, not a second implementation.
@@ -1969,7 +1997,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       const output = await call("coach_input", protocol);
       expect(output.available).toBe(true);
       expect(output.analysis).toEqual(expected);
-      expect(output.analysis).toMatchObject({ analyzer_version: "1.9.1", activity_id: "42", analysis_id: fixture.analysis_id,
+      expect(output.analysis).toMatchObject({ analyzer_version: "1.10.0", activity_id: "42", analysis_id: fixture.analysis_id,
         workout_structure: { has_structured_workout: false } });
       const block = output.analysis.segment_running_metrics;
       expect(block.main_distance_halves.distance_basis).toBe("tcx_endurance_distance_continuous_main");
@@ -2115,7 +2143,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       kilometer_splits: { status: "available", method: "fit_record_time_weighted_mean",
         interval_policy: "left_sample_hold_distance_progressing_max_30s", distance_allocation: "linear_between_record_distances" },
       distance_halves: { status: "available", method: "fit_record_time_weighted_mean" } });
-    expect(coach.analysis.analyzer_version).toBe("1.9.1");
+    expect(coach.analysis.analyzer_version).toBe("1.10.0");
     expect(detail.recorded_running_metrics).toEqual(coach.analysis.recorded_running_metrics);
     expect(outputSchemas.endurance_session.parse(detail)).toEqual(detail);
     expect(outputSchemas.coach_input.parse(coach)).toEqual(coach);
@@ -2259,7 +2287,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
     const output = await call("coach_input", protocol);
     expect(output.available).toBe(true);
-    expect(output.analysis).toMatchObject({ analyzer_version: "1.9.1", activity_id: "42",
+    expect(output.analysis).toMatchObject({ analyzer_version: "1.10.0", activity_id: "42",
       analysis_id: produced.source_error.analysis_id, summary: { distance_m: 2000 },
       recorded_running_metrics: { schema_version: 2, association: "decode_errors", source_fit_sha256: null,
         average_power: { status: "unavailable", value: null },

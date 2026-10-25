@@ -330,6 +330,34 @@ def segment_running_metrics(activity, decoded, endurance, *, recorded, structure
     return result
 
 
+def recovery_running_metrics(recorded, decoded, logical, segments, tcx_sha256):
+    """Original record means on the already strict verified recovery partition."""
+    from .recorded_cadence import _recovery_partition
+
+    result = {"schema_version": 1, "activity_id": recorded["activity_id"],
+              "source_fit_sha256": recorded["source_fit_sha256"], "source_tcx_sha256": tcx_sha256,
+              "session_start_time_utc": segments["session_start_time_utc"],
+              "session_end_time_utc": segments["session_end_time_utc"],
+              "source_window": deepcopy(segments["source_window"]),
+              **_group("fit_verified_recovery_bout_distance", "source_unverified")}
+    if recorded["association"] != "matched" or not recorded["source_fit_sha256"]:
+        return result
+    sessions = decoded.get("messages", {}).get("session_mesgs")
+    frame = _frame(sessions[0]) if isinstance(sessions, list) and len(sessions) == 1 else None
+    if frame is None or frame["start_time_utc"] != recorded["session_start_time_utc"]:
+        result["reason"] = "clock_basis_unverified"
+        return result
+    points = _points(decoded, frame, allow_terminal=True)
+    if points is None or segments["source_window"]["disposition"] == "unverified":
+        result["reason"] = "record_geometry_unverified"
+        return result
+    cells, pieces, reason = _recovery_partition(recorded, decoded, frame, points, logical)
+    result["reason"] = reason
+    if cells is not None:
+        _available(result, _means(points, cells, pieces, frame_end=frame["end"]))
+    return result
+
+
 def validate_segment_metrics(block, analysis):
     """Strict stored1.6 contract, without recomputing records or fetching sources."""
     def require(condition):

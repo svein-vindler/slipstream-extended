@@ -711,7 +711,7 @@ def _recorded_running_metrics_shape(block, analysis):
             raise BackupError("invalid_recorded_running_metric")
 
 
-def _running_segments_shape(block, analysis):
+def _running_segments_shape(block, analysis, *, raw_balance=False):
     if not isinstance(block, dict):
         raise BackupError("invalid_running_segments")
     extras = {"average_ground_contact_balance", "laps", "kilometer_splits", "distance_halves"}
@@ -768,7 +768,7 @@ def _running_segments_shape(block, analysis):
                     or cover["status"] == "complete" and
                     (cover["excluded_gap_seconds"] != 0 or abs(valid - cover["eligible_seconds"]) > 0.001)
                     or (value["status"] == "available") != (cover["status"] != "none")
-                    or balance and value["status"] != "unavailable"):
+                    or balance and not raw_balance and value["status"] != "unavailable"):
                 raise BackupError("invalid_running_segment_coverage")
 
     metric(block["average_ground_contact_balance"], "%", "avg_stance_time_balance")
@@ -790,7 +790,8 @@ def _running_segments_shape(block, analysis):
             raise BackupError("invalid_running_segment_group")
         if distance and (group["interval_policy"] != "left_sample_hold_distance_progressing_max_30s"
                          or group["distance_allocation"] != "linear_between_record_distances"
-                         or group["balance_aggregation"] != "not_computed_without_verified_side_semantics"):
+                         or group["balance_aggregation"] != ("raw_scalar_time_weighted_mean_side_unknown" if raw_balance
+                                                              else "not_computed_without_verified_side_semantics")):
             raise BackupError("invalid_running_segment_policy")
         previous = 0 if distance else block["session_start_time_utc"]
         for ordinal, row in enumerate(group["items"], start=1):
@@ -1696,10 +1697,99 @@ def _workout_targets_shape(value):
                     raise BackupError("invalid_workout_targets")
 
 
+def _recovery_running_shape(value):
+    """Validate new recovery scalars against the existing strict logical geometry."""
+    from .recorded_running_metrics import _RECORD_FIELDS, _finite_number
+
+    def require(condition):
+        if not condition:
+            raise BackupError("invalid_recovery_running_metrics")
+
+    block, segment = value["recovery_running_metrics"], value["segment_running_metrics"]
+    literals = {"schema_version": 1, "method": "fit_record_time_weighted_mean",
+                "distance_basis": "fit_verified_recovery_bout_distance",
+                "clock_basis": "fit_start_time_plus_total_elapsed_time",
+                "interval_policy": "left_sample_hold_distance_progressing_max_30s",
+                "distance_allocation": "linear_between_record_distances",
+                "balance_aggregation": "raw_scalar_time_weighted_mean_side_unknown"}
+    _exact(block, set(literals) | {"activity_id", "source_fit_sha256", "source_tcx_sha256",
+                                  "session_start_time_utc", "session_end_time_utc", "source_window", "status", "reason", "items"})
+    require(type(block["schema_version"]) is int and all(block[key] == expected for key, expected in literals.items()))
+    require(block["activity_id"] == value["activity_id"]
+            and block["source_fit_sha256"] == value["recorded_running_metrics"]["source_fit_sha256"]
+            and block["source_tcx_sha256"] == value["source"]["tcx_sha256"]
+            and _json_bytes(block["source_window"]) == _json_bytes(segment["source_window"])
+            and all(block[key] == segment[key] for key in ("session_start_time_utc", "session_end_time_utc")))
+    require(isinstance(block["items"], list))
+    if block["status"] != "available":
+        require(block["status"] == "unavailable" and isinstance(block["reason"], str) and bool(block["reason"]) and not block["items"])
+        return
+    require(block["reason"] is None and value["recorded_running_metrics"]["association"] == "matched")
+    reference = _recovery_cadence_references(value)["items"]
+    require(len(reference) == len(block["items"]) > 0)
+    window = segment["source_window"]
+    require(window["disposition"] != "unverified")
+    geometry = {"bout", "source_laps", "workout_step_index", "distance_m", "start_time_utc", "end_time_utc"}
+    for row, source in zip(block["items"], reference, strict=True):
+        _exact(row, geometry | {field[0] for field in _RECORD_FIELDS})
+        require(all(row[key] == source[key] for key in geometry)
+                and type(row["bout"]) is int and type(row["workout_step_index"]) is int
+                and _finite_number(row["distance_m"]) is not None
+                and isinstance(row["source_laps"], list) and all(type(lap) is int for lap in row["source_laps"]))
+        common = None
+        for name, field, unit in _RECORD_FIELDS:
+            metric = row[name]
+            _exact(metric, {"status", "value", "unit", "source_field", "coverage"}
+                   | ({"side_semantics"} if field == "stance_time_balance" else set()))
+            require(metric["unit"] == unit and metric["source_field"] == field
+                    and metric["status"] in ("available", "missing", "invalid", "unavailable"))
+            if field == "stance_time_balance":
+                require(metric["side_semantics"] == "unknown")
+            coverage = metric["coverage"]
+            _exact(coverage, {"valid_seconds", "eligible_seconds", "excluded_gap_seconds", "boundary_excluded_seconds",
+                              "contributing_intervals", "status"})
+            times = [coverage[key] for key in ("valid_seconds", "eligible_seconds", "excluded_gap_seconds", "boundary_excluded_seconds")]
+            require(all(_finite_number(time) is not None and time >= 0 for time in times))
+            valid, eligible, gap, boundary = times
+            count = coverage["contributing_intervals"]
+            require(type(count) is int and 0 <= count <= window["original_record_count"] - 1 - window["boundary_excluded_pair_count"]
+                    and valid <= eligible + 0.001 and eligible + gap + boundary <= source["elapsed_seconds"] + 0.001
+                    and coverage["status"] in ("none", "partial", "complete"))
+            require((metric["status"] == "available") == (count > 0)
+                    and (coverage["status"] == "none") == (count == 0))
+            require(_finite_number(metric["value"]) is not None if count else metric["value"] is None and valid == 0)
+            require(coverage["status"] != "complete" or gap == boundary == 0 and abs(valid - eligible) <= 0.001)
+            require(boundary == 0 or window["disposition"] == "verified_terminal_exclusion")
+            shape = eligible, gap, boundary
+            require(common is None or common == shape)
+            common = shape
+
+
 def _validate_value(key: str, value: Any, *, _original_analysis=None):
     kind, parts = key_info(key)
     if kind == "analysis" and _original_analysis is None:
         _original_analysis = value
+    if kind == "analysis" and isinstance(value, dict) and value.get("analyzer_version") == "1.10.0":
+        from copy import deepcopy
+
+        # Validate the new measured scalars before projecting the unchanged
+        # remainder onto the established strict reader. Stored bytes/IDs are
+        # untouched; a historical engine still cannot carry the new policy.
+        _running_segments_shape(value.get("recorded_running_metrics"), value, raw_balance=True)
+        legacy_metrics = deepcopy(value["recorded_running_metrics"])
+        for name in ("kilometer_splits", "distance_halves"):
+            group = legacy_metrics[name]
+            group["balance_aggregation"] = "not_computed_without_verified_side_semantics"
+            for row in group["items"]:
+                metric = row["average_ground_contact_balance"]
+                metric.update(status="unavailable", value=None)
+                metric["coverage"].update(valid_seconds=0, contributing_intervals=0, status="none")
+        legacy = {name: item for name, item in value.items() if name != "recovery_running_metrics"}
+        _validate_value(key, {**legacy, "analyzer_version": "1.9.1", "recorded_running_metrics": legacy_metrics},
+                        _original_analysis=_original_analysis)
+        if "recovery_running_metrics" in value:
+            _recovery_running_shape(value)
+        return
     if kind == "context" and isinstance(value, dict) and type(value.get("schema_version")) is int and value["schema_version"] == 2:
         from .gct_sides import valid_declaration
 
