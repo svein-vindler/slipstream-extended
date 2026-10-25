@@ -27,7 +27,10 @@ function object(value: unknown): Json {
 }
 
 /** Reconstruct the small expected side block, using already validated raw measurements. */
-export function expectedGctSides(metrics: Metrics, rawContext: unknown, rawSegments?: unknown) {
+export function expectedGctSides(metrics: Metrics, rawContext: unknown, rawSegments?: unknown,
+  options: { currentView?: boolean; contextUnavailable?: boolean; recovery?: unknown } = {}) {
+  const currentView = options.currentView === true, rawRecovery = options.recovery;
+  const contextUnavailable = currentView && options.contextUnavailable === true;
   const context = rawContext && typeof rawContext === "object" && !Array.isArray(rawContext)
     ? rawContext as Record<string, unknown> : {};
   const parsed = declaration.safeParse(context.gct_balance_side);
@@ -35,12 +38,12 @@ export function expectedGctSides(metrics: Metrics, rawContext: unknown, rawSegme
   const valid = context.schema_version === 2 && context.activity_id === metrics.activity_id
     && context.source === "user" && (metrics.local_date === null || context.activity_date === metrics.local_date)
     && typeof context.context_id === "string" && !!context.context_id && parsed.success;
-  const matched = ready && valid && parsed.data!.source_fit_sha256 === metrics.source_fit_sha256;
-  const reason = !ready ? "source_unavailable" : context.gct_balance_side == null ? "declaration_missing"
+  const matched = !contextUnavailable && ready && valid && parsed.data!.source_fit_sha256 === metrics.source_fit_sha256;
+  const reason = contextUnavailable ? "current_context_unavailable" : !ready ? "source_unavailable" : context.gct_balance_side == null ? "declaration_missing"
     : !valid ? "invalid_declaration" : !matched ? "source_mismatch" : null;
   function project(metric: Pick<Metric, "status" | "value">) {
     const value = metric.value;
-    const status = !matched ? ready ? "unverified" : "unavailable" : metric.status !== "available"
+    const status = contextUnavailable ? "unavailable" : !matched ? ready ? "unverified" : "unavailable" : metric.status !== "available"
       ? metric.status : value !== null && value >= 0 && value <= 100 ? "available" : "invalid";
     if (status !== "available" || value === null) return { status, left_percent: null, right_percent: null,
       recorded_side: null, calculated_side: null, method: "not_computed" };
@@ -50,8 +53,22 @@ export function expectedGctSides(metrics: Metrics, rawContext: unknown, rawSegme
       right_percent: side === "right" ? value : 100 - value,
       recorded_side: side, calculated_side: other, method: "recorded_and_complement" };
   }
+  const distanceAggregates: Json = {};
+  if (currentView) for (const name of ["kilometer_splits", "distance_halves"] as const) {
+    const source = metrics[name];
+    distanceAggregates[name] = { status: source.status, reason: source.reason,
+      source_metric: `recorded_running_metrics.${name}.average_ground_contact_balance`,
+      items: source.items.map(row => {
+        const metric = row.average_ground_contact_balance;
+        return { ...Object.fromEntries(Object.entries(row).filter(([key]) =>
+          ["split", "segment", "start_distance_m", "end_distance_m", "distance_m"].includes(key))),
+        raw_percent: metric.value, side_semantics: "unknown", coverage: { ...metric.coverage },
+        ...project(metric) };
+      }) };
+  }
   const result = { schema_version: 1, activity_id: metrics.activity_id, source_fit_sha256: metrics.source_fit_sha256,
-    status: matched ? "available" : ready ? "unverified" : "unavailable", reason,
+    ...(currentView ? { distance_aggregates: distanceAggregates } : {}),
+    status: contextUnavailable ? "unavailable" : matched ? "available" : ready ? "unverified" : "unavailable", reason,
     declaration: matched ? { ...parsed.data!, context_id: context.context_id } : null,
     session: project(metrics.average_ground_contact_balance),
     laps: { status: metrics.laps.status, reason: metrics.laps.reason, items: metrics.laps.items.map(lap => ({
@@ -63,9 +80,15 @@ export function expectedGctSides(metrics: Metrics, rawContext: unknown, rawSegme
   const associated = segments.association === "matched" && segments.activity_id === metrics.activity_id
     && segments.source_fit_sha256 === metrics.source_fit_sha256
     && segments.session_start_time_utc === metrics.session_start_time_utc;
-  for (const name of ["executed_intervals", "whole_distance_halves", "main_distance_halves"]) {
+  const recovery = object(rawRecovery);
+  const recoveryAssociated = associated && recovery.activity_id === metrics.activity_id
+    && recovery.source_fit_sha256 === metrics.source_fit_sha256
+    && recovery.session_start_time_utc === metrics.session_start_time_utc;
+  for (const name of ["executed_intervals", "whole_distance_halves", "main_distance_halves",
+    ...(currentView && rawRecovery !== undefined ? ["recovery_bouts"] : [])]) {
     // The caller validates this existing segment contract before side projection.
-    const source = associated ? object(segments[name]) : {}, sourceReady = source.status === "available";
+    const source = name === "recovery_bouts" ? recoveryAssociated ? recovery : {}
+      : associated ? object(segments[name]) : {}, sourceReady = source.status === "available";
     const items: Json[] = [];
     if (sourceReady && Array.isArray(source.items)) for (const value of source.items) {
       const row = object(value), metric = object(row.average_ground_contact_balance);
@@ -74,17 +97,19 @@ export function expectedGctSides(metrics: Metrics, rawContext: unknown, rawSegme
           ? metric.status as Metric["status"] : "unavailable",
         value: typeof metric.value === "number" && Number.isFinite(metric.value) ? metric.value : null,
       });
-      const identity = Object.fromEntries(["interval", "segment", "source_laps"]
+      const identity = Object.fromEntries(["interval", "segment", "source_laps", ...(currentView ? ["bout"] : [])]
         .filter(key => Object.hasOwn(row, key)).map(key => [key, row[key]]));
       items.push({ ...identity, status: projected.status, left_percent: projected.left_percent,
         right_percent: projected.right_percent, raw_side: projected.recorded_side,
-        calculated_side: projected.calculated_side, both_sides_derived: true,
+        ...(currentView ? { raw_percent: metric.value } : {}),
+        calculated_side: projected.calculated_side, both_sides_derived: currentView ? projected.status === "available" : true,
         method: projected.status === "available" ? "user_declared_record_mean_and_complement" : "not_computed",
         coverage: { ...object(metric.coverage) } });
     }
-    aggregates[name] = { status: matched && sourceReady ? "available" : ready ? "unverified" : "unavailable",
+    aggregates[name] = { status: contextUnavailable ? "unavailable" : matched && sourceReady ? "available" : ready ? "unverified" : "unavailable",
       reason: reason || source.reason || (sourceReady ? null : "source_unavailable"),
-      source_metric: `segment_running_metrics.${name}.average_ground_contact_balance`, items };
+      source_metric: name === "recovery_bouts" ? "recovery_running_metrics.items[].average_ground_contact_balance"
+        : `segment_running_metrics.${name}.average_ground_contact_balance`, items };
   }
   return { ...result, schema_version: 2, record_aggregates: aggregates };
 }
@@ -100,7 +125,7 @@ function exactJson(actual: unknown, expected: unknown): boolean {
 
 export function validGroundContactSides(analysis: Record<string, unknown>, metrics: Metrics): boolean {
   const derived = object(analysis.ground_contact_sides).schema_version === 2;
-  if (derived && !["1.9.0", "1.9.1"].includes(String(analysis.analyzer_version))) return false;
+  if (derived && !["1.9.0", "1.9.1", "1.10.0"].includes(String(analysis.analyzer_version))) return false;
   return exactJson(analysis.ground_contact_sides, expectedGctSides(metrics, analysis.user_context,
     derived ? analysis.segment_running_metrics : undefined));
 }

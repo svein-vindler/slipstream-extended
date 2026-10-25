@@ -48,9 +48,10 @@ Replace dates, activity IDs and timezone with the user's confirmed local context
 - Read-only results may lack pipeline diagnostics. Old timings may be null or
   omitted: label them unknown, not failed or zero. Never sync to obtain timings.
   R2 inventory and LIST timings overlap and must not be added.
-- Profile/context writes require a preview and the user's explicit confirmation
-  to save to private R2. If write tools are absent, retain the draft in chat.
-  Do not infer RPE, thresholds or zones. New versions preserve old analyses.
+- New profiles require a preview and confirmation. Context writes require an
+  explicit user request to save; if that request is already clear, no second
+  approval is needed. Otherwise preview and ask first. If write tools are absent,
+  retain the draft in chat. Do not infer RPE, thresholds or zones. Preserve history.
 
 ## 1. Coach setup
 
@@ -105,25 +106,28 @@ These example zone values demonstrate schema validity only; they are not default
 > Report any missing profile, files or Coach Input instead of treating a successful
 > job as a complete dataset. If needed, distinguish the available summary from
 > the incomplete analysis. Optional context: RPE [value or omit], conditions
-> [text or omit], note [text or omit]. Use only what I supplied; preview this
-> context and wait for my confirmation before saving it with `add_activity_context` to R2. Explain whether
-> a new Coach Input revision is still pending after saving.
+> [text or omit], note [text or omit]. Use only what I supplied. If I explicitly
+> ask you to save this context, save it first with `add_activity_context` and use
+> the updated Coach Input in its receipt; do not ask for the same permission again.
+> If I only supply information without asking you to store it, preview it and
+> ask before writing. Omit unchanged fields; use null only when I ask to clear one.
 
 Start with `sync_latest_activity`, with `expected_date` and an exact `activity_id`
 when known. The returned coherent package is the first analysis source. If extra
 reads are needed, use `endurance_session` and `coach_input` for that same running
-ID; use `strength_session` for strength. An R2 context write does not immediately
-regenerate Coach Input: do not present an older revision as including the new note.
-An expressly authorized fresh flow can subsequently repair from R2; otherwise
-report the pending revision without starting a job.
+ID; use `strength_session` for strength. A successful context write includes an
+updated Coach Input view without regenerating the analysis. Its current context
+is separate from the immutable analysis snapshot. If saved is true but the view
+is unavailable, retry only `coach_input`, not the saved append. Missing source
+analysis is still missing; do not start a new job solely for a context change.
 
 ```json
 [
   {"tool":"sync_latest_activity","arguments":{"expected_date":"2026-09-20","activity_id":"garmin-1001","new_activity_expected":true}},
   {"tool":"refresh_status","arguments":{"request_id":"00000000-0000-4000-8000-000000000001"}},
   {"tool":"endurance_session","arguments":{"activity_id":"garmin-1001"}},
-  {"tool":"coach_input","arguments":{"activity_id":"garmin-1001"}},
-  {"tool":"add_activity_context","arguments":{"activity_id":"garmin-1001","rpe":3,"conditions":"Synthetic dry conditions","note":"Synthetic example note"}}
+  {"tool":"add_activity_context","arguments":{"activity_id":"garmin-1001","rpe":3,"conditions":"Synthetic dry conditions","note":"Synthetic example note"}},
+  {"tool":"coach_input","arguments":{"activity_id":"garmin-1001","format":"full"}}
 ]
 ```
 

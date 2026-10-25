@@ -263,13 +263,15 @@ describe("R2-first targeted freshness", () => {
     expect(posts).toHaveLength(1);
   });
 
-  it("repairs coach input from R2 when a newer explicit context arrives", async () => {
+  it("composes newer explicit context without repairing the immutable coach input", async () => {
     await activity(); await check();
     await put("activities/2026/1/context/v1/20261005-test.json", { context_id: "test-context", note: "Synthetic note" });
     const result = await service().request(REQUEST);
-    expect(posts).toHaveLength(1);
-    expect(posts[0].inputs).toMatchObject({ latest_r2_only: true, latest_activity_id: "1" });
-    expect(result).toMatchObject({ data_ready: false, freshness: { missing_components: ["coach_input"] } });
+    expect(posts).toHaveLength(0);
+    expect(result).toMatchObject({ data_ready: true, freshness: { missing_components: [], package: {
+      coach_input: { analysis_id: "test-analysis-1", user_context: null },
+      user_context: { context_id: "test-context", note: "Synthetic note" }, coach_status: "ready",
+    } } });
   });
 
   it("a workflow success with no data never means requested data are ready", async () => {

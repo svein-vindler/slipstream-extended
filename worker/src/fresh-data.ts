@@ -396,8 +396,9 @@ export class FreshDataService {
         },
       });
       const candidate = selection.status === "available" ? selection.analysis : null;
-      if (candidate && record(candidate.user_context).context_id === context.context_id
-        && typeof decoded.source_fit_sha256 === "string"
+      // Explicit user context is composed separately below. A context-only
+      // append must not turn a verified immutable analysis into a repair job.
+      if (candidate && typeof decoded.source_fit_sha256 === "string"
         && record(candidate.source).fit_sha256 === decoded.source_fit_sha256
         && profile && record(candidate.profile).profile_id === profile.profile_id) coach = candidate;
     }

@@ -16,11 +16,19 @@ let pointerFailure = false, legacyTruncated = false, legacyClockAmbiguous = fals
 let legacyUploadTimes: Map<string, Date | undefined> | null = null;
 const reads: string[] = [];
 const operations = { get: 0, head: 0, list: 0, put: 0, delete: 0 };
+const contextOperations: string[] = [];
 const bucket = new Proxy(env.SLIPSTREAM_DATA, {
   get(target, property) {
     const value = Reflect.get(target, property);
     if (typeof value !== "function") return value;
     return (...args: unknown[]) => {
+      const contextList = property === "list" && (args[0] as R2ListOptions)?.prefix === "activities/2026/1/context/v1/";
+      const contextGet = property === "get" && String(args[0]).startsWith("activities/2026/1/context/v1/");
+      if (contextList || contextGet) {
+        if (contextList) expect((args[0] as R2ListOptions).limit).toBe(100);
+        contextOperations.push(String(property));
+        return Reflect.apply(value, target, args);
+      }
       if (property in operations) operations[property as keyof typeof operations]++;
       if (property === "get") {
         reads.push(String(args[0]));
@@ -65,6 +73,7 @@ beforeAll(async () => {
 afterAll(() => vi.restoreAllMocks());
 
 async function call(protocol: string, expectError = false) {
+  const contextStart = contextOperations.length;
   const token = await new SignJWT({ type: "app", email: "synthetic@example.invalid" })
     .setProtectedHeader({ alg: "RS256", kid: "coach-selection" }).setIssuer(issuer).setAudience("coach-selection")
     .setSubject(crypto.randomUUID()).setIssuedAt().setExpirationTime("5m").sign(privateKey);
@@ -88,6 +97,9 @@ async function call(protocol: string, expectError = false) {
   const line = body.split("\n").find(value => value.startsWith("data: "));
   const message = JSON.parse(line ? line.slice(6) : body);
   expect(message.error, body).toBeUndefined();
+  const currentReads = contextOperations.slice(contextStart);
+  expect(currentReads.filter(item => item === "list")).toHaveLength(message.result.structuredContent?.available ? 1 : 0);
+  expect(currentReads.filter(item => item === "get").length).toBeLessThanOrEqual(1);
   if (expectError) {
     expect(message.result.isError, body).toBe(true);
     expect(body).not.toContain("synthetic provider text");

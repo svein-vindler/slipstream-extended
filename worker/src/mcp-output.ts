@@ -30,6 +30,25 @@ const activitySummary = z.object({
   elevation_gain_m: nullableNumber,
 });
 
+const coachInputResponseSchema = z.object({
+  available: z.boolean(), activity_id: z.string().optional(), activity: activitySummary.optional(),
+  analysis: openObject.optional(), user_context: openObject.nullable().optional(),
+  ground_contact_sides: openObject.nullable().optional(),
+  view: z.object({
+    schema_version: z.literal(1), analysis_id: z.string(), analyzer_version: z.string(),
+    context_status: z.enum(["available", "not_stored", "unavailable"]),
+    context_revision: nullableString, context_updated_at: nullableString,
+    resolved_at: z.iso.datetime(),
+    interpretation: openObject.optional(),
+  }).optional(),
+  presentation: z.object({
+    version: z.literal("1.0.0"), format: z.literal("coach_text"),
+    source_analysis_id: z.string(), source_analyzer_version: z.string(),
+    scope: z.literal("selected_fields"), text: z.string(), full_data_hint: z.literal("format=full"),
+  }).optional(),
+  message: z.string(),
+});
+
 const activityStats = z.object({
   activities: z.number().int().nonnegative(),
   filter_warning: z.string().optional(),
@@ -465,24 +484,10 @@ export const outputSchemas = {
     context_id: z.string(),
     key: z.string(),
     context: openObject,
+    coach_input: coachInputResponseSchema.optional(),
     message: z.string(),
   }),
-  coach_input: z.object({
-    available: z.boolean(),
-    activity_id: z.string().optional(),
-    activity: activitySummary.optional(),
-    analysis: openObject.optional(),
-    presentation: z.object({
-      version: z.literal("1.0.0"),
-      format: z.literal("coach_text"),
-      source_analysis_id: z.string(),
-      source_analyzer_version: z.string(),
-      scope: z.literal("selected_fields"),
-      text: z.string(),
-      full_data_hint: z.literal("format=full"),
-    }).optional(),
-    message: z.string(),
-  }),
+  coach_input: coachInputResponseSchema,
   refresh_today: z.object({
     dispatch_status: dispatchStatusSchema.optional(),
     pipeline_diagnostics: pipelineDiagnosticsSchema.nullable().optional(),

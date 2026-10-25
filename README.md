@@ -35,6 +35,8 @@ and prepared analyses remain available between refreshes.
   vertical ratio, plus recorded ground-contact balance with unknown side semantics;
   new Coach Input includes FIT laps and source-covered distance segments
 - Versioned coach profiles, append-only RPE/context and prepared coach-input JSON
+- Current user context composed with immutable analysis; context-save receipts
+  include the updated Coach Input without a separate regeneration request
 - [Stored pre-activity Coach context](docs/TRAINING_CONTEXT.md#stored-pre-activity-context-in-coach-input)
   from the workout's local-night sleep/HRV and optional already-collected
   Readiness/Recovery, with separate observation and source-check clocks

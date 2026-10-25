@@ -134,7 +134,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     expect(outputSchemas.coach_input.parse(full)).toEqual(full);
     expect(operations).toHaveLength(4);
     clearSummaryCaches(); operations.length = 0;
-    expect(await call("coach_input", protocol)).toEqual(full);
+    expectSameCoachRead(await call("coach_input", protocol), full);
     expect(operations).toHaveLength(4);
     expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
   });
@@ -231,7 +231,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     expect(operations).toHaveLength(4);
     expect(outputSchemas.coach_input.parse(full)).toEqual(full);
     clearSummaryCaches(); operations.length = 0;
-    expect(await call("coach_input", protocol)).toEqual(full);
+    expectSameCoachRead(await call("coach_input", protocol), full);
     expect(operations).toHaveLength(4);
     expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
   });
@@ -326,7 +326,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       (row: { average_cadence: { value: number } }) => row.average_cadence.value)).toEqual([163, 168]);
     expect(outputSchemas.coach_input.parse(full)).toEqual(full);
     clearSummaryCaches(); operations.length = 0;
-    expect(await call("coach_input", protocol)).toEqual(full);
+    expectSameCoachRead(await call("coach_input", protocol), full);
     expect(operations).toHaveLength(4);
     expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
   });
@@ -335,12 +335,17 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     rows.set("activities/2026/42/coach-input/v1/latest-ready.json", new TextEncoder().encode(JSON.stringify({
       schema_version: 1, selection_version: 1, analysis_key: derivedSideFixture.analysis_key, analyzer_version: "1.9.0",
     })));
-    const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
     const bytes = rows.get(derivedSideFixture.analysis_key);
     if (!bytes) throw new Error("Missing actual derived-side canonical fixture");
     const stream = new Response(bytes).body;
     if (!stream) throw new Error("Missing actual derived-side canonical stream");
     const genuine = await new Response(stream.pipeThrough(new DecompressionStream("gzip"))).json();
+    // This frozen backup fixture contains the analysis only. Explicitly seed
+    // its synthetic declaration as CURRENT context for the current-view check.
+    const stamp = genuine.user_context.created_at.replace(/[-:.Z]/g, "");
+    rows.set(`activities/2026/42/context/v1/${stamp}-${genuine.user_context.context_id}.json`,
+      new TextEncoder().encode(JSON.stringify(genuine.user_context)));
+    const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
     const full = await call("coach_input", protocol, { format: "full" });
     expect(full.available).toBe(true);
     expect(full.analysis).toEqual(genuine);
@@ -448,7 +453,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     ])).toEqual([[1, [2, 3], 1, 163, 20], [2, [5], 1, 168, 10]]);
     expect(outputSchemas.coach_input.parse(full)).toEqual(full);
     clearSummaryCaches(); operations.length = 0;
-    expect(await call("coach_input", protocol)).toEqual(full);
+    expectSameCoachRead(await call("coach_input", protocol), full);
     expect(operations).toHaveLength(4);
     expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
   });
@@ -497,7 +502,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       unverified_source_values: {} });
     expect(operations).toHaveLength(4);
     clearSummaryCaches(); operations.length = 0;
-    expect(await call("coach_input", protocol)).toEqual(full);
+    expectSameCoachRead(await call("coach_input", protocol), full);
     expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
   });
   for (const fault of ["unit", "coverage"] as const) {
@@ -559,7 +564,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     expect(omitted.available).toBe(true);
     clearSummaryCaches(); operations.length = 0;
     const full = await call("coach_input", protocol, { format: "full" });
-    expect(full).toEqual(omitted);
+    expect(full).toEqual({ ...omitted, view: { ...omitted.view, resolved_at: full.view.resolved_at } });
     expect(full.analysis).toEqual(genuine);
     expect(outputSchemas.coach_input.parse(full)).toEqual(full);
     expect(full.analysis).toMatchObject({ analysis_id: "a873199b6c3fe7eca53a0d4f", analyzer_version: "1.9.0",
@@ -618,7 +623,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     expect(full.analysis.workout_targets.items[1].duration).toMatchObject({ value: 400, unit: "m" });
     expect(operations).toHaveLength(4);
     clearSummaryCaches(); operations.length = 0;
-    expect(await call("coach_input", protocol)).toEqual(full);
+    expectSameCoachRead(await call("coach_input", protocol), full);
     expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
     await editCoach(analysis => {
       const block = analysis.workout_targets as { items: Array<{ target: { range: { unit: string } } }> };
@@ -653,7 +658,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       .toMatchObject({ value: 48.5, side_semantics: "unknown" });
     expect(operations).toHaveLength(4);
     clearSummaryCaches(); operations.length = 0;
-    expect(await call("coach_input", protocol)).toEqual(full);
+    expectSameCoachRead(await call("coach_input", protocol), full);
     expect([...rows].map(([key, body]) => [key, Array.from(body)])).toEqual(before);
     await editCoach(analysis => {
       const block = analysis.ground_contact_sides as { record_aggregates: { executed_intervals: { items: Array<{ right_percent: number }> } } };
@@ -686,7 +691,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       "GET activities/2026/42/coach-input/v1/latest-ready.json", `GET ${canonical}`]);
     clearSummaryCaches(); operations.length = 0;
     const full = await call("coach_input", protocol, { format: "full" });
-    expect(full).toEqual(omitted);
+    expect(full).toEqual({ ...omitted, view: { ...omitted.view, resolved_at: full.view.resolved_at } });
     expect(full.analysis).toEqual(genuine);
     expect(outputSchemas.coach_input.parse(full)).toEqual(full);
     expect(full.analysis).toMatchObject({ analysis_id: "6a27a75940c16475e45ccac3", analyzer_version: "1.9.0",
@@ -798,7 +803,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     expect(omitted.available).toBe(true);
     clearSummaryCaches(); operations.length = 0;
     const full = await call("coach_input", protocol, { format: "full" });
-    expect(full).toEqual(omitted);
+    expect(full).toEqual({ ...omitted, view: { ...omitted.view, resolved_at: full.view.resolved_at } });
     expect(full.analysis).toEqual(genuine);
     expect(outputSchemas.coach_input.parse(full)).toEqual(full);
     expect(operations).toEqual(["HEAD summary/activities.csv", "GET summary/activities.csv",
@@ -920,7 +925,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       "GET activities/2026/42/coach-input/v1/canonical/9487effdc2d0e426b5321387.json"]);
     clearSummaryCaches(); operations.length = 0;
     const full = await call("coach_input", protocol, { format: "full" });
-    expect(full).toEqual(omitted);
+    expect(full).toEqual({ ...omitted, view: { ...omitted.view, resolved_at: full.view.resolved_at } });
     expect(outputSchemas.coach_input.parse(full)).toEqual(full);
     expect(full.analysis).toMatchObject({ analysis_id: "9487effdc2d0e426b5321387", analyzer_version: "1.9.0",
       activity_id: "42", summary: { elapsed_seconds: 60, distance_m: 3000 },
@@ -1030,7 +1035,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       "GET activities/2026/42/coach-input/v1/latest-ready.json",
       `GET activities/2026/42/coach-input/v1/canonical/${output.analysis.analysis_id}.json`]);
     clearSummaryCaches(); operations.length = 0;
-    expect(await call("coach_input", protocol, { format: "full" })).toEqual(output);
+    expectSameCoachRead(await call("coach_input", protocol, { format: "full" }), output);
     expect(operations).toHaveLength(4);
     expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
   });
@@ -1046,7 +1051,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       "GET activities/2026/42/coach-input/v1/canonical/d6f3b079934fcf63af5a4988.json"]);
     clearSummaryCaches(); operations.length = 0;
     const full = await call("coach_input", protocol, { format: "full" });
-    expect(full).toEqual(omitted);
+    expect(full).toEqual({ ...omitted, view: { ...omitted.view, resolved_at: full.view.resolved_at } });
     expect(full.analysis).toMatchObject({ analysis_id: "d6f3b079934fcf63af5a4988", analyzer_version: "1.3.0",
       activity: { date: "2026-10-08" }, summary: { distance_m: 2000, average_heart_rate_bpm: 145 },
       stored_context_snapshot: { schema_version: 1, snapshot_at: null,
@@ -1136,7 +1141,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       "GET activities/2026/42/coach-input/v1/canonical/98685be355b2de697f0166d8.json"]);
     clearSummaryCaches(); operations.length = 0;
     const full = await call("coach_input", protocol, { format: "full" });
-    expect(full).toEqual(omitted);
+    expect(full).toEqual({ ...omitted, view: { ...omitted.view, resolved_at: full.view.resolved_at } });
     expect(full.analysis).toEqual(genuine180);
     expect(full.analysis).toMatchObject({ analysis_id: "98685be355b2de697f0166d8", analyzer_version: "1.8.0",
       summary: { distance_m: 900, average_heart_rate_bpm: null },
@@ -1231,6 +1236,13 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       analysis.analyzer_version = "legacy\nSummary: forged-version";
       (analysis.recorded_running_metrics as { average_power: { unit: string } }).average_power.unit = "W\nSummary: forged-unit";
       analysis.user_context = { note: "Synthetic\nSummary: forged-note", rpe: 0 };
+      // Current user strings now come from their own append-only storage seam,
+      // not the selected historical analysis. Keep the same hostile text test.
+      rows.set("activities/2026/42/context/v1/20261024T120000000-ctx-escape.json", new TextEncoder().encode(JSON.stringify({
+        schema_version: 1, activity_id: "42", context_id: "ctx-escape", source: "user",
+        created_at: "2026-10-24T12:00:00.000Z", rpe: 0, conditions: null,
+        note: "Synthetic\nSummary: forged-note", workout_correction: null,
+      })));
     }, "deb436b814332360e4773d6d");
     clearSummaryCaches(); operations.length = 0;
     const before = [...rows].map(([name, body]) => [name, Array.from(body)]);
@@ -1253,11 +1265,11 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     expect(operations).toHaveLength(4);
     clearSummaryCaches(); operations.length = 0;
     const second = await call("coach_input", protocol, { format: "coach" });
-    expect(second).toEqual(first);
+    expectSameCoachRead(second, first);
     expect(operations).toHaveLength(4);
     expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
     console.info(JSON.stringify({ synthetic_presentation_bytes: new TextEncoder().encode(JSON.stringify(first)).length,
-      synthetic_full_bytes: new TextEncoder().encode(JSON.stringify(full)).length, storage_reads_per_view: 4,
+      synthetic_full_bytes: new TextEncoder().encode(JSON.stringify(full)).length, immutable_analysis_reads_per_view: 4,
       source_mutations: 0, protocol }));
   });
   it(`Coach presentation rich facts: original scopes and native references survive via ${protocol}`, async () => {
@@ -1304,6 +1316,14 @@ const issuer = "https://running-segments-synthetic.cloudflareaccess.com";
 const hostname = "running-segments.example";
 const rows = new Map<string, Uint8Array>();
 const operations: string[] = [];
+// Keep the original immutable-analysis I/O assertions exact. Current-context
+// reads are an additional, separately bounded operation measured at each call.
+const contextOperations: string[] = [];
+function expectSameCoachRead(actual: Record<string, unknown>, expected: Record<string, unknown>) {
+  const view = actual.view as Record<string, unknown>;
+  expect(view.resolved_at).toEqual(expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/));
+  expect(actual).toEqual({ ...expected, view: { ...expected.view as Record<string, unknown>, resolved_at: view.resolved_at } });
+}
 const enduranceKey = "activities/2026/42/activity.endurance.v1.json";
 let key: CryptoKey, jwk: Record<string, unknown>, token: string;
 let testEnv: Env;
@@ -1357,11 +1377,19 @@ beforeEach(async () => {
   const bucket = {
     head: async (name: string) => { operations.push(`HEAD ${name}`); return rows.has(name) ? { etag: "synthetic-segments" } : null; },
     get: async (name: string) => {
-      operations.push(`GET ${name}`);
+      (name.includes("/context/v1/") ? contextOperations : operations).push(`GET ${name}`);
       const body = rows.get(name);
       return body === undefined ? null : { size: body.byteLength, etag: "synthetic-segments", body: new Response(body).body };
     },
-    list: async () => { operations.push("LIST"); throw new Error("Unexpected legacy discovery"); },
+    list: async (options: R2ListOptions) => {
+      if (/^activities\/(2025|2026|2027)\/42\/context\/v1\/$/.test(options.prefix ?? "")) {
+        expect(options.limit).toBe(100);
+        contextOperations.push("LIST " + options.prefix);
+        return { truncated: false, objects: [...rows.keys()].filter(name => name.startsWith(options.prefix!))
+          .map(name => ({ key: name })) };
+      }
+      operations.push("LIST"); throw new Error("Unexpected legacy discovery");
+    },
     put: async () => { operations.push("PUT"); throw new Error("Unexpected fixture write"); },
     delete: async () => { operations.push("DELETE"); throw new Error("Unexpected fixture delete"); },
   } as unknown as R2Bucket;
@@ -1372,6 +1400,7 @@ beforeEach(async () => {
 afterEach(() => { clearSummaryCaches(); vi.restoreAllMocks(); });
 
 async function call(name: "endurance_session" | "coach_input", protocol: string, extraArguments: Record<string, unknown> = {}, expectError = false) {
+  const contextStart = contextOperations.length;
   const ctx = createExecutionContext();
   const response = await worker.fetch(new Request(`https://${hostname}/mcp`, {
     method: "POST", headers: { host: hostname, "content-type": "application/json", accept: "application/json, text/event-stream",
@@ -1389,6 +1418,12 @@ async function call(name: "endurance_session" | "coach_input", protocol: string,
   if (expectError) { expect(message.result.isError, text).toBe(true); return message.result; }
   expect(message.result.isError, text).not.toBe(true);
   expect(JSON.parse(message.result.content[0].text)).toEqual(message.result.structuredContent);
+  const currentReads = contextOperations.slice(contextStart);
+  const date = String(message.result.structuredContent.activity?.date ?? "").slice(5, 10);
+  expect(currentReads.filter(item => item.startsWith("LIST"))).toHaveLength(
+    name === "coach_input" && message.result.structuredContent.available
+      ? ["01-01", "12-31"].includes(date) ? 2 : 1 : 0);
+  expect(currentReads.filter(item => item.startsWith("GET")).length).toBeLessThanOrEqual(1);
   return message.result.structuredContent;
 }
 
@@ -1573,7 +1608,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     expect(coached).not.toHaveProperty("analysis");
     const { analysis: _analysis, ...originalEnvelope } = omitted;
     const { presentation, ...coachEnvelope } = coached;
-    expect(coachEnvelope).toEqual(originalEnvelope);
+    expectSameCoachRead(coachEnvelope, originalEnvelope);
     expect(presentation).toMatchObject({
       version: "1.0.0", format: "coach_text", source_analysis_id: native18.complete.analysis_id,
       source_analyzer_version: "1.9.1", scope: "selected_fields", full_data_hint: "format=full",
@@ -1591,7 +1626,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     expect(operations).toEqual(expectedReads);
     clearSummaryCaches(); operations.length = 0;
     const full = await call("coach_input", protocol, { format: "full" });
-    expect(full).toEqual(omitted);
+    expect(full).toEqual({ ...omitted, view: { ...omitted.view, resolved_at: full.view.resolved_at } });
     expect(full).not.toHaveProperty("presentation");
     expect(operations).toEqual(expectedReads);
     expect([...rows].map(([name, body]) => [name, Array.from(body)])).toEqual(before);
