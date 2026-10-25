@@ -1,5 +1,5 @@
 /** Shared current-selection contract; immutable object timestamps are legacy only. */
-import { recordedRunningSegmentsSchema } from "./recorded-running-segments";
+import { RAW_BALANCE_POLICY, recordedRunningSegmentsSchema } from "./recorded-running-segments";
 import { validStoredCoachContext } from "./coach-stored-context";
 import { validCoachTrainingEffect } from "./coach-training-effect";
 import { validGroundContactSides } from "./gct-sides";
@@ -8,6 +8,7 @@ import { validNativeLapWorkoutBinding } from "./native-lap-workout-binding";
 import { validLogicalBouts } from "./logical-bouts";
 import { validRecordedCadence } from "./recorded-cadence";
 import { validWorkoutTargets } from "./workout-targets";
+import { validRecoveryRunningMetrics } from "./recovery-running-metrics";
 
 type Json = Record<string, unknown>;
 export type CoachSelection =
@@ -91,26 +92,33 @@ export async function readCurrentCoachInput(options: {
     || typeof analysis.analysis_id !== "string"
     || (options.date && record(analysis.activity).date !== options.date)
     || (strictIdentity && analysis.analysis_id !== key.slice(prefix.length, -5))) return { status: "unverified" };
-  if (!["1.9.0", "1.9.1"].includes(String(analysis.analyzer_version)) && "logical_bouts" in analysis) return { status: "unverified" };
-  if (!["1.9.0", "1.9.1"].includes(String(analysis.analyzer_version)) && "recorded_cadence" in analysis) return { status: "unverified" };
-  if (!["1.9.0", "1.9.1"].includes(String(analysis.analyzer_version)) && "workout_targets" in analysis) return { status: "unverified" };
-  if (!["1.8.0", "1.9.0", "1.9.1"].includes(String(analysis.analyzer_version)) && "native_lap_workout_binding" in analysis) return { status: "unverified" };
-  if (!["1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.9.1"].includes(String(analysis.analyzer_version)) && "ground_contact_sides" in analysis) return { status: "unverified" };
-  if (!["1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.9.1"].includes(String(analysis.analyzer_version)) && "segment_running_metrics" in analysis) return { status: "unverified" };
-  if (["1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.9.1"].includes(String(analysis.analyzer_version))) {
+  if (!["1.9.0", "1.9.1", "1.10.0"].includes(String(analysis.analyzer_version)) && "logical_bouts" in analysis) return { status: "unverified" };
+  if ("recovery_running_metrics" in analysis && analysis.analyzer_version !== "1.10.0") return { status: "unverified" };
+  if (!["1.9.0", "1.9.1", "1.10.0"].includes(String(analysis.analyzer_version)) && "recorded_cadence" in analysis) return { status: "unverified" };
+  if (!["1.9.0", "1.9.1", "1.10.0"].includes(String(analysis.analyzer_version)) && "workout_targets" in analysis) return { status: "unverified" };
+  if (!["1.8.0", "1.9.0", "1.9.1", "1.10.0"].includes(String(analysis.analyzer_version)) && "native_lap_workout_binding" in analysis) return { status: "unverified" };
+  if (!["1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.9.1", "1.10.0"].includes(String(analysis.analyzer_version)) && "ground_contact_sides" in analysis) return { status: "unverified" };
+  if (!["1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.9.1", "1.10.0"].includes(String(analysis.analyzer_version)) && "segment_running_metrics" in analysis) return { status: "unverified" };
+  if (["1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.9.1", "1.10.0"].includes(String(analysis.analyzer_version))) {
     const measurements = recordedRunningSegmentsSchema.safeParse(analysis.recorded_running_metrics);
     if (!measurements.success || measurements.data.activity_id !== activityId) return { status: "unverified" };
     const block = measurements.data;
-    if ((analysis.analyzer_version === "1.3.0" || (["1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.9.1"].includes(String(analysis.analyzer_version)) && "stored_context_snapshot" in analysis))
+    const policy = analysis.analyzer_version === "1.10.0" ? RAW_BALANCE_POLICY
+      : "not_computed_without_verified_side_semantics";
+    if ([block.kilometer_splits, block.distance_halves].some(group => group.balance_aggregation !== policy)) {
+      return { status: "unverified" };
+    }
+    if ((analysis.analyzer_version === "1.3.0" || (["1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.9.1", "1.10.0"].includes(String(analysis.analyzer_version)) && "stored_context_snapshot" in analysis))
       && !validStoredCoachContext(analysis.stored_context_snapshot,
       block.session_start_time_utc, block.local_date)) return { status: "unverified" };
-    if (["1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.9.1"].includes(String(analysis.analyzer_version)) && !validCoachTrainingEffect(analysis, activityId)) return { status: "unverified" };
-    if (["1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.9.1"].includes(String(analysis.analyzer_version)) && !validSegmentRunningMetrics(analysis, block)) return { status: "unverified" };
-    if (["1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.9.1"].includes(String(analysis.analyzer_version)) && !validGroundContactSides(analysis, block)) return { status: "unverified" };
-    if (["1.8.0", "1.9.0", "1.9.1"].includes(String(analysis.analyzer_version)) && !validNativeLapWorkoutBinding(analysis, block)) return { status: "unverified" };
-    if (["1.9.0", "1.9.1"].includes(String(analysis.analyzer_version)) && !validLogicalBouts(analysis, block)) return { status: "unverified" };
+    if (["1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.9.1", "1.10.0"].includes(String(analysis.analyzer_version)) && !validCoachTrainingEffect(analysis, activityId)) return { status: "unverified" };
+    if (["1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.9.1", "1.10.0"].includes(String(analysis.analyzer_version)) && !validSegmentRunningMetrics(analysis, block)) return { status: "unverified" };
+    if (["1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.9.1", "1.10.0"].includes(String(analysis.analyzer_version)) && !validGroundContactSides(analysis, block)) return { status: "unverified" };
+    if (["1.8.0", "1.9.0", "1.9.1", "1.10.0"].includes(String(analysis.analyzer_version)) && !validNativeLapWorkoutBinding(analysis, block)) return { status: "unverified" };
+    if (["1.9.0", "1.9.1", "1.10.0"].includes(String(analysis.analyzer_version)) && !validLogicalBouts(analysis, block)) return { status: "unverified" };
     if ("recorded_cadence" in analysis && !validRecordedCadence(analysis, block)) return { status: "unverified" };
     if ("workout_targets" in analysis && !validWorkoutTargets(analysis)) return { status: "unverified" };
+    if ("recovery_running_metrics" in analysis && !validRecoveryRunningMetrics(analysis)) return { status: "unverified" };
     const sourceDigest = record(analysis.source).fit_sha256;
     if (block.association === "matched") {
       if (block.source_fit_sha256 !== sourceDigest

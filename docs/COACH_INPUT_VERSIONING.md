@@ -1,5 +1,76 @@
 # Coach Input identity and immutable publication
 
+## Current user context versus immutable analysis
+
+The response's top-level `ground_contact_sides` is also a read-time projection
+from the selected verified measurements and the current exact activity/date/FIT
+declaration. The coach presentation uses that projection, not the analysis's
+historical declaration. `analysis.ground_contact_sides` in full remains frozen.
+Unknown or unreadable current context never reuses an old side declaration.
+
+The coach view joins kilometer measurements only on the verified split geometry,
+not by similar values or native-lap numbering. A raw balance value is retained
+with unknown side semantics until its exact FIT declaration is valid. Units,
+missing values, genuine zero and measurement coverage remain explicit. A net
+elevation change is not presented as ascent/descent when those totals were not
+stored. Logical rep numbering is observed work order; planned repeat iteration
+and completion/shortening/skipping remain unknown without explicit source proof.
+
+`view.interpretation` and the coach text retain the original decoupling value but
+flag structured workouts and a difference of at least one percentage point in
+the two verified distance halves' net gradients. This is a conservative display
+policy, not a validated physiological threshold. Missing terrain is unknown;
+`not_flagged` is not a claim of physiological validity. Net gradients do not
+describe all climbing, conditions or effort changes within each half.
+
+`coach_input` selects the existing immutable analysis through `latest-ready.json`
+and independently reads the latest append-only user context for that activity.
+It does not regenerate an analysis or require a separate manifest from the user.
+The selected profile/zones and frozen pre-activity health snapshot remain historical;
+only explicit user context is resolved as current state.
+
+The additive top-level `user_context` is the current effective context. `view`
+separates its `context_revision` / `context_updated_at` from the selected
+`analysis_id` / `analyzer_version`, with a separate `resolved_at` read timestamp.
+`view.context_status` is `available`, `not_stored`, or `unavailable`. A failed,
+invalid or ambiguous current-context read is unavailable, never proof of absence.
+In `format=full` (or omitted format), `analysis` remains the complete original
+selected analysis, including its original context snapshot. In `format=coach`,
+the presentation uses current user context and the original analysis identity.
+
+Each context write appends an effective snapshot. Omitted fields retain their
+previous values; explicit `null` clears RPE, conditions, note or workout correction.
+A GCT-only update retains ordinary context, and an ordinary update retains the
+previous GCT declaration. Old context files are never overwritten. Legacy stored
+nulls cannot always distinguish an omission from an intentional clear; the reader
+does not guess and resurrect older values or rewrite that history.
+
+An activity-scoped durable claim covers the snapshot read, merge and append.
+It is separate from the unchanged per-actor cooldown and daily accepted-attempt
+budget, which is reserved only after the previous snapshot is verified. An
+overlapping append is explicitly not accepted, even if the cooldown
+has elapsed; it can be submitted after the earlier operation finishes. A claim
+does not expire while a delayed PUT could still arrive. Confirmed PUT completion
+releases only the matching claim; an unknown PUT result remains held, without
+automatic retry, refund, expiry or deletion. Read to inspect the result and ask
+the maintainer if the earlier operation remains unresolved. Do not repeat an
+append whose save outcome is unknown. A completion-acknowledgement failure after
+a successful PUT still returns saved=true. No new namespace, binding or storage
+migration is required; pre-claim writer rollback is held while a claim is pending.
+
+The stored recent-activity package likewise keeps `coach_input` as the original
+verified analysis and exposes effective `user_context` separately. A context-only
+append does not mark that analysis pending or dispatch a repair. Existing source
+revision, FIT identity, profile, date and freshness gates remain in force; context
+composition does not claim a fresh Garmin check.
+
+When the user explicitly asks to record context while discussing a workout,
+save it with `add_activity_context` first. Its successful receipt includes an
+updated `coach_input` presentation for the same selected analysis, so a client
+does not need an extra user confirmation or regeneration request. Do not infer
+RPE or notes from measurements. If `saved=true` but the included view is
+unavailable, the write is still saved: retry only `coach_input`, not the append.
+
 ## Optional read-time presentation
 
 `coach_input` accepts an optional `format` with values `coach`

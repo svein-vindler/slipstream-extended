@@ -97,7 +97,7 @@ function validMainReferences(analysis: Json, group: Json, recorded: Recorded): b
   });
 }
 /** The caller validates logical2 source identities and elapsed clocks first. */
-function recoveryCadenceReferences(analysis: Json): Json | null {
+export function recoveryCadenceReferences(analysis: Json): Json | null {
   const logical = object(analysis.logical_bouts), structure = object(analysis.workout_structure);
   if (logical?.schema_version !== 2 || logical.status !== "available"
     || object(logical.source_coverage)?.status !== "complete"

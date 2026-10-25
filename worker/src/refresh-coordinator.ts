@@ -287,5 +287,25 @@ export class RefreshCoordinator extends DurableObject<Env> {
     );
     return { acquired: true, token, remaining: dailyLimit - used - 1 };
   }
+
+  /** A pending R2 append cannot expire while its delayed PUT can still arrive. */
+  reserveActivityContextWrite(activityId: string): RefreshLease {
+    if (!/^\d{1,20}$/.test(activityId)) throw new Error("Invalid context reservation.");
+    return this.ctx.storage.transactionSync(() => {
+      const key = `mcp-context-pending:${activityId}`;
+      if (this.ctx.storage.sql.exec("SELECT token FROM refresh_leases WHERE lease_key = ?", key).toArray().length) {
+        return { acquired: false };
+      }
+      const token = crypto.randomUUID();
+      this.ctx.storage.sql.exec("INSERT INTO refresh_leases (lease_key, token, expires_at) VALUES (?, ?, ?)",
+        key, token, Number.MAX_SAFE_INTEGER);
+      return { acquired: true, token };
+    });
+  }
+
+  finishActivityContextWrite(activityId: string, token: string): { released: boolean } {
+    if (!/^\d{1,20}$/.test(activityId) || !token) throw new Error("Invalid context completion.");
+    return this.release(`mcp-context-pending:${activityId}`, token);
+  }
 }
 

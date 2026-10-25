@@ -14,6 +14,7 @@ const fitKey = "activities/2026/42/activity.v1.json";
 const enduranceKey = "activities/2026/42/activity.endurance.v1.json";
 const rows = new Map<string, string | Uint8Array>();
 const operations: string[] = [];
+const contextOperations: string[] = [];
 let key: CryptoKey, jwk: Record<string, unknown>, token: string;
 let testEnv: Env;
 function decoded() {
@@ -45,12 +46,19 @@ beforeEach(async () => {
   const bucket = {
     head: async (name: string) => { operations.push(`HEAD ${name}`); return rows.has(name) ? { etag: "synthetic-recorded" } : null; },
     get: async (name: string) => {
-      operations.push(`GET ${name}`);
+      (name.includes("/context/v1/") ? contextOperations : operations).push(`GET ${name}`);
       const body = rows.get(name);
       return body === undefined ? null : { size: typeof body === "string" ? new TextEncoder().encode(body).byteLength : body.byteLength,
         etag: "synthetic-recorded", body: new Response(body).body };
     },
-    list: async () => { operations.push("LIST"); throw new Error("Unexpected legacy discovery"); },
+    list: async (options: R2ListOptions) => {
+      if (/^activities\/2026\/(1|42)\/context\/v1\/$/.test(options.prefix ?? "")) {
+        expect(options.limit).toBe(100); contextOperations.push("LIST " + options.prefix);
+        return { truncated: false, objects: [...rows.keys()].filter(name => name.startsWith(options.prefix!))
+          .map(name => ({ key: name })) };
+      }
+      operations.push("LIST"); throw new Error("Unexpected legacy discovery");
+    },
     put: async () => { operations.push("PUT"); throw new Error("Unexpected fixture write"); },
     delete: async () => { operations.push("DELETE"); throw new Error("Unexpected fixture delete"); },
   } as unknown as R2Bucket;
@@ -61,6 +69,7 @@ beforeEach(async () => {
 afterEach(() => { clearSummaryCaches(); vi.restoreAllMocks(); });
 
 async function call(name = "endurance_session", protocol = "2025-03-26", activityId = "garmin-42") {
+  const contextStart = contextOperations.length;
   const ctx = createExecutionContext();
   const response = await worker.fetch(new Request(`https://${hostname}/mcp`, {
     method: "POST", headers: { host: hostname, "content-type": "application/json", accept: "application/json, text/event-stream",
@@ -76,6 +85,10 @@ async function call(name = "endurance_session", protocol = "2025-03-26", activit
   const line = text.split("\n").find(value => value.startsWith("data: "));
   const message = JSON.parse(line ? line.slice(6) : text);
   expect(message.error, text).toBeUndefined(); expect(message.result.isError, text).not.toBe(true);
+  const currentReads = contextOperations.slice(contextStart);
+  expect(currentReads.filter(item => item.startsWith("LIST"))).toHaveLength(
+    name === "coach_input" && message.result.structuredContent?.available ? 1 : 0);
+  expect(currentReads.filter(item => item.startsWith("GET")).length).toBeLessThanOrEqual(1);
   expect(JSON.parse(message.result.content[0].text)).toEqual(message.result.structuredContent);
   return message.result.structuredContent;
 }

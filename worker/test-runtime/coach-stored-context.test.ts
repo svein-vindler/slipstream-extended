@@ -14,6 +14,7 @@ const issuer = "https://stored-context-synthetic.cloudflareaccess.com";
 const hostname = "stored-context.example";
 const rows = new Map<string, Uint8Array>();
 const operations: string[] = [];
+const contextOperations: string[] = [];
 let key: CryptoKey, jwk: Record<string, unknown>, token: string;
 let testEnv: Env;
 function load(objects: Record<string, string>) {
@@ -50,10 +51,17 @@ beforeEach(async () => {
   const bucket = {
     head: async (name: string) => { operations.push(`HEAD ${name}`); return rows.has(name) ? { etag: "synthetic-context" } : null; },
     get: async (name: string) => {
-      operations.push(`GET ${name}`); const body = rows.get(name);
+      (name.includes("/context/v1/") ? contextOperations : operations).push(`GET ${name}`); const body = rows.get(name);
       return body === undefined ? null : { size: body.byteLength, etag: "synthetic-context", body: new Response(body).body };
     },
-    list: async () => { operations.push("LIST"); throw new Error("Unexpected context discovery"); },
+    list: async (options: R2ListOptions) => {
+      if (/^activities\/2026\/\d+\/context\/v1\/$/.test(options.prefix ?? "")) {
+        expect(options.limit).toBe(100); contextOperations.push("LIST " + options.prefix);
+        return { truncated: false, objects: [...rows.keys()].filter(name => name.startsWith(options.prefix!))
+          .map(name => ({ key: name })) };
+      }
+      operations.push("LIST"); throw new Error("Unexpected context discovery");
+    },
     put: async () => { operations.push("PUT"); throw new Error("Unexpected context write"); },
     delete: async () => { operations.push("DELETE"); throw new Error("Unexpected context deletion"); },
   } as unknown as R2Bucket;
@@ -63,6 +71,7 @@ beforeEach(async () => {
 });
 afterEach(() => { clearSummaryCaches(); vi.restoreAllMocks(); });
 async function call(protocol: string, activityId = "garmin-42", extraArguments: Record<string, unknown> = {}) {
+  const contextStart = contextOperations.length;
   const ctx = createExecutionContext();
   const response = await worker.fetch(new Request(`https://${hostname}/mcp`, {
     method: "POST", headers: { host: hostname, "content-type": "application/json", accept: "application/json, text/event-stream",
@@ -80,6 +89,9 @@ async function call(protocol: string, activityId = "garmin-42", extraArguments: 
   const message = JSON.parse(line ? line.slice(6) : text);
   expect(message.error, text).toBeUndefined(); expect(message.result.isError, text).not.toBe(true);
   expect(JSON.parse(message.result.content[0].text)).toEqual(message.result.structuredContent);
+  const currentReads = contextOperations.slice(contextStart);
+  expect(currentReads.filter(item => item.startsWith("LIST"))).toHaveLength(message.result.structuredContent.available ? 1 : 0);
+  expect(currentReads.filter(item => item.startsWith("GET")).length).toBeLessThanOrEqual(1);
   return message.result.structuredContent;
 }
 function expectBoundedReads(identifier = produced.analysis_id, activityId = "42") {
@@ -100,7 +112,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       expectBoundedReads(fixture.analysis_id);
       clearSummaryCaches(); operations.length = 0;
       const full = await call(protocol, "garmin-42", { format: "full" });
-      expect(full).toEqual(omitted);
+      expect(full).toEqual({ ...omitted, view: { ...omitted.view, resolved_at: full.view.resolved_at } });
       expect(full.analysis).toMatchObject({ analysis_id: fixture.analysis_id,
         summary: { distance_m: 2000 } });
       expectBoundedReads(fixture.analysis_id);

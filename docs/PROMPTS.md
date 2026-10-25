@@ -58,11 +58,16 @@ elapsed time unless a later schema explicitly adds another option.
 After an activity, user-owned information can be appended without editing the
 Garmin source data:
 
-> Prepare RPE 3, conditions "sunny and dry", and my supplied note for activity
-> garmin-123. Do not infer anything I did not state. Show the context and wait
-> for my confirmation before appending it to private R2.
+> Save RPE 3, conditions "sunny and dry", and my supplied note for activity
+> garmin-123, then tell me about the workout using the updated Coach Input in
+> the save receipt. Do not infer missing values or clear fields I did not mention.
 
-`coach_input` returns the newest prepared analysis. Garmin's planned workout
+That explicit save request is the confirmation; no second approval is needed.
+Without an explicit request to store the information, preview and ask first.
+Later partial updates retain other fields. Explicit null clears an ordinary field.
+
+`coach_input` returns the selected immutable analysis with current user context
+resolved separately, regardless of the analysis's age. Garmin's planned workout
 steps and the laps actually performed are separate. If no Garmin workout or
 explicit correction exists, the first version treats the continuous activity as
 one main section; it does not guess intervals from pace or heart rate.
@@ -88,13 +93,15 @@ Example request for an installation supporting the option:
 
 The excerpt keeps whole-distance and main-distance first/second halves, or the
 original reasons they are unavailable, separate from record-derived intervals.
-Native lap rows retain all six original measurements, units and missing states;
-verified workout-step links accompany those rows where available. Several laps
-can refer to one step and remain separate, without an invented combined mean.
-Unbound laps retain their measurements and lack of a verified step. Missing is
-not zero, aggregate contact balance keeps unknown sides, and explicit stored side
-declarations remain separate. Frozen context keeps its original time and
-availability metadata; it is not a new check of current readiness.
+The coherent kilometer and logical work/recovery tables join verified stored
+measurements. Several Auto Laps with a verified common step can form one rep;
+observed numbering does not prove planned completion. Native source rows remain
+in full data. Missing is not zero. Raw GCT balance retains unknown sides until a
+current activity/date/FIT declaration projects recorded and derived sides.
+Interpretation guards retain the decoupling number without claiming physiological
+validity. The frozen pre-activity health context keeps its original meaning;
+current user context is not a fresh readiness check. Full retains the original
+analysis and exposes the effective user context and read-time metadata separately.
 
 After a new workout, request the targeted import rather than waiting for the
 nightly detailed-file job:

@@ -1,8 +1,9 @@
 import { COACH_PROFILE_CAPACITY } from "./coach-profile-capacity";
 import { readCurrentCoachInput } from "./coach-selection";
 import { coachPresentation } from "./coach-presentation";
+import { decouplingInterpretation } from "./coach-tables";
 import { activityCalendarYears, resolveActivityClock } from "./activity-clock";
-import { activityContextSchema, gctSideInput } from "./gct-sides";
+import { activityContextSchema, expectedGctSides, gctSideInput } from "./gct-sides";
 import { ApplicationToolError, applicationToolResult } from "./application-errors";
 import { McpServer } from "@modelcontextprotocol/server";
 import { errorCategory } from "./output-privacy";
@@ -18,7 +19,7 @@ import { R2Storage, COACH_CONFIG_R2_LIMITS } from "./r2-storage";
 import { exactDate, dateRange, sport, PRIVATE_READ_TOOL_ANNOTATIONS } from "./tool-contracts";
 import { trainingContext } from "./training-context";
 import { recordedRunningMetrics } from "./recorded-running-metrics";
-import { storedRunningMeasurements } from "./recorded-running-segments";
+import { recordedRunningSegmentsSchema, storedRunningMeasurements } from "./recorded-running-segments";
 import { strengthSessionSchema, enduranceSessionSchema } from "./detail-projection";
 
 const COACH_PROFILE_PREFIX = "coach/profiles/v1/";
@@ -72,6 +73,52 @@ export class ActivityCoachTools {
     await this.env.SLIPSTREAM_DATA.put(key, body, {
       httpMetadata: { contentType: "application/json" },
     });
+  }
+
+  /** One bounded read path shared by normal reads and successful context receipts. */
+  private async readCoachView(activity: Activity, requested: string, format?: "coach" | "full") {
+    const prefix = coachInputPrefix(activity);
+    const selection = await readCurrentCoachInput({
+      canonicalPrefix: prefix, activityId: requested,
+      ...(activity.localDate ? { date: activity.localDate } : {}),
+      read: (keys, limits) => this.storage.getR2JsonWithMetadata(keys, limits),
+      versions: async () => {
+        const listed = await this.env.SLIPSTREAM_DATA.list({ prefix, limit: 1000 });
+        if (listed.truncated) throw new Error("Coach analysis versions exceed the bounded legacy limit.");
+        return listed.objects;
+      },
+    });
+    if (selection.status !== "available") {
+      return { available: false, activity: toSummary(activity),
+        message: selection.status === "absent"
+          ? "No coach input is stored yet. Add a coach profile and let the R2-only coach backfill run."
+          : "The current coach input could not be verified. Retry this read later; if it persists, ask the maintainer to check stored analysis compatibility." };
+    }
+    // User context has a different lifetime from immutable analysis/profile
+    // snapshots. A failed current read must never be reported as not_stored.
+    let context: Awaited<ReturnType<ActivityCoachTools["previousContext"]>> = null;
+    let contextStatus: "available" | "not_stored" | "unavailable" = "unavailable";
+    const day = validCalendarDay(activityCalendarDay(activity));
+    if (day) {
+      try {
+        context = await this.previousContext(requested, day);
+        contextStatus = context ? "available" : "not_stored";
+      } catch { /* Keep the selected analysis readable, with explicit uncertainty. */ }
+    }
+    const view = { schema_version: 1 as const, analysis_id: String(selection.analysis.analysis_id),
+      analyzer_version: String(selection.analysis.analyzer_version), context_status: contextStatus,
+      context_revision: context?.context_id ?? null, context_updated_at: context?.created_at ?? null,
+      resolved_at: new Date().toISOString(), interpretation: decouplingInterpretation(selection.analysis) };
+    const metrics = recordedRunningSegmentsSchema.safeParse(selection.analysis.recorded_running_metrics);
+    const groundContactSides = metrics.success ? expectedGctSides(metrics.data, context,
+      selection.analysis.segment_running_metrics, { currentView: true, contextUnavailable: contextStatus === "unavailable",
+        recovery: selection.analysis.recovery_running_metrics }) : null;
+    return { available: true, activity: toSummary(activity), view, user_context: context,
+      ground_contact_sides: groundContactSides,
+      ...(format === "coach" ? { presentation: coachPresentation(selection.analysis,
+        { status: contextStatus, value: context, groundContactSides }) } : { analysis: selection.analysis }),
+      message: activity.localDate ? "Coach input is available."
+        : "Coach input is available. The indexed date uses a UTC fallback; its historical local-calendar association is unconfirmed." };
   }
 
   private writesEnabled(): boolean {
@@ -497,7 +544,7 @@ export class ActivityCoachTools {
 
       server.registerTool("add_activity_context", {
       title: "Add user context to an activity",
-      description: "Append explicit user context to one activity. gct_balance_side declares the raw session/recorded-lap percentage's side for this exact stored FIT digest, not a device-wide convention. Call only on explicit user request. Side-only additions retain existing RPE/notes; historical contexts are never overwritten.",
+      description: "Append explicit user context to one activity. gct_balance_side declares the raw session/recorded-lap percentage's side for this exact stored FIT digest, not a device-wide convention. Call only on explicit user request. When the user provides context while asking about a workout, save it with this tool first; the receipt includes the updated Coach Input. Omitted fields are retained; explicit null clears an ordinary context field. Historical contexts and analyses are never overwritten or regenerated by this tool. If saved is true but the included view is unavailable, retry only coach_input, not the saved write.",
       inputSchema: z.object({
         activity_id: z.string().regex(/^(garmin-)?\d{1,20}$/),
         rpe: z.number().min(0).max(10).nullable().optional(),
@@ -505,8 +552,8 @@ export class ActivityCoachTools {
         note: z.string().trim().min(1).max(2000).nullable().optional(),
         workout_correction: z.string().trim().min(1).max(1000).nullable().optional(),
         gct_balance_side: gctSideInput.optional(),
-      }).refine((value) => value.rpe != null || value.conditions != null
-        || value.note != null || value.workout_correction != null || value.gct_balance_side != null,
+      }).refine((value) => value.rpe !== undefined || value.conditions !== undefined
+        || value.note !== undefined || value.workout_correction !== undefined || value.gct_balance_side != null,
       { message: "At least one context field is required." }),
       outputSchema: outputSchemas.add_activity_context,
       annotations: { readOnlyHint: false, destructiveHint: false,
@@ -523,7 +570,6 @@ export class ActivityCoachTools {
       if (!activityDate) {
         throw new ApplicationToolError({ kind: "calendar_date" });
       }
-      const createdAt = new Date().toISOString();
       if (args.gct_balance_side) {
         const stored = resolved.stored ?? await this.getR2Json(activityJsonObjectKeys(activity));
         const source = recordedRunningMetrics(activity, stored?.data, {});
@@ -531,39 +577,73 @@ export class ActivityCoachTools {
           throw new ApplicationToolError({ kind: "gct_declaration" });
         }
       }
-      const previous = await this.previousContext(requested, activityDate);
-      const side = args.gct_balance_side
-        ? { ...args.gct_balance_side, source: "user_activity_declaration" as const }
-        : previous?.schema_version === 2 ? previous.gct_balance_side : undefined;
-      const keep = <T>(supplied: T | undefined, prior: T | undefined): T | null =>
-        supplied !== undefined ? supplied : side ? prior ?? null : null;
-      const core = {
-        schema_version: side ? 2 : 1,
-        activity_id: requested,
-        activity_date: activityDate,
-        date_source: activity.localDate ? "garmin_local" : "utc_fallback",
-        rpe: keep(args.rpe, previous?.rpe),
-        conditions: keep(args.conditions, previous?.conditions),
-        note: keep(args.note, previous?.note),
-        workout_correction: keep(args.workout_correction, previous?.workout_correction),
-        ...(side ? { gct_balance_side: side } : {}),
-        source: "user",
-        created_at: createdAt,
-      };
-      const contextId = `ctx-${await contentId(core)}`;
-      const context = { ...core, context_id: contextId };
-      const stamp = createdAt.replace(/[-:.Z]/g, "");
-      const key = `${activityContextPrefix(activity)}${stamp}-${contextId}.json`;
-      await this.reserveCoachWrite(ACTIVITY_CONTEXT_WRITE_TTL_MS);
-      await this.putSmallJson(key, context);
+      // Claim the activity before reading its snapshot, independently of the
+      // actor cooldown. Keep the claim forever if the PUT result is unknown.
+      const coordinator = this.env.REFRESH_COORDINATOR.getByName("global");
+      const claim = await coordinator.reserveActivityContextWrite(requested);
+      if (!claim.acquired) throw new ApplicationToolError({ kind: "context_in_progress" });
+      const contextToken = claim.token;
+      if (!contextToken) throw new Error("Context reservation was not confirmed.");
+      let attempted = false, key: string, context: Record<string, unknown>, contextId: string;
+      try {
+        const previous = await this.previousContext(requested, activityDate);
+        const createdAt = new Date(Math.max(Date.now(), previous ? Date.parse(previous.created_at) + 1 : 0)).toISOString();
+        const side = args.gct_balance_side
+          ? { ...args.gct_balance_side, source: "user_activity_declaration" as const }
+          : previous?.schema_version === 2 ? previous.gct_balance_side : undefined;
+        const keep = <T>(supplied: T | undefined, prior: T | undefined): T | null =>
+          supplied !== undefined ? supplied : prior ?? null;
+        const core = {
+          schema_version: side ? 2 : 1,
+          activity_id: requested,
+          activity_date: activityDate,
+          date_source: activity.localDate ? "garmin_local" : "utc_fallback",
+          rpe: keep(args.rpe, previous?.rpe),
+          conditions: keep(args.conditions, previous?.conditions),
+          note: keep(args.note, previous?.note),
+          workout_correction: keep(args.workout_correction, previous?.workout_correction),
+          ...(side ? { gct_balance_side: side } : {}),
+          source: "user",
+          created_at: createdAt,
+        };
+        contextId = `ctx-${await contentId(core)}`;
+        context = { ...core, context_id: contextId };
+        const stamp = createdAt.replace(/[-:.Z]/g, "");
+        key = `${activityContextPrefix(activity)}${stamp}-${contextId}.json`;
+        await this.reserveCoachWrite(ACTIVITY_CONTEXT_WRITE_TTL_MS);
+        attempted = true;
+        await this.putSmallJson(key, context);
+      } catch (error) {
+        // Before PUT no append can arrive late; release only this exact owned
+        // claim. The accepted-attempt budget is never refunded.
+        if (!attempted) await coordinator.finishActivityContextWrite(requested, contextToken);
+        throw error;
+      }
+      try {
+        const completed = await coordinator.finishActivityContextWrite(requested, contextToken);
+        if (!completed.released) throw new Error("Context completion was not confirmed.");
+      } catch {
+        // The PUT already succeeded. Do not misreport it as an unsaved append
+        // or retry acknowledgement; an unresolved durable claim stays closed.
+        console.error(JSON.stringify({ message: "Saved context completion was not confirmed" }));
+      }
+      let coachInput: Record<string, unknown>;
+      try { coachInput = await this.readCoachView(activity, requested, "coach"); }
+      catch {
+        // The append already succeeded. A read failure must not turn that into
+        // a failed write receipt that encourages another append/reservation.
+        coachInput = { available: false, activity_id: requested,
+          message: "The context is saved, but its Coach Input view is unavailable. Retry only the read, not the saved context write." };
+      }
       return this.text({ saved: true, activity_id: requested, context_id: contextId,
-        key, context, message: "The append-only context was saved. A later coach-input run will create a new analysis revision without overwriting the old one." });
+        key, context, coach_input: coachInput,
+        message: "The append-only effective context was saved. The included Coach Input view uses current context without regenerating or overwriting the selected analysis." });
     }));
     }
 
     server.registerTool("coach_input", {
       title: "Read coach input",
-      description: "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. Analyzer 1.1.0 includes five optional recorded FIT running measurements. Analyzer 1.2.0 adds raw ground-contact balance with unknown side semantics, recorded lap measurements and producer-computed distance-split/half measurements with source units, identity, clocks and coverage. Analyzer 1.4.0 adds neutral recorded aerobic/anaerobic Training Effect, eligible frozen stored health context, and explicit coverage/nulls for incomplete structured lap totals. Analyzer 1.5.0 adds activity/FIT-scoped declared ground-contact sides and a calculated complement for the session and actual laps; raw values and historical analyses remain unchanged. Analyzer 1.6.0 adds stored time-weighted measurements for executed active intervals and whole/main distance halves, with source identity, clock basis and coverage; aggregate contact balance remains a raw scalar with unknown side semantics. Analyzer 1.7.0/schema 2 adds explicit verified in-frame partial coverage: one otherwise-valid terminal record may be excluded, with source-window counts and per-field boundary-excluded time. Relevant excluded boundary time is never complete; original clocks, strict lap/distance guards and genuine 1.0-1.6 histories remain unchanged. Analyzer 1.8.0 adds verified native FIT-lap references to explicit workout steps, using the existing recorded lap measurements without duplication. Several laps may reference one step; native laps are separate from record-computed intervals and do not relax half-distance or clock guards. Missing measurements remain distinct from zero, and historical analyses are not automatically regenerated. No new FIT fetch or segment computation is performed here.",
+      description: "Read the selected verified immutable analysis together with the current effective user context for one running activity. If the user supplies RPE, conditions, notes or corrections, call add_activity_context first and use its updated Coach Input receipt. format=coach returns neutral coherent kilometer and logical work/recovery tables, units, coverage and decoupling interpretation guards; format=full or omitted returns the original complete analysis plus separately versioned current-view metadata. Several verified Auto Laps can form one logical rep; planned completion is never guessed. Raw GCT balance remains available with unknown side semantics; a current exact activity/date/FIT declaration projects recorded and derived sides. Missing measurements are not zero, and unreadable context is unavailable rather than not_stored. Profiles, zones, frozen health snapshots and analysis history remain unchanged. This read performs no Garmin request, regeneration or storage write.",
       inputSchema: z.object({
         activity_id: z.string().regex(/^(garmin-)?\d{1,20}$/),
         format: z.enum(["coach", "full"]).optional()
@@ -580,28 +660,7 @@ export class ActivityCoachTools {
       if (!indexed) return this.text({ available: false, activity_id: args.activity_id,
         message: "The activity ID was not found in the Slipstream activity index." });
       const { activity } = await resolveActivityClock(indexed, keys => this.getR2Json(keys));
-      const prefix = coachInputPrefix(activity);
-      const selection = await readCurrentCoachInput({
-        canonicalPrefix: prefix, activityId: requested,
-        ...(activity.localDate ? { date: activity.localDate } : {}),
-        read: (keys, limits) => this.storage.getR2JsonWithMetadata(keys, limits),
-        versions: async () => {
-          const listed = await this.env.SLIPSTREAM_DATA.list({ prefix, limit: 1000 });
-          if (listed.truncated) throw new Error("Coach analysis versions exceed the bounded legacy limit.");
-          return listed.objects;
-        },
-      });
-      if (selection.status !== "available") {
-        return this.text({ available: false, activity: toSummary(activity),
-          message: selection.status === "absent"
-            ? "No coach input is stored yet. Add a coach profile and let the R2-only coach backfill run."
-            : "The current coach input could not be verified. Retry this read later; if it persists, ask the maintainer to check stored analysis compatibility." });
-      }
-      return this.text({ available: true, activity: toSummary(activity),
-        ...(args.format === "coach" ? { presentation: coachPresentation(selection.analysis) }
-          : { analysis: selection.analysis }),
-        message: activity.localDate ? "Coach input is available."
-          : "Coach input is available. The indexed date uses a UTC fallback; its historical local-calendar association is unconfirmed." });
+      return this.text(await this.readCoachView(activity, requested, args.format));
     });
 
   }

@@ -1,3 +1,4 @@
+import { decouplingInterpretation, kilometerTable, logicalRepTable } from "./coach-tables";
 type Json = Record<string, unknown>;
 
 function record(value: unknown): Json {
@@ -65,7 +66,7 @@ function measurement(name: string, value: unknown): string {
 }
 
 /** Selected frozen context facts, never a fresh-data or temporal inference. */
-function storedContextLines(value: unknown): string[] {
+function storedContextLines(value: unknown, compact = false): string[] {
   if (value == null) return ["Stored context: not_stored"];
   const snapshot = record(value);
   if (!Object.keys(snapshot).length) return [`Stored context: ${data(value)}`];
@@ -75,6 +76,11 @@ function storedContextLines(value: unknown): string[] {
     const source = record(snapshot[kind]);
     if (!Object.keys(source).length) {
       lines.push(`  ${kind}: ${snapshot[kind] == null ? "not_stored" : data(snapshot[kind])}`);
+      continue;
+    }
+    if (compact && source.status === "not_collected" && source.source_checked_at == null
+      && Object.values(record(source.metrics)).every(metric => record(metric).value == null)) {
+      lines.push(`  ${kind}: not_collected; measurements unavailable (full frozen metadata: format=full).`);
       continue;
     }
     lines.push(`  ${kind}: ${data(fields(source, ["status", "source", "source_checked_at", "wake_date",
@@ -282,7 +288,9 @@ function uniqueRows(value: unknown, field: string): Map<number, Json | null> {
 }
 
 /** A neutral excerpt of an analysis already verified by the current selector. No I/O or mutation. */
-export function coachPresentation(analysis: Json) {
+export function coachPresentation(analysis: Json, currentContext?: {
+  status: "available" | "not_stored" | "unavailable"; value: unknown; groundContactSides?: unknown;
+}) {
   const sourceId = storedText(analysis.analysis_id);
   const sourceVersion = storedText(analysis.analyzer_version);
   const lines = [
@@ -342,7 +350,14 @@ export function coachPresentation(analysis: Json) {
   }
   lines.push(`Profile/references: ${analysis.profile == null ? "not_stored" : data(fields(analysis.profile,
     ["profile_id", "name", "effective_from", "zones", "references"]))}`);
-  lines.push(`User context: ${analysis.user_context == null ? "not_stored" : data(analysis.user_context)}`);
+  const userContext = currentContext ? currentContext.value : analysis.user_context;
+  lines.push(`User context: ${currentContext?.status === "unavailable" ? "unavailable"
+    : userContext == null ? "not_stored" : data(userContext)}`);
+  lines.push(...kilometerTable(analysis, currentContext?.groundContactSides, describe));
+  lines.push(...logicalRepTable(analysis, currentContext?.groundContactSides, describe));
+  const decoupling = decouplingInterpretation(analysis);
+  lines.push(decoupling.aerobic_decoupling_percent === null ? "Decoupling: unavailable (not stored)."
+    : `Decoupling interpretation: ${data(decoupling)}`);
   const effect = record(analysis.training_effect);
   lines.push(`Training Effect: ${analysis.training_effect == null ? "not_stored" : data(fields(effect,
     ["source", "association", "local_date", "measured_at_utc"]))}`);
@@ -350,7 +365,7 @@ export function coachPresentation(analysis: Json) {
     lines.push(`  scale: ${data(effect.scale)}`, measurement("aerobic", effect.aerobic),
       measurement("anaerobic", effect.anaerobic));
   }
-  lines.push(...storedContextLines(analysis.stored_context_snapshot),
+  lines.push(...storedContextLines(analysis.stored_context_snapshot, analysis.analyzer_version === "1.10.0"),
     `Sections: ${data(Array.isArray(analysis.sections) ? analysis.sections.map(section => fields(section,
       ["section", "laps", "elapsed_seconds", "distance_m", "average_heart_rate_bpm", "heart_rate_coverage"])) : analysis.sections)}`,
     `Time basis: ${data(analysis.time_basis)}`,
@@ -366,6 +381,34 @@ export function coachPresentation(analysis: Json) {
       `  first: ${data(tcxColumns.map(key => tcxFirst[key]))}`,
       `  second: ${data(tcxColumns.map(key => tcxSecond[key]))}`);
   } else lines.push(`TCX distance halves: ${data(analysis.distance_halves)}`);
+  if (analysis.analyzer_version === "1.10.0") {
+    const session = record(analysis.recorded_running_metrics);
+    lines.push("Session measurement order: power(W), step length(mm), GCT(ms), VO(mm), VR(%), balance(%).",
+      `Recorded session measurements: ${nativeMeasurements.map(name => measuredValue(session[name])).join("; ")}; metadata: ${describe(columnMetadata(session))}`);
+    const cadence = record(record(analysis.recorded_cadence).session);
+    lines.push(`Session cadence: ${data({ average: fields(cadence.average, ["value", "unit", "status", "precision"]),
+      maximum: fields(cadence.maximum, ["value", "unit", "status", "precision"]) })}`);
+    const currentSides = currentContext ? currentContext.groundContactSides ?? null : analysis.ground_contact_sides;
+    lines.push(...(groundContactSideLines(currentSides, describe)
+      ?? [`Declared ground-contact sides: ${data(fields(currentSides, ["status", "reason"]))}`]));
+    const halfMetrics = record(analysis.segment_running_metrics);
+    const halfCadence = record(record(analysis.recorded_cadence).record_aggregates);
+    for (const name of ["whole_distance_halves", "main_distance_halves"]) {
+      measurementGroup(`Record-derived ${name}`, halfMetrics[name], name);
+      const group = record(halfCadence[name]);
+      lines.push(`Half cadence ${name}: ${data(fields(group, ["status", "reason", "distance_basis"]))}`);
+      for (const raw of Array.isArray(group.items) ? group.items : []) {
+        const row = record(raw), metric = record(row.average_cadence);
+        lines.push(`  ${data(row.segment)}: ${data(fields(metric, ["value", "unit", "status"]))}; coverage: ${describe(metric.coverage)}`);
+      }
+    }
+    lines.push(...(plannedTargetLines(analysis.workout_targets, record(analysis.workout_structure)) ?? []));
+    lines.push("Coverage/warnings:");
+    for (const [serialized, id] of details) lines.push(`  ${id}: ${serialized}`);
+    return { version: "1.0.0" as const, format: "coach_text" as const,
+      source_analysis_id: sourceId, source_analyzer_version: sourceVersion, scope: "selected_fields" as const,
+      text: lines.join("\n"), full_data_hint: "format=full" as const };
+  }
   const laps = record(record(analysis.recorded_running_metrics).laps);
   const native = uniqueRows(laps.items, "lap");
   const binding = record(analysis.native_lap_workout_binding);
@@ -384,9 +427,10 @@ export function coachPresentation(analysis: Json) {
   for (const field of nativeMeasurements) {
     lines.push(measurement(field, record(analysis.recorded_running_metrics)[field]));
   }
-  const sides = record(analysis.ground_contact_sides);
-  lines.push(...(groundContactSideLines(analysis.ground_contact_sides, describe)
-    ?? [`Declared ground-contact sides: ${analysis.ground_contact_sides == null ? "not_stored"
+  const sideView = currentContext ? currentContext.groundContactSides ?? null : analysis.ground_contact_sides;
+  const sides = record(sideView);
+  lines.push(...(groundContactSideLines(sideView, describe)
+    ?? [`Declared ground-contact sides: ${sideView == null ? "not_stored"
       : data(sides.status === "available" ? sides : fields(sides, ["status", "reason"]))}`]));
   lines.push("Measurement order: power, step length, GCT, VO, VR, balance. Metadata arrays/keys=columns; scalar=all.");
   measurementGroup("Recorded FIT distance halves", record(analysis.recorded_running_metrics).distance_halves, "fit_distance_halves");

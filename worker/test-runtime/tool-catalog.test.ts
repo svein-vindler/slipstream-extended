@@ -97,7 +97,7 @@ it("advertises the D4 scalar metric contract in every registration mode", () => 
 });
 
 const approvedEnduranceDescription = "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates and recorded running measurements. New stored datasets also include raw ground-contact balance with unknown side semantics, recorded lap measurements, and producer-computed distance-split/half measurements with coverage. Existing datasets retain their five-field fallback. No new FIT fetch or segment computation is performed here, and missing or unverified optional fields do not change dataset availability.";
-const approvedCoachDescription = "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context. Analyzer 1.1.0 includes five optional recorded FIT running measurements. Analyzer 1.2.0 adds raw ground-contact balance with unknown side semantics, recorded lap measurements and producer-computed distance-split/half measurements with source units, identity, clocks and coverage. Analyzer 1.4.0 adds neutral recorded aerobic/anaerobic Training Effect, eligible frozen stored health context, and explicit coverage/nulls for incomplete structured lap totals. Analyzer 1.5.0 adds activity/FIT-scoped declared ground-contact sides and a calculated complement for the session and actual laps; raw values and historical analyses remain unchanged. Analyzer 1.6.0 adds stored time-weighted measurements for executed active intervals and whole/main distance halves, with source identity, clock basis and coverage; aggregate contact balance remains a raw scalar with unknown side semantics. Analyzer 1.7.0/schema 2 adds explicit verified in-frame partial coverage: one otherwise-valid terminal record may be excluded, with source-window counts and per-field boundary-excluded time. Relevant excluded boundary time is never complete; original clocks, strict lap/distance guards and genuine 1.0-1.6 histories remain unchanged. Analyzer 1.8.0 adds verified native FIT-lap references to explicit workout steps, using the existing recorded lap measurements without duplication. Several laps may reference one step; native laps are separate from record-computed intervals and do not relax half-distance or clock guards. Missing measurements remain distinct from zero, and historical analyses are not automatically regenerated. No new FIT fetch or segment computation is performed here.";
+const approvedCoachDescription = "Read the selected verified immutable analysis together with the current effective user context for one running activity. If the user supplies RPE, conditions, notes or corrections, call add_activity_context first and use its updated Coach Input receipt. format=coach returns neutral coherent kilometer and logical work/recovery tables, units, coverage and decoupling interpretation guards; format=full or omitted returns the original complete analysis plus separately versioned current-view metadata. Several verified Auto Laps can form one logical rep; planned completion is never guessed. Raw GCT balance remains available with unknown side semantics; a current exact activity/date/FIT declaration projects recorded and derived sides. Missing measurements are not zero, and unreadable context is unavailable rather than not_stored. Profiles, zones, frozen health snapshots and analysis history remain unchanged. This read performs no Garmin request, regeneration or storage write.";
 
 it("advertises optional strict v1-or-v2 running fields without changing the stored session contract", () => {
   for (const mode of modes) {
@@ -180,7 +180,7 @@ function expectCoachPresentationContract(tool: ToolContract) {
 
 // Historical guards reconstruct only explicitly checked changes. Current full
 // snapshots retain the actual schemas and descriptions.
-const approvedGctContextDescription = "Append explicit user context to one activity. gct_balance_side declares the raw session/recorded-lap percentage's side for this exact stored FIT digest, not a device-wide convention. Call only on explicit user request. Side-only additions retain existing RPE/notes; historical contexts are never overwritten.";
+const approvedGctContextDescription = "Append explicit user context to one activity. gct_balance_side declares the raw session/recorded-lap percentage's side for this exact stored FIT digest, not a device-wide convention. Call only on explicit user request. When the user provides context while asking about a workout, save it with this tool first; the receipt includes the updated Coach Input. Omitted fields are retained; explicit null clears an ordinary context field. Historical contexts and analyses are never overwritten or regenerated by this tool. If saved is true but the included view is unavailable, retry only coach_input, not the saved write.";
 const historicalContextDescription = "Append user-supplied RPE, conditions, note or workout correction to one activity. Call only when the user explicitly asks to record this information. The values are never inferred and existing context is never overwritten.";
 
 function expectScopedGctInput(tool: ToolContract) {
@@ -251,6 +251,9 @@ function beforeExplicitInspection(tool: ToolContract): ToolContract {
     // Current full snapshots and the deterministic catalog retain them.
     const previous = structuredClone(tool);
     expectScopedGctInput(previous);
+    expect(previous.outputSchema!.required).not.toContain("coach_input");
+    expect((previous.outputSchema!.properties as Record<string, unknown>).coach_input).toBeDefined();
+    delete (previous.outputSchema!.properties as Record<string, unknown>).coach_input;
     delete (previous.inputSchema.properties as Record<string, unknown>).gct_balance_side;
     previous.description = historicalContextDescription;
     return previous;
@@ -288,6 +291,11 @@ function beforeExplicitInspection(tool: ToolContract): ToolContract {
     // Remove only the explicitly checked optional additions for OLD digests.
     delete (previous.inputSchema.properties as Record<string, unknown>).format;
     delete (previous.outputSchema!.properties as Record<string, unknown>).presentation;
+    for (const name of ["user_context", "view", "ground_contact_sides"]) {
+      expect((previous.outputSchema!.properties as Record<string, unknown>)[name]).toBeDefined();
+      expect(previous.outputSchema!.required).not.toContain(name);
+      delete (previous.outputSchema!.properties as Record<string, unknown>)[name];
+    }
     previous.description = "Read the newest deterministic coach-input analysis for one running activity. It includes the profile version, HR zones, drift, kilometre splits, Garmin workout plan and actual executed laps, plus explicitly supplied user context.";
     return previous;
   }

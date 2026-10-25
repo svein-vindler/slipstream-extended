@@ -51,7 +51,7 @@ const distanceMeasurements = {
   average_ground_contact_time: distanceMetric("ms", "stance_time"),
   average_vertical_oscillation: distanceMetric("mm", "vertical_oscillation"),
   average_vertical_ratio: distanceMetric("%", "vertical_ratio"),
-  // The FIT percentage's side convention is not verified. No mean or L/R pair is inferred.
+  // Genuine old generations deliberately did not compute this scalar.
   average_ground_contact_balance: z.strictObject({ status: z.literal("unavailable"), value: z.null(),
     unit: z.literal("%"), source_field: z.literal("stance_time_balance"), ...unknownSide, coverage })
     .refine(value => value.coverage.status === "none", "Uncomputed balance cannot claim coverage."),
@@ -68,6 +68,21 @@ const group = {
   distance_allocation: z.literal("linear_between_record_distances"),
   balance_aggregation: z.literal("not_computed_without_verified_side_semantics"),
 };
+export const RAW_BALANCE_POLICY = "raw_scalar_time_weighted_mean_side_unknown";
+const rawBalance = metric("%", "stance_time_balance", { ...unknownSide, coverage }).refine(value =>
+  (value.status === "available") === (value.coverage.status !== "none"),
+"Recorded metric availability must agree with coverage.");
+function distanceGroup<Shape extends z.ZodRawShape>(identity: Shape) {
+  // Discriminate the explicit producer policy. Do not relax legacy metrics to
+  // admit new available values under their old uncomputed policy.
+  return z.union([
+    z.strictObject({ ...group,
+      items: z.array(z.strictObject({ ...identity, ...distanceBounds, ...distanceMeasurements })) }),
+    z.strictObject({ ...group, balance_aggregation: z.literal(RAW_BALANCE_POLICY),
+      items: z.array(z.strictObject({ ...identity, ...distanceBounds, ...distanceMeasurements,
+        average_ground_contact_balance: rawBalance })) }),
+  ]);
+}
 
 export const recordedRunningSegmentsSchema = z.strictObject({
   ...recordedRunningMetricsSchema.shape,
@@ -76,10 +91,8 @@ export const recordedRunningSegmentsSchema = z.strictObject({
   laps: z.strictObject({ status, reason: z.string().nullable(), method: z.literal("fit_recorded_measurement"),
     items: z.array(z.strictObject({ lap: z.number().int().positive(), start_time_utc: utcClock,
       end_time_utc: utcClock, distance_m: z.number().finite().nonnegative().nullable(), ...sessionMeasurements })) }),
-  kilometer_splits: z.strictObject({ ...group,
-    items: z.array(z.strictObject({ split: z.number().int().positive(), ...distanceBounds, ...distanceMeasurements })) }),
-  distance_halves: z.strictObject({ ...group,
-    items: z.array(z.strictObject({ segment: z.enum(["first", "second"]), ...distanceBounds, ...distanceMeasurements })) }),
+  kilometer_splits: distanceGroup({ split: z.number().int().positive() }),
+  distance_halves: distanceGroup({ segment: z.enum(["first", "second"]) }),
 }).refine(value => {
   if (!value.laps.items.length) return true;
   if (!value.session_start_time_utc || !value.measured_at_utc) return false;

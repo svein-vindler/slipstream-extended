@@ -12,6 +12,7 @@ const issuer = "https://training-effect-synthetic.cloudflareaccess.com";
 const hostname = "training-effect.example";
 const rows = new Map<string, Uint8Array>();
 const operations: string[] = [];
+const contextOperations: string[] = [];
 let key: CryptoKey, jwk: Record<string, unknown>, token: string, testEnv: Env;
 let currentAnalysisId = produced.analysis_id;
 
@@ -52,10 +53,17 @@ beforeEach(async () => {
   const bucket = {
     head: async (name: string) => { operations.push(`HEAD ${name}`); return rows.has(name) ? { etag: "synthetic-effect" } : null; },
     get: async (name: string) => {
-      operations.push(`GET ${name}`); const body = rows.get(name);
+      (name.includes("/context/v1/") ? contextOperations : operations).push(`GET ${name}`); const body = rows.get(name);
       return body === undefined ? null : { size: body.byteLength, etag: "synthetic-effect", body: new Response(body).body };
     },
-    list: async () => { operations.push("LIST"); throw new Error("Unexpected Training Effect discovery"); },
+    list: async (options: R2ListOptions) => {
+      if (options.prefix === "activities/2026/42/context/v1/") {
+        expect(options.limit).toBe(100); contextOperations.push("LIST " + options.prefix);
+        return { truncated: false, objects: [...rows.keys()].filter(name => name.startsWith(options.prefix!))
+          .map(name => ({ key: name })) };
+      }
+      operations.push("LIST"); throw new Error("Unexpected Training Effect discovery");
+    },
     put: async () => { operations.push("PUT"); throw new Error("Unexpected Training Effect write"); },
     delete: async () => { operations.push("DELETE"); throw new Error("Unexpected Training Effect delete"); },
   } as unknown as R2Bucket;
@@ -66,6 +74,7 @@ beforeEach(async () => {
 afterEach(() => { clearSummaryCaches(); vi.restoreAllMocks(); });
 
 async function call(protocol: string) {
+  const contextStart = contextOperations.length;
   const ctx = createExecutionContext();
   const response = await worker.fetch(new Request(`https://${hostname}/mcp`, {
     method: "POST", headers: { host: hostname, "content-type": "application/json", accept: "application/json, text/event-stream",
@@ -83,6 +92,9 @@ async function call(protocol: string) {
   const message = JSON.parse(line ? line.slice(6) : text);
   expect(message.error, text).toBeUndefined(); expect(message.result.isError, text).not.toBe(true);
   expect(JSON.parse(message.result.content[0].text)).toEqual(message.result.structuredContent);
+  const currentReads = contextOperations.slice(contextStart);
+  expect(currentReads.filter(item => item.startsWith("LIST"))).toHaveLength(message.result.structuredContent.available ? 1 : 0);
+  expect(currentReads.filter(item => item.startsWith("GET")).length).toBeLessThanOrEqual(1);
   return message.result.structuredContent;
 }
 
