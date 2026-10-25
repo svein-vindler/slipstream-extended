@@ -41,7 +41,7 @@ def current(store):
     return json.loads(gzip.decompress(store.objects[pointer["analysis_key"]]))
 
 
-def test_unchanged_inputs_skip_artifact_downloads_analysis_and_writes(store, builds, capsys):
+def test_unchanged_inputs_verify_frozen_analysis_but_skip_source_downloads_and_writes(store, builds, capsys):
     first = run_one(activity=ACTIVITY, store=store)
     store.reset_counts()
     second = run_one(activity=ACTIVITY, store=store)
@@ -51,8 +51,9 @@ def test_unchanged_inputs_skip_artifact_downloads_analysis_and_writes(store, bui
     assert len(builds) == 1
     # Known-day context selection also verifies the stored FIT/endurance clocks;
     # unchanged replay still skips the large TCX and immutable publication.
-    assert (store.counts["get"], store.counts["list"], store.counts["put"]) == (4, 2, 0)
-    assert store.counts["download_bytes"] < 1024
+    assert (store.counts["get"], store.counts["list"], store.counts["put"]) == (5, 2, 0)
+    canonical = json.loads(store.objects[POINTER])["analysis_key"]
+    assert store.counts["download_bytes"] - len(store.objects[canonical]) < 1024
     assert _coach_status(store, _activity("1", 9), second) == "ready"
     assert [json.loads(line) for line in capsys.readouterr().out.splitlines()] == [
         {"event": "targeted_coach_input", "analysis_reused": False},
@@ -93,10 +94,24 @@ def test_changed_input_rebuilds_and_preserves_the_previous_version(store, builds
         activity[changed] = {"name": "Changed name", "date": "2026-09-29",
                              "type": "trail_running", "moving_seconds": 1900}[changed]
     else:
-        monkeypatch.setattr(coach_backfill, "SECTION_COVERAGE_ANALYZER_VERSION", "synthetic-next")
-        monkeypatch.setattr(coach, "SECTION_COVERAGE_ANALYZER_VERSION", "synthetic-next")
+        monkeypatch.setattr(coach_backfill, "CURRENT_VIEW_ANALYZER_VERSION", "synthetic-next")
+        monkeypatch.setattr(coach, "CURRENT_VIEW_ANALYZER_VERSION", "synthetic-next")
     result = run_one(activity=activity, store=store)
+    if changed in {"context", "removed_context"}:
+        # Appending current context is independent of frozen analysis. Mutating
+        # or deleting the exact frozen snapshot still breaks its source proof.
+        assert result["blocked_activities"] == [{"activity_id": "1", "reason": "historical_analysis_unverified"}]
+        assert len(builds) == 1
+        assert json.loads(store.objects[POINTER])["analysis_key"] == old_key
+        assert store.objects[old_key] == old_bytes
+        return
     assert result["skipped_this_run"] == []
+    if changed == "new_context":
+        assert result["reused_sources"] == {"1": json.loads(gzip.decompress(old_bytes))["analysis_id"]}
+        assert len(builds) == 1
+        assert json.loads(store.objects[POINTER])["analysis_key"] == old_key
+        assert store.objects[old_key] == old_bytes
+        return
     assert result["reused_sources"] == {}
     assert len(builds) == 2
     assert json.loads(store.objects[POINTER])["analysis_key"] != old_key
@@ -128,7 +143,14 @@ def test_recovery_rebuilds_existing_pointer_safely(store, builds, recovery):
         store.objects[POINTER] = json.dumps(pointer).encode()
     elif recovery == "missing_analysis":
         del store.objects[pointer["analysis_key"]]
+    before = dict(store.objects)
+    store.reset_counts()
     result = run_one(activity=ACTIVITY, store=store, force=recovery == "force")
+    if recovery == "missing_analysis":
+        #1.10 cannot verify a frozen snapshot from a missing canonical body.
+        assert result["blocked_activities"] == [{"activity_id": "1", "reason": "historical_analysis_unverified"}]
+        assert store.objects == before and store.counts["put"] == 0 and len(builds) == 1
+        return
     assert result["skipped_this_run"] == [] and len(builds) == 2
     assert json.loads(store.objects[POINTER])["input_signature"]
     assert current(store)["summary"]["moving_seconds"] == 1800
@@ -190,7 +212,7 @@ def test_store_without_revision_metadata_rebuilds_conservatively(store, builds, 
     assert "input_signature" not in json.loads(store.objects[POINTER])
 
 
-def test_missing_context_revision_disables_reuse(store, builds, monkeypatch):
+def test_missing_context_revision_does_not_invalidate_current_immutable_analysis(store, builds, monkeypatch):
     store.objects[CONTEXT] = b'{"context_id":"synthetic-context"}'
     original = store.list_object_revisions
 
@@ -201,8 +223,8 @@ def test_missing_context_revision_disables_reuse(store, builds, monkeypatch):
     monkeypatch.setattr(store, "list_object_revisions", incomplete)
     run_one(activity=ACTIVITY, store=store)
     run_one(activity=ACTIVITY, store=store)
-    assert len(builds) == 2
-    assert "input_signature" not in json.loads(store.objects[POINTER])
+    assert len(builds) == 1
+    assert "input_signature" in json.loads(store.objects[POINTER])
 
 
 def test_failed_analysis_write_leaves_the_previous_pointer_intact(store, monkeypatch):

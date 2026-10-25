@@ -27,7 +27,8 @@ ACTIVITY = {"id": "42", "date": "2026-10-08", "name": "Synthetic run",
 SEGMENT_ACTIVITY = {**ACTIVITY, "moving_seconds": 60.0}
 
 
-def structured_source_store(output, *, elapsed_shift=0.0, tcx_distance_scale=1.0, summary_timestamp_shift=0):
+def structured_source_store(output, *, elapsed_shift=0.0, tcx_distance_scale=1.0, summary_timestamp_shift=0,
+                            balance_values=None):
     """Actual encoded sources for a split active step and a later repeated step."""
     class StructuredGarmin:
         def download_activity(self, activity_id, *, dl_fmt):
@@ -51,7 +52,7 @@ def structured_source_store(output, *, elapsed_shift=0.0, tcx_distance_scale=1.0
             contacts = [999, 200, 220, 240, 260, 999, 999]
             oscillations = [999, 60, 80, 100, 120, 999, 999]
             ratios = [99, 6, 8, 10, 12, 99, 99]
-            balances = [50, 101, 103, 105, 107, 50, 0]
+            balances = [50, 101, 103, 105, 107, 50, 0] if balance_values is None else balance_values
             for index in range(7):
                 row = {"mesg_num": 20, "timestamp": START + timedelta(seconds=index * 10),
                        "distance": index * 500, "power": powers[index],

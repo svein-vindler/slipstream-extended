@@ -65,9 +65,19 @@ def test_stored_records_supply_kilometer_cadence_at_verified_tcx_boundaries(tmp_
     (evidence / "decoded-input.actual.json").write_bytes(json_bytes(decoded))
     (evidence / "analysis.actual.json").write_bytes(gzip.decompress(canonical))
     (evidence / "canonical.actual.json.gz").write_bytes(canonical)
-    old_blocks = json_bytes({
+    prior_comparison = copy.deepcopy({
         name: analysis[name] for name in ("recorded_running_metrics", "segment_running_metrics")
     })
+    # The genuine fixture/hash remains fixed. Explicitly project only the new
+    # raw-balance addition in this comparison; current analysis bytes stay above.
+    for group in ("kilometer_splits", "distance_halves"):
+        assert prior_comparison["recorded_running_metrics"][group]["balance_aggregation"] == "raw_scalar_time_weighted_mean_side_unknown"
+        prior_comparison["recorded_running_metrics"][group]["balance_aggregation"] = "not_computed_without_verified_side_semantics"
+        for row in prior_comparison["recorded_running_metrics"][group]["items"]:
+            metric = row["average_ground_contact_balance"]
+            metric.update(status="unavailable", value=None)
+            metric["coverage"].update(valid_seconds=0.0, contributing_intervals=0, status="none")
+    old_blocks = json_bytes(prior_comparison)
     cadence_controls = copy.deepcopy(analysis["recorded_cadence"])
     cadence_controls["record_aggregates"] = {
         name: analysis["recorded_cadence"]["record_aggregates"][name]
@@ -82,7 +92,7 @@ def test_stored_records_supply_kilometer_cadence_at_verified_tcx_boundaries(tmp_
         )
     }
     all_prior_cadence_bytes = json_bytes(all_prior_cadence)
-    (evidence / "preserved-blocks.actual.json").write_bytes(old_blocks)
+    (evidence / "preserved-blocks.comparison.json").write_bytes(old_blocks)
     (evidence / "cadence-controls.actual.json").write_bytes(cadence_control_bytes)
     (evidence / "cadence-with-recovery-controls.actual.json").write_bytes(all_prior_cadence_bytes)
     for label, objects in (("before", before), ("after", after)):

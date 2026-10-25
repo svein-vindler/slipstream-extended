@@ -226,7 +226,7 @@ def _distance_group(status, reason):
     return {"status": status, "reason": reason, "method": "fit_record_time_weighted_mean",
             "interval_policy": "left_sample_hold_distance_progressing_max_30s",
             "distance_allocation": "linear_between_record_distances",
-            "balance_aggregation": "not_computed_without_verified_side_semantics", "items": []}
+            "balance_aggregation": "raw_scalar_time_weighted_mean_side_unknown", "items": []}
 
 
 def _distance_metrics(decoded, endurance, association):
@@ -329,8 +329,6 @@ def _distance_metrics(decoded, endurance, association):
                 elif weight > 0:
                     accumulator["eligible"] += weight
                     for metric, source_field, unit in _RECORD_FIELDS:
-                        if source_field == "stance_time_balance":
-                            continue
                         value = _recorded_value(left[2], source_field, unit)
                         field = accumulator["fields"][metric]
                         if value["status"] == "available":
@@ -355,8 +353,6 @@ def _distance_metrics(decoded, endurance, association):
                     value.update(status="available", value=round(field["mean"], 4))
                 elif field["invalid"]:
                     value["status"] = "invalid"
-                if source_field == "stance_time_balance":
-                    value["status"] = "unavailable"
                 value["coverage"] = {
                     "valid_seconds": round(field["seconds"], 3),
                     "eligible_seconds": round(accumulator["eligible"], 3),

@@ -2,6 +2,7 @@
 import base64
 import gzip
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -12,13 +13,30 @@ from scripts.build_gct_sides_contract import selected
 from scripts.build_running_segments_contract import SEGMENT_ACTIVITY, structured_source_store
 
 
+def legacy_uncomputed_distance_view(metrics):
+    """Compare only unchanged fields; never modify genuine historical bytes."""
+    result = deepcopy(metrics)
+    for name in ("kilometer_splits", "distance_halves"):
+        group = result[name]
+        assert group["balance_aggregation"] == "raw_scalar_time_weighted_mean_side_unknown"
+        group["balance_aggregation"] = "not_computed_without_verified_side_semantics"
+        for row in group["items"]:
+            metric = row["average_ground_contact_balance"]
+            # source_store's original FIT records all explicitly have49%.
+            assert metric["status"] == "available" and metric["value"] == 49
+            assert metric["unit"] == "%" and metric["side_semantics"] == "unknown"
+            metric.update(status="unavailable", value=None)
+            metric["coverage"].update(valid_seconds=0, contributing_intervals=0, status="none")
+    return result
+
+
 def test_real_source_segments_keep_main_recovery_and_raw_scalar_policy(tmp_path, record_property):
     store = structured_source_store(tmp_path)
     store.reset_counts()
     coach_backfill.run_one(activity=SEGMENT_ACTIVITY, store=store)
     _, analysis = selected(store)
     block = analysis["segment_running_metrics"]
-    assert analysis["analyzer_version"] == "1.9.1"
+    assert analysis["analyzer_version"] == "1.10.0"
     assert block["schema_version"] == 2 and block["activity_id"] == "42"
     assert block["source_fit_sha256"] == analysis["source"]["fit_sha256"]
     assert block["source_tcx_sha256"] == analysis["source"]["tcx_sha256"]
@@ -48,7 +66,7 @@ def test_real_source_segments_keep_main_recovery_and_raw_scalar_policy(tmp_path,
         assert raw["side_semantics"] == "unknown"
         assert "left_percent" not in raw and "right_percent" not in raw
     assert analysis["recorded_running_metrics"]["distance_halves"]["items"][0][
-        "average_ground_contact_balance"]["value"] is None
+        "average_ground_contact_balance"]["value"] == 84.6667
     record_property("targeted_segment_counts", json.dumps(store.counts))
 
 
@@ -341,7 +359,7 @@ def test_genuine15_history_stays_readable_and_is_not_bulk_queued_by_engine_only(
     store.reset_counts()
     coach_backfill.run_one(activity=ACTIVITY, store=store)
     new_pointer, new = selected(store)
-    assert new["analyzer_version"] == "1.9.1"
+    assert new["analyzer_version"] == "1.10.0"
     assert new_pointer["analysis_key"] != old_pointer["analysis_key"]
     original_fields = {key: new[key] for key in old if key not in ("analysis_id", "analyzer_version")}
     current_gct = original_fields["ground_contact_sides"]
@@ -354,6 +372,7 @@ def test_genuine15_history_stays_readable_and_is_not_bulk_queued_by_engine_only(
         **{key: value for key, value in current_gct.items() if key not in ("schema_version", "record_aggregates")},
         "schema_version": 1,
     }
+    original_fields["recorded_running_metrics"] = legacy_uncomputed_distance_view(original_fields["recorded_running_metrics"])
     assert original_fields == {key: value for key, value in old.items()
                                if key not in ("analysis_id", "analyzer_version")}
     assert all(store.objects[key] == body for key, body in before.items() if "/canonical/" in key
@@ -456,7 +475,12 @@ def test_same_genuine_source_workload_keeps_storage_operation_budget(tmp_path, r
                 store.objects[key] = changed
     for key, body in store.objects.items():
         if body.startswith(b"\x1f\x8b"):
-            assert gzip.decompress(before[key]) == gzip.decompress(body)
+            if key.endswith("/activity.endurance.v1.json"):
+                current = json.loads(gzip.decompress(body))
+                current["recorded_running_metrics_v2"] = legacy_uncomputed_distance_view(current["recorded_running_metrics_v2"])
+                assert current == json.loads(gzip.decompress(before[key]))
+            else:
+                assert gzip.decompress(before[key]) == gzip.decompress(body)
         else:
             assert before[key] == body
         # Replay the genuine source bytes after verifying the current source.

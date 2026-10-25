@@ -38,7 +38,7 @@ def test_stored_fit_sources_produce_logical_bouts_without_changing_sources(tmp_p
     assert all(store.objects[key] == body for key, body in before.items())
     assert result["blocked_activities"] == []
     block = analysis["logical_bouts"]
-    assert analysis["analyzer_version"] == "1.9.1"
+    assert analysis["analyzer_version"] == "1.10.0"
     assert block["status"] == "available" and block["reason"] is None
     assert block["occurrence_basis"] == "derived_verified_source_order_per_step"
     assert [(item["role"], item["source_laps"], item["source_message_indices"],

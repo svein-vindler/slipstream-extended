@@ -152,11 +152,14 @@ def test_existing_identity_with_different_content_fails_closed(monkeypatch, mode
     competitor = b'{"analysis_id":"synthetic-conflicting-content"}'
     client.objects[key] = competitor
     pointer = client.objects[f"{PREFIX}/coach-input/v1/latest-ready.json"]
-    with pytest.raises(ValueError, match="analysis identity conflict"):
-        if mode == "bulk":
+    if mode == "bulk":
+        with pytest.raises(ValueError, match="analysis identity conflict"):
             coach_backfill.run(store=client.store())
-        else:
-            coach_backfill.run_one(activity=ACTIVITY, store=client.store(), force=True)
+    else:
+        store = client.store()
+        result = coach_backfill.run_one(activity=ACTIVITY, store=store, force=True)
+        assert result["blocked_activities"] == [{"activity_id": "1", "reason": "historical_analysis_unverified"}]
+        assert result["processed_sources"] == {} and store.operations["put"] == 0
     assert client.objects[key] == competitor
     assert client.objects[f"{PREFIX}/coach-input/v1/latest-ready.json"] == pointer
     assert coach_backfill.PLAN_KEY not in client.objects

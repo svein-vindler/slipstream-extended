@@ -37,7 +37,7 @@ def test_unbound_lap_breaks_same_step_groups_without_dropping_native_measurement
     assert preserved and result["blocked_activities"] == []
     assert result["processed_sources"]["42"] == analysis["analysis_id"]
     assert pointer["analyzer_version"] == analysis["analyzer_version"]
-    assert analysis["analyzer_version"] == "1.9.1"
+    assert analysis["analyzer_version"] == "1.10.0"
     # This source-order fixture already uses four LISTs (actual214c); it is
     # distinct from the earlier schema1 stored fixture's two LISTs.
     assert store.counts["get"] <= 9 and store.counts["list"] <= 4

@@ -71,6 +71,43 @@ does not need an extra user confirmation or regeneration request. Do not infer
 RPE or notes from measurements. If `saved=true` but the included view is
 unavailable, the write is still saved: retry only `coach_input`, not the append.
 
+## Source-bound raw balance and recovery generation (1.10.0)
+
+New ordinary generation uses analyzer1.10.0. Verified original FIT records retain
+raw ground-contact balance for distance splits/halves without declaring a side.
+The explicit policy is `raw_scalar_time_weighted_mean_side_unknown`; existing
+source, clock, distance, gap and per-field coverage guards still apply. Recovery
+measurements use their own verified logical-bout/native-lap windows, never the
+preceding work interval's values. `recovery_running_metrics` keeps identity,
+source hashes, clocks, exact source references, units and coverage for all six
+recorded measurements. Missing or unverified inputs remain unavailable.
+
+Only1.10 input fingerprints separate later context appends from immutable
+analysis generation. The frozen context's exact activity/calendar key and revision
+remain verified: a changed, deleted or foreign frozen binding blocks historical
+reuse, rather than authorizing regeneration. Ordinary current-context appends
+retain the selected analysis ID/bytes and cause no context-only analysis PUT.
+Older engines retain their original identities and fingerprint rules; unchanged
+historical analyses are not upgraded just because the engine version advanced.
+
+Targeted reuse now reads the selected canonical analysis and, when present, its
+small referenced frozen context to verify their exact content binding. This is
+one additional stored canonical read, plus one frozen-context read when needed;
+it does not download TCX or publish another analysis. A previously validated bulk
+proof can retain warm reuse while its canonical, pointer and context revisions
+are unchanged. Existing byte/write limits remain; this is not a zero-cost or
+total-performance guarantee.
+Missing1.10 canonical content also makes that frozen proof unknown: preserve the
+pointer and block rather than silently reconstructing historical context. This
+is separate from a normal explicitly requested update with verified inputs.
+
+The compatible Reader and authenticated-backup validator accept this explicit
+generation alongside genuine older outputs. Synthetic FIT/TCX publication and
+encrypted-backup tests cover normal and corrupt source/units/coverage/side cases.
+No historical regeneration, source re-download, migration or schedule change
+is part of this version. Install the compatible Reader first; after newer data
+is stored, preserve state and fix forward rather than roll back its reader.
+
 ## Optional read-time presentation
 
 `coach_input` accepts an optional `format` with values `coach`

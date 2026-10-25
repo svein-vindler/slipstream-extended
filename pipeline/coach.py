@@ -16,7 +16,7 @@ from typing import Any
 from . import logical_bouts as _logical_bouts
 from . import recorded_cadence as _recorded_cadence
 from . import workout_targets as _workout_targets
-from .coach_segment_metrics import segment_running_metrics
+from .coach_segment_metrics import recovery_running_metrics, segment_running_metrics
 from .coach_stored_context import stored_context_snapshot as project_stored_context
 from .gct_sides import ground_contact_sides
 from .logical_bouts import logical_bouts as project_logical_bouts
@@ -36,6 +36,7 @@ PARTIAL_SEGMENT_ANALYZER_VERSION = "1.7.0"
 NATIVE_LAP_ANALYZER_VERSION = "1.8.0"
 LOGICAL_BOUT_ANALYZER_VERSION = "1.9.0"
 SECTION_COVERAGE_ANALYZER_VERSION = "1.9.1"
+CURRENT_VIEW_ANALYZER_VERSION = "1.10.0"
 
 # Keep the existing schema exports consumed by coach_backfill explicit.
 LOGICAL_BOUT_SCHEMA_VERSION = _logical_bouts.SCHEMA_VERSION
@@ -324,10 +325,12 @@ def analysis_id(
     logical_bouts: dict[str, Any] | None = None,
     recorded_cadence: dict[str, Any] | None = None,
     workout_targets: dict[str, Any] | None = None,
+    analyzer_version: str | None = None,
+    recovery_metrics: dict[str, Any] | None = None,
 ) -> str:
     value = {
         "activity_id": activity_id,
-        "analyzer_version": (SECTION_COVERAGE_ANALYZER_VERSION if logical_bouts is not None or recorded_cadence is not None
+        "analyzer_version": analyzer_version or (SECTION_COVERAGE_ANALYZER_VERSION if logical_bouts is not None or recorded_cadence is not None
                              else NATIVE_LAP_ANALYZER_VERSION if native_lap_workout_binding is not None
                              else PARTIAL_SEGMENT_ANALYZER_VERSION if segment_metrics is not None and segment_metrics.get("schema_version") == 2
                              else SEGMENT_ANALYZER_VERSION if segment_metrics is not None
@@ -356,6 +359,8 @@ def analysis_id(
         value["recorded_cadence"] = recorded_cadence
     if workout_targets is not None:
         value["workout_targets"] = workout_targets
+    if recovery_metrics is not None:
+        value["recovery_running_metrics"] = recovery_metrics
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(canonical).hexdigest()[:24]
 
@@ -383,6 +388,7 @@ def build_coach_input(
         metrics, decoded_fit, endurance=endurance, tcx_sha256=tcx_sha256,
         structure=structure, segments=segments, logical=bouts,
     )
+    recovery = recovery_running_metrics(metrics, decoded_fit, bouts, segments, tcx_sha256)
     sides = ground_contact_sides(metrics, context, segments=segments)
     identifier = analysis_id(
         activity_id=activity_id,
@@ -398,6 +404,8 @@ def build_coach_input(
         logical_bouts=bouts,
         recorded_cadence=cadence,
         workout_targets=targets,
+        analyzer_version=CURRENT_VIEW_ANALYZER_VERSION,
+        recovery_metrics=recovery,
     )
     summary = endurance.get("summary") if isinstance(endurance.get("summary"), dict) else {}
     bpm_seconds = endurance.get("heart_rate_seconds_by_bpm")
@@ -416,7 +424,7 @@ def build_coach_input(
             drift = round(second_hr - first_hr, 2)
     return {
         "schema_version": COACH_SCHEMA_VERSION,
-        "analyzer_version": SECTION_COVERAGE_ANALYZER_VERSION,
+        "analyzer_version": CURRENT_VIEW_ANALYZER_VERSION,
         "analysis_id": identifier,
         "activity_id": activity_id,
         "activity": {
@@ -439,6 +447,7 @@ def build_coach_input(
         "native_lap_workout_binding": native_binding,
         "logical_bouts": bouts,
         "recorded_cadence": cadence,
+        "recovery_running_metrics": recovery,
         "workout_targets": targets,
         **({"stored_context_snapshot": stored_context} if stored_context is not None else {}),
         "time_basis": "elapsed",

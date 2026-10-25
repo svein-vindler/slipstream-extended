@@ -54,7 +54,7 @@ def test_structured14_backup_rejects_missing_mandatory_hr_coverage(tmp_path):
     objects = fixture_objects(build_case())
     key = next(key for key in objects if "/canonical/" in key)
     analysis = json.loads(gzip.decompress(objects[key]))
-    assert analysis["analyzer_version"] == "1.9.1"
+    assert analysis["analyzer_version"] == "1.10.0"
     assert analysis["workout_structure"]["has_structured_workout"] is True
     section = analysis["sections"][0]
     assert section["measurement_coverage"]["elapsed_seconds"]["status"] == "complete"
@@ -112,7 +112,7 @@ def test_structured_laps_without_recorded_totals_are_unknown_not_measured_zero()
 def test_new_structured14_unknown_totals_and_effect_survive_strict_backup(tmp_path):
     objects = fixture_objects(build_case(laps=[(None, None, 150)]))
     analysis = json.loads(gzip.decompress(next(body for key, body in objects.items() if "/canonical/" in key)))
-    assert analysis["analyzer_version"] == "1.9.1"
+    assert analysis["analyzer_version"] == "1.10.0"
     assert analysis["training_effect"]["aerobic"]["value"] == 3.4
     assert analysis["sections"][0]["elapsed_seconds"] is None
     assert backup.verify_backup(_write_document(tmp_path, document(objects)), PASSWORD).objects == objects

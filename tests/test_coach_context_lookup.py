@@ -107,9 +107,11 @@ def test_bulk_sees_new_context_in_next_invocation_and_preserves_history():
     store.objects[newest] = b'{"context_id":"synthetic-next-invocation"}'
     result = coach_backfill.run(store=store, max_activities=1)
     pointer, analysis = selected(store, prefix)
-    assert result["generated_this_run"] == 1 and result["remaining_activities"] == 0
-    assert pointer["input_context_key"] == newest
-    assert analysis["user_context"]["context_id"] == "synthetic-next-invocation"
+    assert result["generated_this_run"] == 0 and result["remaining_activities"] == 0
+    # Current context is read independently; the frozen pointer/context stays.
+    assert pointer == json.loads(before[f"{prefix}/coach-input/v1/latest-ready.json"])
+    assert analysis == json.loads(gzip.decompress(before[pointer["analysis_key"]]))
+    assert store.objects[newest] == b'{"context_id":"synthetic-next-invocation"}'
     assert all(store.objects[key] == body for key, body in before.items() if "/canonical/" in key)
 
 
