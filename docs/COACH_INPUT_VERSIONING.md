@@ -2,6 +2,28 @@
 
 ## Current user context versus immutable analysis
 
+Current explicit user context applies to every indexed activity type, including
+strength, cycling and other sports. `strength_session`, `endurance_session` and
+`coach_input` return it as top-level `user_context`, with separate `view` context
+revision/status metadata. RPE describes the whole session, not individual sets
+or repetitions in reserve. Lists/searches do not load context for every row.
+
+Analysis and context availability are independent. When a session or running
+analysis is missing, `available=false` still describes that missing analysis;
+the current context can be `available`. No running measurements, analysis ID,
+analyzer version or coach-text presentation are invented for a context-only
+response. A context-only update needs neither regeneration nor a new profile.
+Use the same exact activity ID for saving and reading. Missing context is
+`not_stored`; failed, invalid or ambiguous reads are `unavailable`.
+
+After activity identity/calendar checks, an independent dataset read or schema
+failure returns a controlled partial response: analysis/session `available=false`,
+no invalid dataset fields, and the independently resolved current context. This
+is not a successful analysis or proof that none was stored. It does not select
+older history, retry storage, expose provider errors or repeat a saved append.
+Authentication, invalid request and unresolved activity/calendar errors still
+fail before this composition; no context is guessed around those guards.
+
 The response's top-level `ground_contact_sides` is also a read-time projection
 from the selected verified measurements and the current exact activity/date/FIT
 declaration. The coach presentation uses that projection, not the analysis's

@@ -92,7 +92,7 @@ it("serves Python-exported Training Effect through actual authenticated MCP with
     training_context: { activity_id: "garmin-42", local_date: "2026-10-08", association: "matched",
       aerobic: { status: "available", value: 3.4 }, anaerobic: { status: "available", value: 0 } } });
   expect(output.session.activity.id).toBe("42");
-  expect(operations).toEqual({ get: 3, head: 1, list: 0, put: 0, delete: 0 });
+  expect(operations).toEqual({ get: 3, head: 1, list: 1, put: 0, delete: 0 }); // Separate bounded current-context LIST.
   expect(reads).toEqual(["summary/activities.csv", fitKey, "activities/2026/42/activity.endurance.v1.json"]);
   expect(JSON.stringify(output.training_context)).not.toMatch(/messages|training_load_peak|trainingEffect|position/);
 });
@@ -101,7 +101,7 @@ it("reuses the strength tool's loaded FIT with no added GET", async () => {
   const output = await call("strength_session", { activity_id: "42" });
   expect(outputSchemas.strength_session.parse(output)).toEqual(output);
   expect(output.training_context.aerobic.value).toBe(3.4);
-  expect(operations).toEqual({ get: 2, head: 1, list: 0, put: 0, delete: 0 });
+  expect(operations).toEqual({ get: 2, head: 1, list: 1, put: 0, delete: 0 }); // Bounded current-context lookup; no extra FIT read.
 });
 
 it("leaves summary lists unchanged and never reads FIT per row", async () => {
@@ -123,7 +123,7 @@ it("preserves legacy TCX availability when the optional source is absent or corr
   expect(corrupt.available).toBe(true);
   expect(corrupt.session).toEqual(missing.session);
   expect(corrupt.training_context.association).toBe("source_unreadable");
-  expect(operations).toEqual({ get: 2, head: 1, list: 0, put: 0, delete: 0 });
+  expect(operations).toEqual({ get: 2, head: 1, list: 1, put: 0, delete: 0 });
 });
 
 it("reads legacy, wrong-ID and multi-session objects without changing dataset availability", async () => {
@@ -143,7 +143,8 @@ it("reads legacy, wrong-ID and multi-session objects without changing dataset av
     expect(output.training_context.association).toBe(association);
     expect(output.training_context.aerobic.value).toBeNull();
   }
-  expect(operations.put + operations.list + operations.delete).toBe(0);
+  expect(operations.list).toBe(5); // One bounded current-context lookup per individual read.
+  expect(operations.put + operations.delete).toBe(0);
 });
 
 it("supports the gzip alias and exposes missing fields without regenerating old objects", async () => {
@@ -155,7 +156,7 @@ it("supports the gzip alias and exposes missing fields without regenerating old 
   const output = await call("endurance_session");
   expect(output.training_context).toMatchObject({ association: "matched",
     aerobic: { status: "missing", value: null }, anaerobic: { status: "missing", value: null } });
-  expect(operations).toEqual({ get: 4, head: 1, list: 0, put: 0, delete: 0 });
+  expect(operations).toEqual({ get: 4, head: 1, list: 1, put: 0, delete: 0 });
 });
 
 it("leaves saved profiles and immutable historical Coach Input bytes/IDs unchanged", async () => {

@@ -107,6 +107,9 @@ it.each(["2025-03-26", "2026-07-28"])("%s: saves a legacy activity's context in 
   expect(contextLists).toEqual([
     { prefix: "activities/2027/73/context/v1/", limit: 100 },
     { prefix: "activities/2026/73/context/v1/", limit: 100 },
+    // The successful receipt resolves current context independently of analysis.
+    { prefix: "activities/2027/73/context/v1/", limit: 100 },
+    { prefix: "activities/2026/73/context/v1/", limit: 100 },
   ]);
   expect(writes).toEqual([result.key]);
   const list = await call("list_activities", {});

@@ -12,6 +12,9 @@ const issuer = "https://current-context.cloudflareaccess.com", hostname = "curre
 const prefix = "activities/2026/42/";
 let key: CryptoKey, jwk: Record<string, unknown>, token: string, testEnv: Env;
 let failCanonicalRead: boolean, failContextRead: boolean, writes: number, failedReadAttempts: number;
+let truncateContextList: boolean;
+let failActivityDataRead: boolean;
+const contextReads: Array<{ operation: "get" | "list"; key: string; limit?: number }> = [];
 let holdNextContextPut: boolean, failAfterNextContextPut: boolean, contextPutStarted: () => void, releaseContextPut: () => void;
 let heldContextPut: Promise<void>, startedContextPut: Promise<void>;
 
@@ -22,13 +25,22 @@ beforeAll(async () => {
 });
 beforeEach(async () => {
   failCanonicalRead = false; failContextRead = false; writes = 0; failedReadAttempts = 0;
+  truncateContextList = false; contextReads.length = 0;
+  failActivityDataRead = false;
   holdNextContextPut = false; failAfterNextContextPut = false;
   heldContextPut = new Promise(resolve => { releaseContextPut = resolve; });
   startedContextPut = new Promise(resolve => { contextPutStarted = resolve; });
   clearSummaryCaches();
-  const contexts = await env.SLIPSTREAM_DATA.list({ prefix: prefix + "context/v1/", limit: 100 });
-  if (contexts.truncated) throw new Error("Synthetic context limit");
-  if (contexts.objects.length) await env.SLIPSTREAM_DATA.delete(contexts.objects.map(item => item.key));
+  for (const id of ["42", "43"]) {
+    const contexts = await env.SLIPSTREAM_DATA.list({ prefix: `activities/2026/${id}/context/v1/`, limit: 100 });
+    if (contexts.truncated) throw new Error("Synthetic context limit");
+    if (contexts.objects.length) await env.SLIPSTREAM_DATA.delete(contexts.objects.map(item => item.key));
+  }
+  await env.SLIPSTREAM_DATA.delete([
+    "activities/2026/43/activity.v1.json", "activities/2026/43/activity.v1.json.gz",
+    "activities/2026/43/activity.endurance.v1.json", "activities/2026/43/activity.endurance.v1.json.gz",
+    "activities/2026/43/coach-input/v1/latest-ready.json",
+  ]);
   for (const [name, encoded] of Object.entries(history.objects_base64)) {
     await env.SLIPSTREAM_DATA.put(name, Uint8Array.from(atob(encoded), char => char.charCodeAt(0)));
   }
@@ -49,6 +61,17 @@ beforeEach(async () => {
     const method = Reflect.get(target, property);
     if (typeof method !== "function") return method;
     return (...args: unknown[]) => {
+      if (property === "get" && failActivityDataRead && /^activities\/2026\/43\/(?:activity\.|coach-input\/)/.test(String(args[0]))) {
+        throw new Error("SYNTHETIC_PRIVATE_ACTIVITY_READ_FAILURE");
+      }
+      if (property === "get" && String(args[0]).includes("/context/v1/")) {
+        contextReads.push({ operation: "get", key: String(args[0]) });
+      }
+      if (property === "list" && String((args[0] as R2ListOptions)?.prefix).includes("/context/v1/")) {
+        const options = args[0] as R2ListOptions;
+        contextReads.push({ operation: "list", key: String(options.prefix), limit: options.limit });
+        if (truncateContextList) return Reflect.apply(method, target, args).then((listed: R2Objects) => ({ ...listed, truncated: true }));
+      }
       if (property === "put") writes++;
       if (property === "put" && failAfterNextContextPut && String(args[0]).includes("/context/v1/")) {
         failAfterNextContextPut = false;
@@ -106,6 +129,190 @@ async function loadCurrentPublication() {
 }
 
 for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  it(`saved whole-session context accompanies a strength session without a running analysis ${protocol}`, async () => {
+    const session = { schema_version: 1, activity_id: "43", sets: [], summary: { active_sets: 0, total_repetitions: 0 } };
+    await env.SLIPSTREAM_DATA.put("summary/activities.csv",
+      "Activity ID,Activity Date,Activity Name,Activity Type,Moving Time,Activity Local Date\n"
+      + "garmin-43,2026-10-08 07:00:00,Synthetic strength,strength_training,60,2026-10-08\n");
+    await env.SLIPSTREAM_DATA.put("activities/2026/43/activity.v1.json", JSON.stringify({
+      schema_version: 1, source: "garmin-fit", activity: { id: "43", type: "strength_training",
+        start_time_gmt: "2026-10-08T07:00:00Z", start_time_local: "2026-10-08T09:00:00" },
+      normalized_strength_session: session,
+    }));
+    const saved = (await call(protocol, "add_activity_context", {
+      activity_id: "43", rpe: 7, conditions: "Synthetic warm room", note: "SYNTHETIC_WHOLE_SESSION_NOTE",
+    })).structuredContent;
+    expect(saved.saved).toBe(true);
+    const read = (await call(protocol, "strength_session", { activity_id: "garmin-43" })).structuredContent;
+    expect(read.available).toBe(true);
+    expect(read.session).toEqual(session);
+    expect(read.user_context).toMatchObject({ activity_id: "43", rpe: 7,
+      conditions: "Synthetic warm room", note: "SYNTHETIC_WHOLE_SESSION_NOTE" });
+    expect(read.view).toMatchObject({ context_status: "available", context_revision: saved.context_id });
+    failContextRead = true;
+    const unreadable = (await call(protocol, "strength_session", { activity_id: "43" })).structuredContent;
+    expect(unreadable.available).toBe(true);
+    expect(unreadable.session).toEqual(session);
+    expect(unreadable.user_context).toBeNull();
+    expect(unreadable.view.context_status).toBe("unavailable");
+    expect(writes).toBe(1);
+  });
+
+  for (const type of ["strength_training", "cycling", "hiking"]) {
+    it(`current context remains readable without a running analysis for ${type} ${protocol}`, async () => {
+      await env.SLIPSTREAM_DATA.put("summary/activities.csv",
+        "Activity ID,Activity Date,Activity Name,Activity Type,Moving Time,Activity Local Date\n"
+        + `garmin-43,2026-10-08 07:00:00,Synthetic activity,${type},60,2026-10-08\n`);
+      const saved = (await call(protocol, "add_activity_context", {
+        activity_id: "43", rpe: 4, note: "SYNTHETIC_CONTEXT_WITHOUT_ANALYSIS",
+      })).structuredContent;
+      expect(saved.saved).toBe(true);
+      for (const view of [saved.coach_input,
+        (await call(protocol, "coach_input", { activity_id: "garmin-43", format: "full" })).structuredContent,
+        (await call(protocol, "coach_input", { activity_id: "43", format: "coach" })).structuredContent]) {
+        expect(view.available).toBe(false);
+        expect(view.user_context).toMatchObject({ activity_id: "43", rpe: 4, note: "SYNTHETIC_CONTEXT_WITHOUT_ANALYSIS" });
+        expect(view.view).toMatchObject({ context_status: "available", context_revision: saved.context_id });
+        expect(view.view).not.toHaveProperty("analysis_id");
+        expect(view.view).not.toHaveProperty("analyzer_version");
+        expect(view).not.toHaveProperty("analysis");
+        expect(view).not.toHaveProperty("presentation");
+        expect(view).not.toHaveProperty("ground_contact_sides");
+      }
+      expect(writes).toBe(1);
+    });
+  }
+
+  for (const type of ["running", "cycling", "hiking"]) {
+    it(`an endurance read composes the latest context without changing its stored ${type} dataset ${protocol}`, async () => {
+      await env.SLIPSTREAM_DATA.put("summary/activities.csv",
+        "Activity ID,Activity Date,Activity Name,Activity Type,Moving Time,Activity Local Date\n"
+        + `garmin-43,2026-10-08 07:00:00,Synthetic activity,${type},60,2026-10-08\n`);
+      const session = { schema_version: 1, source: "garmin-tcx", available: true,
+        activity: { id: "43", type }, summary: { duration_seconds: 60, distance_m: 1000 }, laps: [] };
+      const sessionBytes = JSON.stringify(session);
+      await env.SLIPSTREAM_DATA.put("activities/2026/43/activity.endurance.v1.json", sessionBytes);
+      const saved = (await call(protocol, "add_activity_context", {
+        activity_id: "43", rpe: 6, conditions: "Synthetic dry", note: "SYNTHETIC_KEEP_THIS_NOTE",
+      })).structuredContent;
+      expect(saved.saved).toBe(true);
+      const initial = (await call(protocol, "endurance_session", { activity_id: "43" })).structuredContent;
+      expect(initial.available).toBe(true);
+      expect(initial.user_context).toMatchObject({ rpe: 6, note: "SYNTHETIC_KEEP_THIS_NOTE" });
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 11_000);
+      const updated = (await call(protocol, "add_activity_context", { activity_id: "43", rpe: null,
+        workout_correction: "Synthetic correction" })).structuredContent;
+      expect(updated.saved).toBe(true);
+      const read = (await call(protocol, "endurance_session", { activity_id: "garmin-43" })).structuredContent;
+      expect(read.available).toBe(true);
+      expect(read.session).toEqual(session);
+      expect(read.user_context).toMatchObject({ activity_id: "43", rpe: null, conditions: "Synthetic dry",
+        note: "SYNTHETIC_KEEP_THIS_NOTE", workout_correction: "Synthetic correction" });
+      expect(read.view).toMatchObject({ context_status: "available", context_revision: updated.context_id });
+      expect(await (await env.SLIPSTREAM_DATA.get("activities/2026/43/activity.endurance.v1.json"))!.text()).toBe(sessionBytes);
+      expect(await (await env.SLIPSTREAM_DATA.get(saved.key))!.json()).toMatchObject({ rpe: 6, workout_correction: null });
+      failContextRead = true;
+      const unreadable = (await call(protocol, "endurance_session", { activity_id: "43" })).structuredContent;
+      expect(unreadable.available).toBe(true);
+      expect(unreadable.session).toEqual(session);
+      expect(unreadable.user_context).toBeNull();
+      expect(unreadable.view.context_status).toBe("unavailable");
+      expect(writes).toBe(2);
+    });
+  }
+
+  for (const failure of ["read", "truncated", "foreign", "ambiguous"] as const) {
+    it(`activity context ${failure} stays unavailable, private and bounded across individual tools ${protocol}`, async () => {
+      await env.SLIPSTREAM_DATA.put("summary/activities.csv",
+        "Activity ID,Activity Date,Activity Name,Activity Type,Moving Time,Activity Local Date\n"
+        + "garmin-43,2026-10-08 07:00:00,Synthetic other,hiking,60,2026-10-08\n");
+      for (const tool of ["strength_session", "endurance_session", "coach_input"]) {
+        const absent = (await call(protocol, tool, { activity_id: "43" })).structuredContent;
+        expect(absent.available).toBe(false);
+        expect(absent.user_context).toBeNull();
+        expect(absent.view).toMatchObject({ context_status: "not_stored", context_revision: null, context_updated_at: null });
+      }
+      const saved = (await call(protocol, "add_activity_context", { activity_id: "43", rpe: 5,
+        note: "SYNTHETIC_VALID_CONTEXT" })).structuredContent;
+      expect(saved.saved).toBe(true);
+      if (failure === "read") failContextRead = true;
+      if (failure === "truncated") truncateContextList = true;
+      if (failure === "foreign") await env.SLIPSTREAM_DATA.put("activities/2026/43/context/v1/20990101T000000000-foreign.json",
+        JSON.stringify({ ...saved.context, activity_id: "44", note: "SYNTHETIC_PRIVATE_FOREIGN_CONTEXT" }));
+      if (failure === "ambiguous") for (const suffix of ["a", "b"]) {
+        await env.SLIPSTREAM_DATA.put(`activities/2026/43/context/v1/20990101T000000000-${suffix}.json`,
+          JSON.stringify({ ...saved.context, context_id: suffix }));
+      }
+      for (const tool of ["strength_session", "endurance_session", "coach_input"]) {
+        contextReads.length = 0;
+        const result = (await call(protocol, tool, { activity_id: "43" })).structuredContent;
+        expect(result.available).toBe(false);
+        expect(result.user_context).toBeNull();
+        expect(result.view).toMatchObject({ context_status: "unavailable", context_revision: null, context_updated_at: null });
+        expect(contextReads.filter(read => read.operation === "list")).toEqual([
+          { operation: "list", key: "activities/2026/43/context/v1/", limit: 100 },
+        ]);
+        expect(contextReads.filter(read => read.operation === "get")).toHaveLength(["read", "foreign"].includes(failure) ? 1 : 0);
+        expect(JSON.stringify(result)).not.toMatch(/SYNTHETIC_PRIVATE|SYNTHETIC_VALID_CONTEXT/);
+      }
+      expect(writes).toBe(1);
+      expect(await (await env.SLIPSTREAM_DATA.get(saved.key))!.json()).toEqual(saved.context);
+    });
+  }
+
+  it(`one activity's context never leaks to another or adds per-row reads to lists ${protocol}`, async () => {
+    await env.SLIPSTREAM_DATA.put("summary/activities.csv",
+      "Activity ID,Activity Date,Activity Name,Activity Type,Moving Time,Activity Local Date\n"
+      + "garmin-42,2026-10-08 07:00:00,Synthetic running,running,60,2026-10-08\n"
+      + "garmin-43,2026-10-08 08:00:00,Synthetic other,hiking,60,2026-10-08\n");
+    const saved = (await call(protocol, "add_activity_context", { activity_id: "43", note: "SYNTHETIC_ONLY_ACTIVITY_43" })).structuredContent;
+    expect(saved.saved).toBe(true);
+    for (const tool of ["strength_session", "endurance_session", "coach_input"]) {
+      const other = await call(protocol, tool, { activity_id: "42" });
+      expect(other.isError).not.toBe(true);
+      expect(JSON.stringify(other)).not.toContain("SYNTHETIC_ONLY_ACTIVITY_43");
+      expect(other.structuredContent.view.context_revision).not.toBe(saved.context_id);
+    }
+    contextReads.length = 0;
+    const missing = (await call(protocol, "coach_input", { activity_id: "999" })).structuredContent;
+    expect(missing.available).toBe(false);
+    expect(missing).not.toHaveProperty("user_context");
+    const list = (await call(protocol, "list_activities", {})).structuredContent;
+    expect(list.activities).toHaveLength(2);
+    expect(list.activities.every((activity: Record<string, unknown>) => !Object.hasOwn(activity, "user_context"))).toBe(true);
+    expect(contextReads).toEqual([]);
+    expect(writes).toBe(1);
+  });
+
+  for (const tool of ["strength_session", "endurance_session", "coach_input"]) for (const failure of ["read", "malformed"]) {
+    it(`verified current context survives an independent ${tool} ${failure} failure ${protocol}`, async () => {
+      await env.SLIPSTREAM_DATA.put("summary/activities.csv",
+        "Activity ID,Activity Date,Activity Name,Activity Type,Moving Time,Activity Local Date\n"
+        + "garmin-43,2026-10-08 07:00:00,Synthetic other,hiking,60,2026-10-08\n");
+      const saved = (await call(protocol, "add_activity_context", { activity_id: "43", rpe: 5,
+        note: "SYNTHETIC_KEEP_READABLE_CONTEXT" })).structuredContent;
+      expect(saved.saved).toBe(true);
+      if (failure === "read") failActivityDataRead = true;
+      else {
+        const key = tool === "coach_input" ? "coach-input/v1/latest-ready.json"
+          : tool === "strength_session" ? "activity.v1.json" : "activity.endurance.v1.json";
+        await env.SLIPSTREAM_DATA.put("activities/2026/43/" + key, "{SYNTHETIC_PRIVATE_MALFORMED_ACTIVITY");
+      }
+      const reply = await call(protocol, tool, { activity_id: "43" });
+      expect(reply.isError).not.toBe(true);
+      const result = reply.structuredContent;
+      expect(result.available).toBe(false);
+      expect(result.user_context).toMatchObject({ activity_id: "43", rpe: 5, note: "SYNTHETIC_KEEP_READABLE_CONTEXT" });
+      expect(result.view).toMatchObject({ context_status: "available", context_revision: saved.context_id });
+      expect(result).not.toHaveProperty("analysis");
+      expect(result).not.toHaveProperty("session");
+      expect(result).not.toHaveProperty("presentation");
+      expect(result.message).not.toMatch(/not stored|No granular|No normalized|No running/);
+      expect(JSON.stringify(reply)).not.toContain("SYNTHETIC_PRIVATE");
+      expect(writes).toBe(1);
+    });
+  }
+
   it(`an unconfirmed context PUT stays held rather than expiring into another append ${protocol}`, async () => {
     const now = Date.now();
     failAfterNextContextPut = true;
@@ -237,7 +444,8 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     const saved = await call(protocol, "add_activity_context", { activity_id: "42", note: "SYNTHETIC_SAVED_NOTE" });
     expect(saved.isError).not.toBe(true);
     expect(saved.structuredContent).toMatchObject({ saved: true, context: { note: "SYNTHETIC_SAVED_NOTE" },
-      coach_input: { available: false } });
+      coach_input: { available: false, user_context: { note: "SYNTHETIC_SAVED_NOTE" },
+        view: { context_status: "available", context_revision: saved.structuredContent.context_id } } });
     expect(JSON.stringify(saved)).not.toContain("SYNTHETIC_PRIVATE_PROVIDER_DETAIL");
     expect(writes).toBe(1); expect(failedReadAttempts).toBe(1);
     failCanonicalRead = false;

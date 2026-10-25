@@ -1435,7 +1435,7 @@ async function call(name: "endurance_session" | "coach_input", protocol: string,
   const currentReads = contextOperations.slice(contextStart);
   const date = String(message.result.structuredContent.activity?.date ?? "").slice(5, 10);
   expect(currentReads.filter(item => item.startsWith("LIST"))).toHaveLength(
-    name === "coach_input" && message.result.structuredContent.available
+    message.result.structuredContent.activity && date.length === 5
       ? ["01-01", "12-31"].includes(date) ? 2 : 1 : 0);
   expect(currentReads.filter(item => item.startsWith("GET")).length).toBeLessThanOrEqual(1);
   return message.result.structuredContent;

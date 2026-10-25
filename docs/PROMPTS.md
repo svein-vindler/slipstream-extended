@@ -66,7 +66,14 @@ That explicit save request is the confirmation; no second approval is needed.
 Without an explicit request to store the information, preview and ask first.
 Later partial updates retain other fields. Explicit null clears an ordinary field.
 
-`coach_input` returns the selected immutable analysis with current user context
+User context applies to all indexed activity types, including strength and
+cycling. Save it against the exact activity ID; individual strength/endurance
+reads and `coach_input` then expose the latest effective context separately from
+the stored analysis. Whole-session RPE is not a set-level RIR estimate. Context
+can be available even when the selected analysis is not; no regeneration is
+needed just to see a newly saved note.
+
+`coach_input` returns the selected immutable running analysis with current user context
 resolved separately, regardless of the analysis's age. Garmin's planned workout
 steps and the laps actually performed are separate. If no Garmin workout or
 explicit correction exists, the first version treats the continuous activity as

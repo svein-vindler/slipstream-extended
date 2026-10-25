@@ -6,7 +6,7 @@ import { activityCalendarYears, resolveActivityClock } from "./activity-clock";
 import { activityContextSchema, expectedGctSides, gctSideInput } from "./gct-sides";
 import { ApplicationToolError, applicationToolResult } from "./application-errors";
 import { McpServer } from "@modelcontextprotocol/server";
-import { errorCategory } from "./output-privacy";
+import { errorCategory, TOOL_FAILURE } from "./output-privacy";
 
 import { z } from "zod";
 import {
@@ -65,6 +65,33 @@ export class ActivityCoachTools {
     return parsed.data;
   }
 
+  private async readActivityContext(activity: Activity, requested: string) {
+    let context: Awaited<ReturnType<ActivityCoachTools["previousContext"]>> = null;
+    let status: "available" | "not_stored" | "unavailable" = "unavailable";
+    const day = validCalendarDay(activityCalendarDay(activity));
+    if (day) {
+      try {
+        context = await this.previousContext(requested, day);
+        status = context ? "available" : "not_stored";
+      } catch { /* Failed context reads must not hide independently readable session data. */ }
+    }
+    return { user_context: context, view: { schema_version: 1 as const, context_status: status,
+      context_revision: context?.context_id ?? null, context_updated_at: context?.created_at ?? null,
+      resolved_at: new Date().toISOString() } };
+  }
+
+  /** Context remains readable when the independently selected dataset is not. */
+  private async readActivityView<T extends Record<string, unknown>>(activity: Activity, requested: string,
+    read: (current: Awaited<ReturnType<ActivityCoachTools["readActivityContext"]>>) => Promise<T>) {
+    const current = await this.readActivityContext(activity, requested);
+    try { return { ...current, ...await read(current) }; }
+    catch {
+      // Reject failed/unverified analysis without exposing its values, guessing
+      // absence, falling back to history or discarding verified user context.
+      return { ...current, available: false, activity: toSummary(activity), message: TOOL_FAILURE };
+    }
+  }
+
   async putSmallJson(key: string, value: Record<string, unknown>): Promise<void> {
     const body = JSON.stringify(value);
     if (new TextEncoder().encode(body).byteLength > COACH_CONFIG_R2_LIMITS.stored) {
@@ -77,48 +104,38 @@ export class ActivityCoachTools {
 
   /** One bounded read path shared by normal reads and successful context receipts. */
   private async readCoachView(activity: Activity, requested: string, format?: "coach" | "full") {
-    const prefix = coachInputPrefix(activity);
-    const selection = await readCurrentCoachInput({
-      canonicalPrefix: prefix, activityId: requested,
-      ...(activity.localDate ? { date: activity.localDate } : {}),
-      read: (keys, limits) => this.storage.getR2JsonWithMetadata(keys, limits),
-      versions: async () => {
-        const listed = await this.env.SLIPSTREAM_DATA.list({ prefix, limit: 1000 });
-        if (listed.truncated) throw new Error("Coach analysis versions exceed the bounded legacy limit.");
-        return listed.objects;
-      },
+    return this.readActivityView(activity, requested, async currentContext => {
+      const prefix = coachInputPrefix(activity);
+      const selection = await readCurrentCoachInput({
+        canonicalPrefix: prefix, activityId: requested,
+        ...(activity.localDate ? { date: activity.localDate } : {}),
+        read: (keys, limits) => this.storage.getR2JsonWithMetadata(keys, limits),
+        versions: async () => {
+          const listed = await this.env.SLIPSTREAM_DATA.list({ prefix, limit: 1000 });
+          if (listed.truncated) throw new Error("Coach analysis versions exceed the bounded legacy limit.");
+          return listed.objects;
+        },
+      });
+      if (selection.status !== "available") {
+        return { available: false, activity: toSummary(activity),
+          message: selection.status === "absent"
+            ? "No running Coach analysis is stored for this activity. Current user context is independent; no analysis was generated."
+            : "The current coach input could not be verified. Retry this read later; if it persists, ask the maintainer to check stored analysis compatibility." };
+      }
+      const context = currentContext.user_context, contextStatus = currentContext.view.context_status;
+      const view = { ...currentContext.view, analysis_id: String(selection.analysis.analysis_id),
+        analyzer_version: String(selection.analysis.analyzer_version), interpretation: decouplingInterpretation(selection.analysis) };
+      const metrics = recordedRunningSegmentsSchema.safeParse(selection.analysis.recorded_running_metrics);
+      const groundContactSides = metrics.success ? expectedGctSides(metrics.data, context,
+        selection.analysis.segment_running_metrics, { currentView: true, contextUnavailable: contextStatus === "unavailable",
+          recovery: selection.analysis.recovery_running_metrics }) : null;
+      return { available: true, activity: toSummary(activity), view,
+        ground_contact_sides: groundContactSides,
+        ...(format === "coach" ? { presentation: coachPresentation(selection.analysis,
+          { status: contextStatus, value: context, groundContactSides }) } : { analysis: selection.analysis }),
+        message: activity.localDate ? "Coach input is available."
+          : "Coach input is available. The indexed date uses a UTC fallback; its historical local-calendar association is unconfirmed." };
     });
-    if (selection.status !== "available") {
-      return { available: false, activity: toSummary(activity),
-        message: selection.status === "absent"
-          ? "No coach input is stored yet. Add a coach profile and let the R2-only coach backfill run."
-          : "The current coach input could not be verified. Retry this read later; if it persists, ask the maintainer to check stored analysis compatibility." };
-    }
-    // User context has a different lifetime from immutable analysis/profile
-    // snapshots. A failed current read must never be reported as not_stored.
-    let context: Awaited<ReturnType<ActivityCoachTools["previousContext"]>> = null;
-    let contextStatus: "available" | "not_stored" | "unavailable" = "unavailable";
-    const day = validCalendarDay(activityCalendarDay(activity));
-    if (day) {
-      try {
-        context = await this.previousContext(requested, day);
-        contextStatus = context ? "available" : "not_stored";
-      } catch { /* Keep the selected analysis readable, with explicit uncertainty. */ }
-    }
-    const view = { schema_version: 1 as const, analysis_id: String(selection.analysis.analysis_id),
-      analyzer_version: String(selection.analysis.analyzer_version), context_status: contextStatus,
-      context_revision: context?.context_id ?? null, context_updated_at: context?.created_at ?? null,
-      resolved_at: new Date().toISOString(), interpretation: decouplingInterpretation(selection.analysis) };
-    const metrics = recordedRunningSegmentsSchema.safeParse(selection.analysis.recorded_running_metrics);
-    const groundContactSides = metrics.success ? expectedGctSides(metrics.data, context,
-      selection.analysis.segment_running_metrics, { currentView: true, contextUnavailable: contextStatus === "unavailable",
-        recovery: selection.analysis.recovery_running_metrics }) : null;
-    return { available: true, activity: toSummary(activity), view, user_context: context,
-      ground_contact_sides: groundContactSides,
-      ...(format === "coach" ? { presentation: coachPresentation(selection.analysis,
-        { status: contextStatus, value: context, groundContactSides }) } : { analysis: selection.analysis }),
-      message: activity.localDate ? "Coach input is available."
-        : "Coach input is available. The indexed date uses a UTC fallback; its historical local-calendar association is unconfirmed." };
   }
 
   private writesEnabled(): boolean {
@@ -323,7 +340,7 @@ export class ActivityCoachTools {
 
   registerDetailTools(server: McpServer) {
     server.registerTool("strength_session", {
-      description: "Read normalized sets for one Garmin strength activity: exercise, reps, weight, active time and following rest. Includes optional recorded aerobic/anaerobic Training Effect estimates from verified stored FIT sessions. Raw FIT messages and GPS are not returned.",
+      description: "Read normalized sets for one Garmin strength activity: exercise, reps, weight, active time and following rest. Includes optional recorded aerobic/anaerobic Training Effect estimates from verified stored FIT sessions. Raw FIT messages and GPS are not returned. Also returns current effective user_context with separate revision/status metadata, even when session data is absent. RPE is whole-session, not set-level RIR. Analysis availability and context availability are independent. No Garmin request or context write is performed.",
       inputSchema: z.object({
         activity_id: z.string().regex(/^(garmin-)?\d{1,20}$/)
           .describe('Activity ID from list_activities, for example "garmin-24431147581"'),
@@ -344,34 +361,30 @@ export class ActivityCoachTools {
       }
       const resolved = await resolveActivityClock(indexed, keys => this.getR2Json(keys));
       const activity = resolved.activity;
-      const stored = indexed.localDate ? await this.getR2Json(activityJsonObjectKeys(activity)) : resolved.stored;
-      if (!stored) {
-        return this.text({
-          available: false,
-          activity: toSummary(activity),
-          message: "No granular export is stored for this activity yet.",
-          training_context: trainingContext(activity, null),
-        });
-      }
-      if (!stored.data || typeof stored.data !== "object" || Array.isArray(stored.data)) {
-        throw new Error("Unsupported stored activity shape.");
-      }
-      const payload = stored.data as Record<string, unknown>;
-      const session = payload.normalized_strength_session;
-      if (session === undefined || session === null) {
-        return this.text({
-          available: false,
-          activity: toSummary(activity),
-          message: "The stored activity predates the normalized strength schema; rerun the granular export.",
-          training_context: trainingContext(activity, payload),
-        });
-      }
-      return this.text({ available: true, activity: toSummary(activity), session: strengthSessionSchema.parse(session),
-        training_context: trainingContext(activity, payload) });
+      return this.text(await this.readActivityView(activity, requested, async () => {
+        const stored = indexed.localDate ? await this.getR2Json(activityJsonObjectKeys(activity)) : resolved.stored;
+        if (!stored) {
+          return { available: false, activity: toSummary(activity),
+            message: "No granular export is stored for this activity yet.",
+            training_context: trainingContext(activity, null) };
+        }
+        if (!stored.data || typeof stored.data !== "object" || Array.isArray(stored.data)) {
+          throw new Error("Unsupported stored activity shape.");
+        }
+        const payload = stored.data as Record<string, unknown>;
+        const session = payload.normalized_strength_session;
+        if (session === undefined || session === null) {
+          return { available: false, activity: toSummary(activity),
+            message: "The stored activity predates the normalized strength schema; rerun the granular export.",
+            training_context: trainingContext(activity, payload) };
+        }
+        return { available: true, activity: toSummary(activity), session: strengthSessionSchema.parse(session),
+          training_context: trainingContext(activity, payload) };
+      }));
     });
 
     server.registerTool("endurance_session", {
-      description: "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates and recorded running measurements. New stored datasets also include raw ground-contact balance with unknown side semantics, recorded lap measurements, and producer-computed distance-split/half measurements with coverage. Existing datasets retain their five-field fallback. No new FIT fetch or segment computation is performed here, and missing or unverified optional fields do not change dataset availability.",
+      description: "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates and recorded running measurements. New stored datasets also include raw ground-contact balance with unknown side semantics, recorded lap measurements, and producer-computed distance-split/half measurements with coverage. Existing datasets retain their five-field fallback. No new FIT fetch or segment computation is performed here, and missing or unverified optional fields do not change dataset availability. Also returns current effective user_context with separate revision/status metadata, even when session data is absent. RPE is whole-session, not set-level RIR. Analysis availability and context availability are independent. No Garmin request or context write is performed.",
       inputSchema: z.object({
         activity_id: z.string().regex(/^(garmin-)?\d{1,20}$/)
           .describe('Activity ID from list_activities, for example "garmin-24444691902"'),
@@ -409,22 +422,17 @@ export class ActivityCoachTools {
         fitReadFailure = "source_unreadable";
         context = trainingContext(activity, null, "source_unreadable");
       }
-      const stored = await this.getR2Json(activityEnduranceObjectKeys(activity));
-      if (!stored) {
-        return this.text({
-          available: false,
-          activity: toSummary(activity),
-          message: "No normalized TCX analysis is stored for this activity yet. Run the activity backfill or recent granular export.",
-        });
-      }
-      return this.text({
-        available: true,
-        activity: toSummary(activity),
-        session: enduranceSessionSchema.parse(stored.data),
-        training_context: context,
-        recorded_running_metrics: storedRunningMeasurements(
-          recordedRunningMetrics(activity, decodedFit, stored.data, fitReadFailure), stored.data),
-      });
+      return this.text(await this.readActivityView(activity, requested, async () => {
+        const stored = await this.getR2Json(activityEnduranceObjectKeys(activity));
+        if (!stored) {
+          return { available: false, activity: toSummary(activity),
+            message: "No normalized TCX analysis is stored for this activity yet. Run the activity backfill or recent granular export." };
+        }
+        return { available: true, activity: toSummary(activity),
+          session: enduranceSessionSchema.parse(stored.data), training_context: context,
+          recorded_running_metrics: storedRunningMeasurements(
+            recordedRunningMetrics(activity, decodedFit, stored.data, fitReadFailure), stored.data) };
+      }));
     });
 
     const coachZone = z.object({
@@ -643,7 +651,7 @@ export class ActivityCoachTools {
 
     server.registerTool("coach_input", {
       title: "Read coach input",
-      description: "Read the selected verified immutable analysis together with the current effective user context for one running activity. If the user supplies RPE, conditions, notes or corrections, call add_activity_context first and use its updated Coach Input receipt. format=coach returns neutral coherent kilometer and logical work/recovery tables, units, coverage and decoupling interpretation guards; format=full or omitted returns the original complete analysis plus separately versioned current-view metadata. Several verified Auto Laps can form one logical rep; planned completion is never guessed. Raw GCT balance remains available with unknown side semantics; a current exact activity/date/FIT declaration projects recorded and derived sides. Missing measurements are not zero, and unreadable context is unavailable rather than not_stored. Profiles, zones, frozen health snapshots and analysis history remain unchanged. This read performs no Garmin request, regeneration or storage write.",
+      description: "Read current effective user context for one indexed activity of any type, alongside its selected verified immutable running analysis when available. Context is independent of analysis availability: available=false still describes the missing or unverified analysis. If the user supplies RPE, conditions, notes or corrections, call add_activity_context first and use its updated Coach Input receipt. format=coach returns neutral coherent kilometer and logical work/recovery tables, units, coverage and decoupling interpretation guards; format=full or omitted returns the original complete analysis plus separately versioned current-view metadata. Several verified Auto Laps can form one logical rep; planned completion is never guessed. Raw GCT balance remains available with unknown side semantics; a current exact activity/date/FIT declaration projects recorded and derived sides. Missing measurements are not zero, and unreadable context is unavailable rather than not_stored. Profiles, zones, frozen health snapshots and analysis history remain unchanged. This read performs no Garmin request, regeneration or storage write.",
       inputSchema: z.object({
         activity_id: z.string().regex(/^(garmin-)?\d{1,20}$/),
         format: z.enum(["coach", "full"]).optional()

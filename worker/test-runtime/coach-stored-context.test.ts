@@ -90,7 +90,7 @@ async function call(protocol: string, activityId = "garmin-42", extraArguments: 
   expect(message.error, text).toBeUndefined(); expect(message.result.isError, text).not.toBe(true);
   expect(JSON.parse(message.result.content[0].text)).toEqual(message.result.structuredContent);
   const currentReads = contextOperations.slice(contextStart);
-  expect(currentReads.filter(item => item.startsWith("LIST"))).toHaveLength(message.result.structuredContent.available ? 1 : 0);
+  expect(currentReads.filter(item => item.startsWith("LIST"))).toHaveLength(message.result.structuredContent.activity ? 1 : 0);
   expect(currentReads.filter(item => item.startsWith("GET")).length).toBeLessThanOrEqual(1);
   return message.result.structuredContent;
 }

@@ -115,11 +115,14 @@ These example zone values demonstrate schema validity only; they are not default
 Start with `sync_latest_activity`, with `expected_date` and an exact `activity_id`
 when known. The returned coherent package is the first analysis source. If extra
 reads are needed, use `endurance_session` and `coach_input` for that same running
-ID; use `strength_session` for strength. A successful context write includes an
-updated Coach Input view without regenerating the analysis. Its current context
-is separate from the immutable analysis snapshot. If saved is true but the view
-is unavailable, retry only `coach_input`, not the saved append. Missing source
-analysis is still missing; do not start a new job solely for a context change.
+ID; use `strength_session` for strength. Context also applies to cycling and
+other indexed activity types. A successful context write includes its current
+view without regenerating an analysis. Current context is separate from the
+immutable analysis snapshot and remains readable even without a running analysis.
+Individual strength/endurance reads expose it too. Whole-session RPE is not
+set-level RIR. If saved is true but context is unavailable, retry only the read,
+not the saved append. Missing source analysis is still missing; do not start a
+new job solely for a context change.
 
 ```json
 [
