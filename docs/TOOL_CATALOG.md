@@ -332,7 +332,7 @@ Read all Garmin body-composition measurements stored for one date, including wei
 
 ### `coach_input`
 
-Read the selected verified immutable analysis together with the current effective user context for one running activity. If the user supplies RPE, conditions, notes or corrections, call add_activity_context first and use its updated Coach Input receipt. format=coach returns neutral coherent kilometer and logical work/recovery tables, units, coverage and decoupling interpretation guards; format=full or omitted returns the original complete analysis plus separately versioned current-view metadata. Several verified Auto Laps can form one logical rep; planned completion is never guessed. Raw GCT balance remains available with unknown side semantics; a current exact activity/date/FIT declaration projects recorded and derived sides. Missing measurements are not zero, and unreadable context is unavailable rather than not_stored. Profiles, zones, frozen health snapshots and analysis history remain unchanged. This read performs no Garmin request, regeneration or storage write.
+Read current effective user context for one indexed activity of any type, alongside its selected verified immutable running analysis when available. Context is independent of analysis availability: available=false still describes the missing or unverified analysis. If the user supplies RPE, conditions, notes or corrections, call add_activity_context first and use its updated Coach Input receipt. format=coach returns neutral coherent kilometer and logical work/recovery tables, units, coverage and decoupling interpretation guards; format=full or omitted returns the original complete analysis plus separately versioned current-view metadata. Several verified Auto Laps can form one logical rep; planned completion is never guessed. Raw GCT balance remains available with unknown side semantics; a current exact activity/date/FIT declaration projects recorded and derived sides. Missing measurements are not zero, and unreadable context is unavailable rather than not_stored. Profiles, zones, frozen health snapshots and analysis history remain unchanged. This read performs no Garmin request, regeneration or storage write.
 
 **Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
 
@@ -451,7 +451,7 @@ Check the fitness data is connected; returns count, date range, sources.
 
 ### `endurance_session`
 
-Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates and recorded running measurements. New stored datasets also include raw ground-contact balance with unknown side semantics, recorded lap measurements, and producer-computed distance-split/half measurements with coverage. Existing datasets retain their five-field fallback. No new FIT fetch or segment computation is performed here, and missing or unverified optional fields do not change dataset availability.
+Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates and recorded running measurements. New stored datasets also include raw ground-contact balance with unknown side semantics, recorded lap measurements, and producer-computed distance-split/half measurements with coverage. Existing datasets retain their five-field fallback. No new FIT fetch or segment computation is performed here, and missing or unverified optional fields do not change dataset availability. Also returns current effective user_context with separate revision/status metadata, even when session data is absent. RPE is whole-session, not set-level RIR. Analysis availability and context availability are independent. No Garmin request or context write is performed.
 
 **Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
 
@@ -875,7 +875,7 @@ Analyze sleep by morning wake-date. Daily rows expose local night_of and weekly 
 
 ### `strength_session`
 
-Read normalized sets for one Garmin strength activity: exercise, reps, weight, active time and following rest. Includes optional recorded aerobic/anaerobic Training Effect estimates from verified stored FIT sessions. Raw FIT messages and GPS are not returned.
+Read normalized sets for one Garmin strength activity: exercise, reps, weight, active time and following rest. Includes optional recorded aerobic/anaerobic Training Effect estimates from verified stored FIT sessions. Raw FIT messages and GPS are not returned. Also returns current effective user_context with separate revision/status metadata, even when session data is absent. RPE is whole-session, not set-level RIR. Analysis availability and context availability are independent. No Garmin request or context write is performed.
 
 **Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
 

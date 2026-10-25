@@ -96,8 +96,8 @@ it("advertises the D4 scalar metric contract in every registration mode", () => 
   }
 });
 
-const approvedEnduranceDescription = "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates and recorded running measurements. New stored datasets also include raw ground-contact balance with unknown side semantics, recorded lap measurements, and producer-computed distance-split/half measurements with coverage. Existing datasets retain their five-field fallback. No new FIT fetch or segment computation is performed here, and missing or unverified optional fields do not change dataset availability.";
-const approvedCoachDescription = "Read the selected verified immutable analysis together with the current effective user context for one running activity. If the user supplies RPE, conditions, notes or corrections, call add_activity_context first and use its updated Coach Input receipt. format=coach returns neutral coherent kilometer and logical work/recovery tables, units, coverage and decoupling interpretation guards; format=full or omitted returns the original complete analysis plus separately versioned current-view metadata. Several verified Auto Laps can form one logical rep; planned completion is never guessed. Raw GCT balance remains available with unknown side semantics; a current exact activity/date/FIT declaration projects recorded and derived sides. Missing measurements are not zero, and unreadable context is unavailable rather than not_stored. Profiles, zones, frozen health snapshots and analysis history remain unchanged. This read performs no Garmin request, regeneration or storage write.";
+const approvedEnduranceDescription = "Read a GPS-free analysis dataset derived from the Garmin TCX file for one endurance activity. Returns summary metrics, Garmin laps, kilometre splits, distance-half heart-rate drift, seconds per heart-rate BPM, and a compact 10-second trackpoint series. Includes optional recorded aerobic/anaerobic Training Effect estimates and recorded running measurements. New stored datasets also include raw ground-contact balance with unknown side semantics, recorded lap measurements, and producer-computed distance-split/half measurements with coverage. Existing datasets retain their five-field fallback. No new FIT fetch or segment computation is performed here, and missing or unverified optional fields do not change dataset availability. Also returns current effective user_context with separate revision/status metadata, even when session data is absent. RPE is whole-session, not set-level RIR. Analysis availability and context availability are independent. No Garmin request or context write is performed.";
+const approvedCoachDescription = "Read current effective user context for one indexed activity of any type, alongside its selected verified immutable running analysis when available. Context is independent of analysis availability: available=false still describes the missing or unverified analysis. If the user supplies RPE, conditions, notes or corrections, call add_activity_context first and use its updated Coach Input receipt. format=coach returns neutral coherent kilometer and logical work/recovery tables, units, coverage and decoupling interpretation guards; format=full or omitted returns the original complete analysis plus separately versioned current-view metadata. Several verified Auto Laps can form one logical rep; planned completion is never guessed. Raw GCT balance remains available with unknown side semantics; a current exact activity/date/FIT declaration projects recorded and derived sides. Missing measurements are not zero, and unreadable context is unavailable rather than not_stored. Profiles, zones, frozen health snapshots and analysis history remain unchanged. This read performs no Garmin request, regeneration or storage write.";
 
 it("advertises optional strict v1-or-v2 running fields without changing the stored session contract", () => {
   for (const mode of modes) {
@@ -326,9 +326,38 @@ it("advertises the explicit terminal inspection input only in refresh registrati
   }
 });
 
+function beforeAllSportsContext(tool: ToolContract): ToolContract {
+  if (!["strength_session", "endurance_session", "coach_input", "add_activity_context"].includes(tool.name)) return tool;
+  const previous = structuredClone(tool);
+  const schema = previous.outputSchema!;
+  const properties = schema.properties as Record<string, Record<string, unknown>>;
+  if (tool.name === "strength_session" || tool.name === "endurance_session") {
+    if (tool.name === "strength_session") {
+      const suffix = " Also returns current effective user_context with separate revision/status metadata, even when session data is absent. RPE is whole-session, not set-level RIR. Analysis availability and context availability are independent. No Garmin request or context write is performed.";
+      expect(previous.description?.endsWith(suffix)).toBe(true);
+      previous.description = previous.description!.slice(0, -suffix.length);
+    }
+    for (const field of ["user_context", "view"]) {
+      expect(properties[field]).toBeDefined();
+      expect(schema.required ?? []).not.toContain(field);
+      delete properties[field];
+    }
+  } else {
+    const coach = tool.name === "coach_input" ? schema : properties.coach_input;
+    const view = (coach.properties as Record<string, Record<string, unknown>>).view;
+    for (const field of ["analysis_id", "analyzer_version"]) {
+      expect((view.properties as Record<string, unknown>)[field]).toEqual({ type: "string" });
+      expect(view.required).not.toContain(field);
+    }
+    view.required = ["schema_version", "analysis_id", "analyzer_version", "context_status",
+      "context_revision", "context_updated_at", "resolved_at"];
+  }
+  return previous;
+}
+
 it.each([false, true])("preserves catalog bytes apart from reviewed SDK provenance and D4 metric leaves with writes=%s", async writes => {
   const tools = structuredClone(modes.find(mode => mode.writes === writes && mode.refresh)!.tools)
-    .map(beforeGarminSdkUpgrade).map(beforeExplicitInspection);
+    .map(beforeAllSportsContext).map(beforeGarminSdkUpgrade).map(beforeExplicitInspection);
   const schema = requireTool(tools, "strength_session").outputSchema as {
     properties: { session: { properties: { sets: { items: { properties: Record<string, unknown> } } } } };
   };
@@ -355,7 +384,7 @@ it.each([false, true])("preserves previous contracts apart from reviewed optiona
         .map(([name, item]) => [name, previousSchema(item)]))];
     }));
   }
-  const tools = modes.find(mode => mode.writes === writes && mode.refresh)!.tools.map(beforeExplicitInspection)
+  const tools = modes.find(mode => mode.writes === writes && mode.refresh)!.tools.map(beforeAllSportsContext).map(beforeExplicitInspection)
     .filter(tool => tool.name !== "training_history") // Worker 07's one additive read tool.
     .map(tool => {
       // Only these two reviewed detail outputs/descriptions change in Worker 06.

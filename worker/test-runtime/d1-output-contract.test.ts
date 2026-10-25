@@ -91,7 +91,7 @@ const healthCsv = "Date,Source,Sleep Seconds\n2026-09-30,garmin,25200\n";
 let privateKey: CryptoKey, jwk: Row, token: string, testEnv: Env, rpcId = 0;
 let failedGet: string | undefined;
 let gate: { keys: Set<string>; arrived: Set<string>; wait: Promise<void>; release: () => void } | undefined;
-const calls: Array<{ operation: string; key: string }> = [], logs: unknown[][] = [], external: string[] = [];
+const calls: Array<{ operation: string; key: string; limit?: number }> = [], logs: unknown[][] = [], external: string[] = [];
 const responses: Array<{ tool: string; bytes: number; elapsed_ms: number }> = [];
 const stored = new Map<string, string>();
 const bucket = new Proxy(env.SLIPSTREAM_DATA, {
@@ -99,7 +99,10 @@ const bucket = new Proxy(env.SLIPSTREAM_DATA, {
     const value = Reflect.get(target, property);
     if (typeof value !== "function") return value;
     return async (...args: unknown[]) => {
-      const operation = String(property), key = String(args[0]); calls.push({ operation, key });
+      const operation = String(property);
+      const options = property === "list" ? args[0] as R2ListOptions : undefined;
+      const key = options ? String(options.prefix) : String(args[0]);
+      calls.push({ operation, key, ...(options ? { limit: options.limit } : {}) });
       if (property === "get" && failedGet === key) throw new Error(MARKER);
       if (property === "get" && gate?.keys.has(key)) {
         const active = gate; active.arrived.add(key);
@@ -201,6 +204,17 @@ function success(reply: Awaited<ReturnType<typeof rpc>>, schema: { parse(value: 
 }
 function controlledError(reply: Awaited<ReturnType<typeof rpc>>) {
   expect(reply.raw).not.toContain(MARKER);
+  if (reply.result.structuredContent?.view) {
+    const value = reply.result.structuredContent;
+    // Detail dataset failure is distinct from its independently valid context
+    // read. Keep the exact privacy message and reject all analysis/session data.
+    expect(reply.result.isError).not.toBe(true);
+    expect(Object.keys(value).sort()).toEqual(["activity", "available", "message", "user_context", "view"]);
+    expect(value).toMatchObject({ available: false, message: FAILURE, activity: { id: "garmin-123" },
+      user_context: null, view: { schema_version: 1, context_status: "not_stored", context_revision: null, context_updated_at: null } });
+    expect(JSON.parse(reply.result.content[0].text)).toEqual(value);
+    return;
+  }
   expect(reply.result).toEqual({ content: [{ type: "text", text: FAILURE }], isError: true });
 }
 function contractTest(name: string, body: () => Promise<void>) {
@@ -521,7 +535,11 @@ for (const protocol of ["2026-07-28", "2025-03-26"]) {
         outputSchemas[tool]);
       expect(calls.filter(call => call.operation === "get")).toHaveLength(reads);
       expect(calls.filter(call => call.operation === "head")).toHaveLength(reads > 1 ? 1 : 0);
-      expect(calls.some(call => ["list", "put", "delete"].includes(call.operation))).toBe(false);
+      const lists = calls.filter(call => call.operation === "list");
+      const activityDetail = tool === "strength_session" || tool === "endurance_session";
+      expect(lists).toHaveLength(activityDetail ? 1 : 0);
+      if (activityDetail) expect(lists[0]).toEqual({ operation: "list", key: "activities/2026/123/context/v1/", limit: 100 });
+      expect(calls.some(call => ["put", "delete"].includes(call.operation))).toBe(false);
     });
   contractTest(`${protocol}: isolates concurrent positive A and invalid marker B without cache mutation`, async () => {
     const bad = hrv(OTHER_DAY); bad.readings[0].hrv_ms = { private: MARKER }; await put(OTHER_HRV, bad); await initialize(protocol);

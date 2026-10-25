@@ -98,12 +98,18 @@ async function call(protocol: string, expectError = false) {
   const message = JSON.parse(line ? line.slice(6) : body);
   expect(message.error, body).toBeUndefined();
   const currentReads = contextOperations.slice(contextStart);
-  expect(currentReads.filter(item => item === "list")).toHaveLength(message.result.structuredContent?.available ? 1 : 0);
+  // Current context has its own bounded read even when analysis selection fails.
+  // The independent analysis GET/LIST/write assertions below remain unchanged.
+  expect(currentReads.filter(item => item === "list")).toHaveLength(1);
   expect(currentReads.filter(item => item === "get").length).toBeLessThanOrEqual(1);
   if (expectError) {
-    expect(message.result.isError, body).toBe(true);
+    // Context remains a valid partial read; the failed analysis stays closed.
+    expect(message.result.isError, body).not.toBe(true);
+    expect(message.result.structuredContent.available).toBe(false);
+    expect(message.result.structuredContent).not.toHaveProperty("analysis");
+    expect(message.result.structuredContent.message).toBe("The request could not be completed. Check arguments, access, configuration and service availability.");
     expect(body).not.toContain("synthetic provider text");
-    return message.result;
+    return message.result.structuredContent;
   }
   expect(message.result.isError, body).not.toBe(true);
   expect(JSON.parse(message.result.content[0].text)).toEqual(message.result.structuredContent);
@@ -214,9 +220,9 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       pointerFailure = failure === "provider"; legacyTruncated = failure === "truncated";
       resetCounts();
       try {
-        const isError = ["malformed", "oversize", "provider", "truncated"].includes(failure);
-        const result = await call(protocol, isError);
-        if (!isError) expect(result.available).toBe(false);
+        const failedRead = ["malformed", "oversize", "provider", "truncated"].includes(failure);
+        const result = await call(protocol, failedRead);
+        expect(result.available).toBe(false);
         expect(reads.some(key => key.startsWith("activities/2026/2/"))).toBe(false);
         expect(operations.put + operations.delete).toBe(0);
         if (failure !== "truncated" && failure !== "ambiguous") expect(operations.list).toBe(0);
@@ -298,7 +304,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       expect(result.available).toBe(false);
       expect(result.analysis).toBeUndefined();
       expect(result.message).toBe(state === "absent"
-        ? "No coach input is stored yet. Add a coach profile and let the R2-only coach backfill run."
+        ? "No running Coach analysis is stored for this activity. Current user context is independent; no analysis was generated."
         : "The current coach input could not be verified. Retry this read later; if it persists, ask the maintainer to check stored analysis compatibility.");
       expect(operations.put + operations.delete).toBe(0);
     });

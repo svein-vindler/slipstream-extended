@@ -87,7 +87,7 @@ async function call(name = "endurance_session", protocol = "2025-03-26", activit
   expect(message.error, text).toBeUndefined(); expect(message.result.isError, text).not.toBe(true);
   const currentReads = contextOperations.slice(contextStart);
   expect(currentReads.filter(item => item.startsWith("LIST"))).toHaveLength(
-    name === "coach_input" && message.result.structuredContent?.available ? 1 : 0);
+    message.result.structuredContent?.activity ? 1 : 0);
   expect(currentReads.filter(item => item.startsWith("GET")).length).toBeLessThanOrEqual(1);
   expect(JSON.parse(message.result.content[0].text)).toEqual(message.result.structuredContent);
   return message.result.structuredContent;

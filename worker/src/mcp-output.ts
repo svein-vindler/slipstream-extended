@@ -16,6 +16,12 @@ const nullableString = z.string().nullable();
 const nullableBoolean = z.boolean().nullable();
 const nullableTimestamp = z.union([z.string(), z.number().finite()]).nullable();
 const openObject = z.record(z.string(), z.unknown());
+const currentContextViewSchema = z.object({
+  schema_version: z.literal(1),
+  context_status: z.enum(["available", "not_stored", "unavailable"]),
+  context_revision: nullableString, context_updated_at: nullableString,
+  resolved_at: z.iso.datetime(),
+});
 
 const activitySummary = z.object({
   id: z.string(),
@@ -35,7 +41,7 @@ const coachInputResponseSchema = z.object({
   analysis: openObject.optional(), user_context: openObject.nullable().optional(),
   ground_contact_sides: openObject.nullable().optional(),
   view: z.object({
-    schema_version: z.literal(1), analysis_id: z.string(), analyzer_version: z.string(),
+    schema_version: z.literal(1), analysis_id: z.string().optional(), analyzer_version: z.string().optional(),
     context_status: z.enum(["available", "not_stored", "unavailable"]),
     context_revision: nullableString, context_updated_at: nullableString,
     resolved_at: z.iso.datetime(),
@@ -454,6 +460,8 @@ export const outputSchemas = {
     message: z.string().optional(),
     session: strengthSessionSchema.optional(),
     training_context: trainingContextSchema.optional(),
+    user_context: openObject.nullable().optional(),
+    view: currentContextViewSchema.optional(),
   }),
   endurance_session: z.object({
     available: z.boolean(),
@@ -463,6 +471,8 @@ export const outputSchemas = {
     session: enduranceSessionSchema.optional(),
     training_context: trainingContextSchema.optional(),
     recorded_running_metrics: recordedRunningMeasurementsSchema.optional(),
+    user_context: openObject.nullable().optional(),
+    view: currentContextViewSchema.optional(),
   }),
   coach_profile: z.object({
     available: z.boolean(),
