@@ -91,29 +91,39 @@ def _valid_activity(activity):
 
 @contextmanager
 def provider_diagnostics(client):
-    """Count SDK connectapi invocations, including SDK activity pagination.
-
-    SDK/HTTP internal retries and login requests are outside this counter.
-    Never record URLs, parameters, source bodies or exception messages.
-    """
-    stats = {"garmin_api_calls": 0, "garmin_api_errors": 0}
-    original = client.connectapi
-
-    def counted(*args, **kwargs):
-        stats["garmin_api_calls"] += 1
+    """Measure selected source boundaries without URLs, arguments or bodies."""
+    from .sources.provider_capabilities import capabilities_for
+    stats={"garmin_api_calls":0,"garmin_api_errors":0}
+    began=time.perf_counter()
+    if capabilities_for(client)["provider"]=="personal":
+        before=dict(client.metrics)
         try:
-            return original(*args, **kwargs)
+            yield stats
         except Exception:
-            stats["garmin_api_errors"] += 1
+            stats["garmin_api_errors"]+=1
             raise
-
-    client.connectapi = counted
-    began = time.perf_counter()
+        finally:
+            stats["garmin_api_calls"]=client.metrics["fitness_http_attempts"]-before["fitness_http_attempts"]
+            for key in ("auth_http_attempts","identity_http_attempts","body_bytes"):
+                stats[key]=client.metrics[key]-before[key]
+            stats["measurement_basis"]="personal_http_attempts"
+            stats["elapsed_ms"]=round((time.perf_counter()-began)*1000)
+        return
+    # Legacy counter semantics remain SDK connectapi calls, excluding login.
+    original=client.connectapi
+    def counted(*args,**kwargs):
+        stats["garmin_api_calls"]+=1
+        try:
+            return original(*args,**kwargs)
+        except Exception:
+            stats["garmin_api_errors"]+=1
+            raise
+    client.connectapi=counted
     try:
         yield stats
     finally:
-        client.connectapi = original
-        stats["elapsed_ms"] = round((time.perf_counter() - began) * 1000)
+        client.connectapi=original
+        stats["elapsed_ms"]=round((time.perf_counter()-began)*1000)
 
 
 def run(data_dir="data", *, store=None, client=None, now=None, force_reconcile=False,

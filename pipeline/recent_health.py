@@ -27,11 +27,20 @@ def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
         raise ValueError("Choose sleep/HRV and a 1-14 day overlap")
     store = store or R2Store()
     garmin = garmin or _login()
+    from .sources.provider_capabilities import capabilities_for
+    supported = capabilities_for(garmin)
     end = today or date.today()
     results = {}
     all_records = {}
     validation_rejections = []
     for stream in selected:
+        if stream == "sleep" and not supported["sleep_stages"]:
+            results[stream] = {"status": "unsupported", "days_checked": 0, "days_ready": 0,
+                               "days_not_ready": 0, "source_errors": 0, "objects_written": 0,
+                               "objects_unchanged": 0, "checkpoints_written": 0,
+                               "months_written": 0, "months_unchanged": 0}
+            all_records[stream] = []
+            continue
         records = []
         failures = 0
         not_ready = 0

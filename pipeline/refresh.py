@@ -103,7 +103,12 @@ class RefreshRequest:
 class MeasuredGarmin:
     """Lazy shared login; count connectapi attempts, without logging arguments."""
     def __init__(self, login):
-        self.login = login
+        if login is _login:
+            from .sources.provider_config import selection
+            chosen = selection(os.environ)
+            self.login = lambda: login(chosen=chosen)
+        else:
+            self.login = login
         self.client = None
         self.calls = self.errors = 0
         self.available = False
@@ -203,8 +208,9 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
         elif kind == "recent-health-sync":
             report["health_validation_rejections"] = result.get("health_validation_rejections", [])
             for stream, value in result["streams"].items():
-                checked = value["source_errors"] == 0
-                add(stream, checked, "failed" if not checked else
+                unsupported = value.get("status") == "unsupported"
+                checked = not unsupported and value["source_errors"] == 0
+                add(stream, checked, "not_checked" if unsupported else "failed" if not checked else
                     "not_ready" if value["days_not_ready"] else "checked")
         elif kind == "recent-body-sync":
             checked = result["days_checked"] > 0 and result["source_errors"] == 0
@@ -240,7 +246,7 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
             result = operation(store)
             source_checks(result)
             if isinstance(result, dict) and result.get("status") in {
-                    "partial", "pending", "idle", "files_unavailable", "coach_pending"}:
+                    "partial", "pending", "idle", "files_unavailable", "coach_pending", "unsupported"}:
                 entry["status"] = result["status"] if result["status"] in {"partial", "pending", "idle"} else "partial"
                 if entry["status"] in {"partial", "pending"}:
                     report["status"] = "partial"

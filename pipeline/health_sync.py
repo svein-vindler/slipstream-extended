@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 from .granular import HrvResponseError, gzip_json, json_bytes, normalize_hrv, sha256
@@ -33,7 +33,7 @@ def _validate_body_dates(item: dict[str, Any], day: str) -> None:
             try:
                 if timestamp is None or timestamp <= 0:
                     raise ValueError("Invalid epoch date")
-                datetime.fromtimestamp(timestamp, timezone.utc)
+                datetime.fromtimestamp(timestamp, UTC)
             except (ValueError, OverflowError, OSError) as exc:
                 raise HealthNotReady("invalid_response") from exc
         elif str(value)[:10] != day:
@@ -92,7 +92,7 @@ def _body_day(day: str, raw: dict[str, Any]) -> dict[str, Any]:
             if isinstance(value, str) and _number(value) is None and "T" not in value and " " not in value:
                 raise HealthNotReady("invalid_response")
             try:
-                instant = datetime.fromtimestamp(timestamp, timezone.utc)
+                instant = datetime.fromtimestamp(timestamp, UTC)
                 local_day = (datetime.fromisoformat(value.replace("Z", "+00:00")).date().isoformat()
                              if isinstance(value, str) and _number(value) is None else instant.date().isoformat())
             except (ValueError, OverflowError, OSError) as exc:
@@ -164,8 +164,12 @@ def normalize_day(stream: str, day: str, raw: Any) -> dict[str, Any]:
 
 def store_day(store, stream: str, day: str, raw: Any) -> dict[str, Any]:
     payload = normalize_day(stream, day, raw)
-    data = gzip_json(payload)
     key = f"{ROOTS[stream]}/{day[:4]}/{day[5:7]}/{day}.json"
+    source = raw.get("_slipstream_source")
+    if stream == "hrv" and isinstance(source, dict) and source.get("provider") in {"legacy", "personal"}:
+        from .provider_retention import preserve_provider_hrv
+        payload = preserve_provider_hrv(store, key, day, payload, source["provider"])
+    data = gzip_json(payload)
     write = getattr(store, "put_if_changed", None)
     if callable(write):
         written = bool(write(key, data, "application/json", encoding="gzip"))
@@ -173,7 +177,7 @@ def store_day(store, stream: str, day: str, raw: Any) -> dict[str, Any]:
         store.put(key, data, "application/json", encoding="gzip")
         written = True
     return {"date": day, "source_key": key, "source_sha256": sha256(data),
-            "checked_at": datetime.now(timezone.utc).isoformat(), "written": written}
+            "checked_at": datetime.now(UTC).isoformat(), "written": written}
 
 
 def finalize_days(store, stream: str, records: list[dict[str, Any]]) -> dict[str, Any]:

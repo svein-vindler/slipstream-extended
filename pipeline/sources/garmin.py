@@ -7,38 +7,51 @@ stored. Mint the token once with scripts/garmin_login.py.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
-from ..schema import Activity, activity_local_date, activity_metric, activity_text, canonical_sport
-from .garmin_readonly import ReadOnlyGarmin
+from ..schema import (
+    Activity,
+    activity_local_date,
+    activity_metric,
+    activity_text,
+    canonical_sport,
+)
 
 
-def _login():
+def _login(*, env=None, chosen=None):
+    # Freeze the choice once; only the selected credential source is read.
+    from .provider_config import ProviderSelection, selection
+    chosen = selection(os.environ if env is None else env) if chosen is None else chosen
+    if not isinstance(chosen, ProviderSelection) or chosen.provider not in {"legacy", "personal"}:
+        raise ValueError("Invalid Garmin provider selection.")
+    credential = chosen.credential()
+    if chosen.provider == "personal":
+        from .garmin_personal import PersonalGarmin
+        return PersonalGarmin(credential, expected_account=chosen.account)
+
     from garminconnect import Garmin
 
-    tokens = os.environ.get("GARMINTOKENS")
-    token_file = os.environ.get("GARMINTOKENS_FILE")
-    if not tokens and token_file:
-        tokens = Path(token_file).read_text(encoding="utf-8").strip()
-    if tokens:
-        g = Garmin()
-        read_only = ReadOnlyGarmin(g)  # Install the policy before any API request.
-        g.login(tokens)  # >512-char arg is treated as token data, not a path
-        return read_only
-    raise RuntimeError(
-        "Garmin: no session token. Run scripts/garmin_login.py once to mint "
-        "GARMINTOKENS, or set GARMINTOKENS_FILE to a local token file "
-        "(handles MFA; no password stored)."
-    )
+    from .garmin_readonly import ReadOnlyGarmin
+
+    g = Garmin()
+    read_only = ReadOnlyGarmin(g, track_provider=chosen.account is not None)  # Install the policy before any API request.
+    g.login(credential)
+    if chosen.account is not None and g.display_name != chosen.account:
+        raise ValueError("Garmin account does not match GARMIN_ACCOUNT.")
+    return read_only
 
 
 def _parse_start(raw: dict) -> datetime | None:
-    s = raw.get("startTimeGMT")  # "2024-08-18 13:00:00" in UTC
-    if not s:
+    # GMT is an explicit source clock; a naive local timestamp is never used here.
+    value = raw.get("startTimeGMT")
+    if not isinstance(value, str) or not ("T" in value or " " in value):
         return None
     try:
-        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if instant.tzinfo is None:
+            instant = instant.replace(tzinfo=UTC)
+        return instant.astimezone(UTC)
     except ValueError:
         return None
 

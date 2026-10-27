@@ -35,7 +35,7 @@ console.log(JSON.stringify({{count: rows.length, name: rows[0].name,
 """
     process = subprocess.run(
         [node, "--experimental-strip-types", "--input-type=module", "-e", code,
-         str(tmp_path / "activities.csv")], capture_output=True, text=True, check=True,
+         str(tmp_path / "activities.csv")], capture_output=True, text=True, encoding="utf-8", check=True,
     )
     result = json.loads(process.stdout)
     assert result["count"] == 1

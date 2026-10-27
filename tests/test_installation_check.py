@@ -18,9 +18,17 @@ def test_online_checks_are_read_only_and_report_has_no_account_values(tmp_path, 
     (tmp_path / "worker/node_modules/wrangler/bin/wrangler.js").touch()
     monkeypatch.setattr("scripts.check_installation.shutil.which", lambda name: name)
     monkeypatch.setattr("scripts.check_installation.importlib.util.find_spec", lambda name: True)
+    # Keep synthetic downloads in the test-owned filesystem fixture.
+    from contextlib import contextmanager
+    @contextmanager
+    def temporary_directory(**kwargs):
+        yield str(tmp_path)
+    monkeypatch.setattr("scripts.check_installation.tempfile.TemporaryDirectory", temporary_directory)
     commands = []
     def execute(args, **kwargs):
         commands.append(args)
+        if any(str(arg).endswith("/actions/variables") for arg in args):
+            return b'{"variables":[]}'
         if "whoami" in args:
             return b'{"accounts":[{"id":"private-account"}]}'
         if "secret" in args:
@@ -36,7 +44,7 @@ def test_online_checks_are_read_only_and_report_has_no_account_values(tmp_path, 
             raise HTTPError("https://synthetic.example/mcp", 401, "denied", {}, None)
     report = check(online=True, repo="synthetic/example", worker_url="https://synthetic.example",
                    root=tmp_path, execute=execute, opener=Opener())
-    assert report["ready_for_authenticated_client_test"] is True
+    assert report["ready_for_authenticated_client_test"] is True, [r for r in report["checks"] if r["status"] != "passed"]
     assert all(not set(args) & {"put", "delete", "deploy", "create", "enable", "disable"} for args in commands)
     serialized = json.dumps(report)
     assert all(value not in serialized for value in ("private-account", "private-fitness-value", "synthetic/example", "synthetic.example"))

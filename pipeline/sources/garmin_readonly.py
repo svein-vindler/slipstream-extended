@@ -295,11 +295,32 @@ def _install_transport_policy(sdk):
 
 class ReadOnlyGarmin:
     """Expose only explicitly reviewed reads, with no runtime opt-out flag."""
-    __slots__ = ("__sdk", "__readiness", "__stress")
+    __slots__ = ("__readiness", "__sdk", "__stress", "__track_provider")
 
-    def __init__(self, sdk):
+    def __init__(self, sdk, *, track_provider=False):
         self.__readiness, self.__stress = _install_transport_policy(sdk)
         self.__sdk = sdk
+        self.__track_provider = bool(track_provider)
+
+
+    @property
+    def provider(self):
+        return "legacy"
+
+    @property
+    def account_identity(self):
+        value = self.__sdk.display_name
+        if not isinstance(value, str) or not value:
+            raise ValueError("Garmin account identity is unavailable.")
+        return value
+
+    def get_hrv_data(self, cdate):
+        _valid_day(cdate)
+        value = self.__sdk.get_hrv_data(cdate)
+        if self.__track_provider and isinstance(value, dict):
+            return {**value, "_slipstream_source": {"provider": "legacy", "adapter_version": 1,
+                                                   "operation": "hrv_day"}}
+        return value
 
     def get_training_readiness_bounded(self, cdate):
         """Fixed bounded GET; <=1 fitness send, zero auth/refresh/replay."""

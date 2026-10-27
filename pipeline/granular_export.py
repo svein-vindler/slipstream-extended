@@ -110,6 +110,11 @@ def export_activity(
         "required_keys": list(required),
         "files": [],
     }
+    from .sources.provider_capabilities import capabilities_for
+    if not capabilities_for(garmin)["activity_detail"]:
+        record.update(status="unsupported", unsupported_features=["full_activity_import"])
+        return record
+
     if not force and existing_keys is not None and all(key in known for key in required):
         record["status"] = "already_complete"
         return record

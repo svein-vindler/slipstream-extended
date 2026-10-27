@@ -203,6 +203,9 @@ def apply(
         raise ValueError(f"max_objects must be between 1 and {MAX_APPLY_OBJECTS}")
     if not 0 <= request_pause <= 10:
         raise ValueError("request_pause must be between 0 and 10")
+    from .sources.provider_capabilities import capabilities_for
+    if not capabilities_for(garmin)["local_clock_repair"]:
+        raise ValueError("Historical local clock repair is unsupported by this provider.")
     backup_dir.mkdir(parents=True, exist_ok=True)
     state_path = backup_dir / "skipped.json"
     skipped_state = skipped_state if skipped_state is not None else _load_skips(state_path)

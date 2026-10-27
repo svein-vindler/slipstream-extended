@@ -34,7 +34,13 @@ def command(args, cwd=ROOT):
 
 
 def check(*, online=False, repo=None, worker_url=None, bucket="slipstream-data",
-          root=ROOT, execute=command, opener=None):
+          root=ROOT, execute=command, opener=None, garmin_provider=None):
+    # Support the documented direct script entry point.
+    sys.path.insert(0, str(ROOT))
+    from pipeline.sources.provider_capabilities import capabilities
+    if garmin_provider is not None:
+        capabilities(garmin_provider)
+    selected_provider = garmin_provider or "legacy"
     if repo and not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
         raise ValueError("Repository must use owner/name")
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", bucket):
@@ -70,11 +76,33 @@ def check(*, online=False, repo=None, worker_url=None, bucket="slipstream-data",
         step("cloudflare_login", lambda: bool(json.loads(wr("whoami", "--json")).get("accounts")),
              "Sign in with the project-local Wrangler and confirm the intended account.", "2-enable-and-create-cloudflare-r2")
         if repo:
+            selected_provider = None
+            def repository_provider():
+                nonlocal selected_provider
+                value = json.loads(execute(["gh", "api", f"repos/{repo}/actions/variables"], cwd=root))
+                values = value.get("variables") if isinstance(value, dict) else None
+                if not isinstance(values, list):
+                    raise ValueError("Cannot verify the repository Garmin source.")
+                modes = [row.get("value") for row in values
+                         if isinstance(row, dict) and row.get("name") == "GARMIN_PROVIDER"]
+                if len(modes) > 1:
+                    raise ValueError("Conflicting repository Garmin source settings.")
+                mode = modes[0] if modes else "legacy"
+                capabilities(mode)
+                if garmin_provider is not None and mode != garmin_provider:
+                    return False
+                selected_provider = mode
+                return True
+            step("garmin_provider", repository_provider,
+                 "Check GARMIN_PROVIDER in repository variables against the intended connection.", "4-choose-the-garmin-connection")
             def github_secrets():
                 value = json.loads(execute(["gh", "api", f"repos/{repo}/actions/secrets", "--jq", "[.secrets[].name]"], cwd=root))
-                return {"GARMINTOKENS", "CLOUDFLARE_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"} <= set(value)
+                if selected_provider is None:
+                    return False
+                source_secrets = ({"GARMIN_PERSONAL_API_KEY", "GARMIN_ACCOUNT"} if selected_provider == "personal" else {"GARMINTOKENS"})
+                return source_secrets | {"CLOUDFLARE_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"} <= set(value)
             step("github_secrets", github_secrets,
-                 "Add only the documented restricted R2 credentials and Garmin session secret.", "3-create-restricted-r2-credentials-for-github-actions")
+                 "Add the selected Garmin connection secrets and documented restricted R2 credentials.", "4-choose-the-garmin-connection")
             step("refresh_workflow", lambda: json.loads(execute(
                 ["gh", "api", f"repos/{repo}/actions/workflows/refresh.yml"], cwd=root))["state"] == "active",
                 "Enable Actions and the refresh workflow in your own installation repository.", "5-seed-summaries-and-detailed-data")
@@ -112,6 +140,8 @@ def check(*, online=False, repo=None, worker_url=None, bucket="slipstream-data",
                      "next_action": "Rerun with --online, --repo owner/name and --worker-url after local preparation.", "guide": GUIDE})
     pending = next((row for row in rows if row["status"] != "passed"), None)
     return {"schema_version": 1, "kind": "installation-check", "checks": rows,
+            "garmin_provider": selected_provider,
+            "garmin_capabilities": capabilities(selected_provider) if selected_provider is not None else None,
             "next_step": pending["step"] if pending else "authenticated_client_validation",
             "client_checks": ["Connect through Managed OAuth and call data_status and health_status.",
                               "Call coach_profile to check effective profiles; create one if absent, then check coach_input."],
@@ -122,12 +152,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--online", action="store_true", help="Read cloud metadata and stored objects; never write")
     parser.add_argument("--repo")
+    parser.add_argument("--garmin-provider", choices=("legacy", "personal"),
+                        help="Expected Garmin source; online checks verify the repository choice.")
     parser.add_argument("--worker-url")
     parser.add_argument("--bucket", default="slipstream-data")
     parser.add_argument("--report", type=Path, default=ROOT / ".granular/installation-check.json")
     args = parser.parse_args()
     try:
-        report = check(online=args.online, repo=args.repo, worker_url=args.worker_url, bucket=args.bucket)
+        report = check(online=args.online, repo=args.repo, worker_url=args.worker_url, bucket=args.bucket, garmin_provider=args.garmin_provider)
     except ValueError as error:
         parser.error(str(error))
     args.report.parent.mkdir(parents=True, exist_ok=True)

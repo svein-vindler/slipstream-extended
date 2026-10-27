@@ -133,6 +133,12 @@ def run(
         raise ValueError(
             f"max_activities must be between 1 and {MAX_ACTIVITIES_PER_RUN}"
         )
+    from .sources.provider_capabilities import unsupported_result
+    unsupported = unsupported_result(garmin, "activity_detail")
+    if unsupported is not None:
+        log_report("activity_backfill_scheduler", unsupported)
+        return unsupported
+
     store = store or R2Store()
     progress_keys = store.list_keys("backfill/activities/")
 

@@ -113,6 +113,8 @@ def audit_paths(paths: list[str]) -> list[str]:
         parts = set(path.parts)
         lower_name = path.name.lower()
 
+        if lower_name.startswith(".garmin-provider.local.json"):
+            violations.append(f"{path}: private Garmin account binding must not be tracked")
         if path.as_posix() in FORBIDDEN_EXACT_PATHS:
             violations.append(f"{path}: private local configuration must not be tracked")
         if parts & FORBIDDEN_DIRECTORIES:

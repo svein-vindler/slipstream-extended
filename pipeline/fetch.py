@@ -29,6 +29,7 @@ def run(
 ) -> dict:
     from .sources import garmin, garmin_health
 
+    client = client if client is not None else garmin._login()
     summary: dict = {}
     if not skip_activities:
         activities = garmin.fetch(

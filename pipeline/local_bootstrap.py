@@ -12,7 +12,7 @@ import os
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,15 +26,26 @@ from .sources.garmin import _login
 PHASES = ("activity", "hrv", "health", "coach")
 DEFAULT_PHASES = ("activity", "hrv", "health")
 GARMIN_PHASES = frozenset({"activity", "hrv", "health"})
-TERMINAL_STATUSES = frozenset({"complete", "complete_with_blocked"})
+TERMINAL_STATUSES = frozenset({"complete", "complete_with_blocked", "unsupported"})
 
 
 class LazyGarmin:
     """Log in once, and only if an incomplete phase actually needs Garmin."""
 
     def __init__(self, login: Callable[[], Any] = _login):
-        self._login = login
+        if login is _login:
+            from .sources.provider_config import selection
+            chosen = selection(os.environ)
+            self._login = lambda: login(chosen=chosen)
+            self._provider = chosen.provider
+        else:
+            self._login = login
+            self._provider = "legacy"
         self._client = None
+
+    @property
+    def provider(self):
+        return self._provider
 
     def __getattr__(self, name: str):
         if self._client is None:
@@ -63,33 +74,35 @@ def load_env_file(path: Path) -> None:
 
 
 def prepare_environment(env_file: Path, token_file: Path | None = None) -> None:
+    from .sources.provider_config import selection
+
     load_env_file(env_file)
-    configured_token = token_file or (
-        Path(os.environ["GARMINTOKENS_FILE"])
-        if os.environ.get("GARMINTOKENS_FILE")
-        else None
-    )
-    if configured_token and not configured_token.is_absolute():
-        configured_token = env_file.parent / configured_token
-    if configured_token and "GARMINTOKENS" not in os.environ:
-        try:
-            os.environ["GARMINTOKENS"] = configured_token.read_text(
-                encoding="utf-8"
-            ).strip()
-        except FileNotFoundError as exc:
-            raise ValueError(
-                f"Garmin token file does not exist: {configured_token}"
-            ) from exc
+    if os.environ.get("GARMIN_PROVIDER_FILE"):
+        settings_path = Path(os.environ["GARMIN_PROVIDER_FILE"])
+        if not settings_path.is_absolute():
+            os.environ["GARMIN_PROVIDER_FILE"] = str(env_file.parent / settings_path)
+    chosen = selection(os.environ)
+    if token_file is not None and chosen.provider != "legacy":
+        raise ValueError("--token-file is only for the legacy Garmin provider.")
+    name = chosen.credential_name
+    configured = token_file or (Path(os.environ[name + "_FILE"])
+                                if os.environ.get(name + "_FILE") else None)
+    if configured and not configured.is_absolute():
+        configured = env_file.parent / configured
+    if configured and not os.environ.get(name):
+        os.environ[name + "_FILE"] = str(configured)
+        os.environ[name] = selection(os.environ).credential()
+        # Process-local normalization: no persistent file or global setting changes.
+        os.environ.pop(name + "_FILE", None)
 
 
 def validate_environment(phases: tuple[str, ...]) -> None:
-    required = {
-        "CLOUDFLARE_ACCOUNT_ID",
-        "R2_ACCESS_KEY_ID",
-        "R2_SECRET_ACCESS_KEY",
-    }
+    required = {"CLOUDFLARE_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"}
     if GARMIN_PHASES.intersection(phases):
-        required.add("GARMINTOKENS")
+        from .sources.provider_config import selection
+        chosen = selection(os.environ)
+        if not os.environ.get(chosen.credential_name + "_FILE"):
+            required.add(chosen.credential_name)
     missing = sorted(name for name in required if not os.environ.get(name))
     if missing:
         raise ValueError("Missing required local secrets: " + ", ".join(missing))
@@ -118,6 +131,8 @@ def all_phases_terminal(
 def compact_result(name: str, result: dict[str, Any]) -> dict[str, Any]:
     fields = (
         "status",
+        "garmin_provider",
+        "unsupported_features",
         "total_days",
         "complete_days",
         "remaining_days",
@@ -289,7 +304,7 @@ def run_local_bootstrap(
         payload: dict[str, Any] = {
             "schema_version": 1,
             "status": status,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
             "cycles": cycles,
             "phases": list(phases),
             "results": {
@@ -319,7 +334,13 @@ def run_local_bootstrap(
                 print(json.dumps(payload, indent=2, ensure_ascii=False), flush=True)
 
                 if all_phases_terminal(phases, latest):
-                    reason = "complete"
+                    unsupported = any(
+                        result.get("status") == "unsupported"
+                        or any(isinstance(value, dict) and value.get("status") == "unsupported"
+                               for value in result.values())
+                        for result in latest.values()
+                    )
+                    reason = "complete_with_unsupported" if unsupported else "complete"
                     break
                 if max_cycles and cycles >= max_cycles:
                     reason = "cycle_limit"

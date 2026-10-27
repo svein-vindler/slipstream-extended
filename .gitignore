@@ -33,3 +33,6 @@ garmin_tokens*.txt
 # Runtime summary files are restored from and written back to private R2.
 data/activities.csv
 data/health_daily.csv
+
+# Private same-account source choice, lock and atomic staging files
+.garmin-provider.local.json*

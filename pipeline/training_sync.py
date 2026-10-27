@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from botocore.exceptions import ClientError
 
@@ -27,6 +27,12 @@ def run(*, store=None, garmin=None, config=None, env=None, now=None):
               "provider_body_bytes": 0, "day_read_bytes": 0, "day_write_bytes": 0}
     if config["status"] != "enabled":
         return result
+    from .sources.provider_capabilities import unsupported_result
+    unsupported = unsupported_result(garmin, "training_readiness")
+    if unsupported is not None:
+        result.update(unsupported)
+        return result
+
     key = day_key(config["date"])
     previous = None
     read_before = getattr(store, "bounded_read_bytes", None)
@@ -62,7 +68,7 @@ def run(*, store=None, garmin=None, config=None, env=None, now=None):
                   component_auth_http_attempts=read.metrics["component_auth_http_attempts"],
                   provider_body_bytes=read.metrics["body_bytes"], provider_elapsed_ms=read.metrics["elapsed_ms"])
     status, devices = read.status, []
-    checked = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    checked = (now or datetime.now(UTC)).astimezone(UTC).isoformat()
     if status == "available":
         try:
             devices, status = normalize(read.payload, config, checked)

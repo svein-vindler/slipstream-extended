@@ -81,6 +81,11 @@ def _channel(day: str, name: str, raw: Any) -> dict[str, Any]:
                   readings=readings, missing_value_count=missing_values,
                   quality_flags=["missing_values"] if missing_values else [],
                   source_sha256=sha256(json_bytes({"date": day, field: values})))
+    source = raw.get("_slipstream_source")
+    if isinstance(source, dict) and source.get("provider") == "personal":
+        result["source_provider"] = "personal"
+        result["source_sampling"] = source.get("sampling", "resolution_unverified")
+        result["quality_flags"] = list(dict.fromkeys([*result["quality_flags"], "source_completeness_unknown"]))
     return result
 
 

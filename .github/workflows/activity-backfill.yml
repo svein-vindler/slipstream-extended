@@ -34,7 +34,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      GARMINTOKENS: ${{ secrets.GARMINTOKENS }}
+      GARMIN_PROVIDER: ${{ vars.GARMIN_PROVIDER || 'legacy' }}
+      GARMIN_ACCOUNT: ${{ secrets.GARMIN_ACCOUNT }}
+      GARMINTOKENS: ${{ (vars.GARMIN_PROVIDER == '' || vars.GARMIN_PROVIDER == 'legacy') && secrets.GARMINTOKENS || '' }}
+      GARMIN_PERSONAL_API_KEY: ${{ vars.GARMIN_PROVIDER == 'personal' && secrets.GARMIN_PERSONAL_API_KEY || '' }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
