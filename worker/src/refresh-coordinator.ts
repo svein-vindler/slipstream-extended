@@ -288,6 +288,30 @@ export class RefreshCoordinator extends DurableObject<Env> {
     return { acquired: true, token, remaining: dailyLimit - used - 1 };
   }
 
+  /** A date-scoped pending append has no expiry while a delayed PUT can arrive. */
+  reserveNightContextWrite(wakeDate: string): RefreshLease {
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(wakeDate) ? new Date(`${wakeDate}T00:00:00Z`) : null;
+    if (!date || !Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== wakeDate
+      || wakeDate.startsWith("0000")) throw new Error("Invalid night context reservation.");
+    return this.ctx.storage.transactionSync(() => {
+      const key = `mcp-night-context-pending:${wakeDate}`;
+      if (this.ctx.storage.sql.exec("SELECT token FROM refresh_leases WHERE lease_key = ?", key).toArray().length) {
+        return { acquired: false };
+      }
+      const token = crypto.randomUUID();
+      this.ctx.storage.sql.exec("INSERT INTO refresh_leases (lease_key, token, expires_at) VALUES (?, ?, ?)",
+        key, token, Number.MAX_SAFE_INTEGER);
+      return { acquired: true, token };
+    });
+  }
+
+  finishNightContextWrite(wakeDate: string, token: string): { released: boolean } {
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(wakeDate) ? new Date(`${wakeDate}T00:00:00Z`) : null;
+    if (!date || !Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== wakeDate
+      || wakeDate.startsWith("0000") || !token) throw new Error("Invalid night context completion.");
+    return this.release(`mcp-night-context-pending:${wakeDate}`, token);
+  }
+
   /** A pending R2 append cannot expire while its delayed PUT can still arrive. */
   reserveActivityContextWrite(activityId: string): RefreshLease {
     if (!/^\d{1,20}$/.test(activityId)) throw new Error("Invalid context reservation.");

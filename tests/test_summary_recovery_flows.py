@@ -616,3 +616,38 @@ def test_each_source_receipt_cut_retains_the_commit_and_next_cold_normal_run(sce
     assert result["status"] != "failed"
     summary_restore.restore_summaries(str(tmp_path / "final-reader"), factory())
     assert (tmp_path / "final-reader/activities.csv").read_bytes() == (cold / "activities.csv").read_bytes()
+
+@pytest.mark.parametrize("stream", ["signals", "sleep"])
+def test_scheduled_reconciliation_scopes_unrelated_objects_but_rejects_invalid_sleep(scenario, tmp_path, stream):
+    from pipeline.health_index_reconcile import checkpoint_key
+
+    _, _, client, factory, _ = scenario
+    sdk = Garmin()
+    key = f"health/{stream}/v1/2020/10/2020-10-01.json"
+    malformed = b"synthetic invalid JSON to preserve"
+    client.objects[key] = {"Body": malformed}
+    target = tmp_path / "scoped-scheduled"
+
+    def operation():
+        return refresh.run(refresh.RefreshRequest(scheduled=True), data_dir=str(target),
+                           store_factory=factory, login=lambda: sdk)
+
+    if stream == "sleep":
+        with pytest.raises(RuntimeError, match="Health index reconciliation is incomplete"):
+            operation()
+        assert checkpoint_key("sleep") not in client.objects
+    else:
+        result = operation()
+        assert next(stage for stage in result["stages"] if stage["stage"] == "health_indexes")["status"] == "complete"
+        # A successful stored-index scan cannot turn the incomplete provider
+        # responses from this summary-only SDK fixture into fresh health data.
+        assert result["status"] == "partial"
+        assert sorted((check["scope"], check["checked"], check["outcome"])
+                      for check in result["source_checks"] if check["scope"] in {"sleep", "hrv"}) == [
+            ("hrv", False, "failed"), ("sleep", False, "failed")]
+        assert checkpoint_key("sleep") in client.objects
+    assert client.objects[key]["Body"] == malformed
+    reader = tmp_path / "common-reader"
+    summary_restore.restore_summaries(str(reader), factory())
+    assert (reader / "activities.csv").read_bytes() == (target / "activities.csv").read_bytes()
+    assert (reader / "health_daily.csv").read_bytes() == (target / "health_daily.csv").read_bytes()

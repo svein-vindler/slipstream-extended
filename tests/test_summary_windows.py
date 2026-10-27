@@ -43,7 +43,8 @@ def test_first_reconciles_repeat_is_recent_and_retains_original_summary_bytes(en
     assert second["provider_diagnostics"]["garmin_api_calls"] == 19
     assert second["windows"]["activities"]["calendar_days"] == 8
     assert second["windows"]["health"]["calendar_days"] == 3
-    assert storage.counts["get"] == 13 and storage.counts["head"] == 0 and storage.counts["list"] == 1
+    # Three prior daily signal reads preserve existing channels; repeat adds no signal PUTs.
+    assert storage.counts["get"] == 16 and storage.counts["head"] == 0 and storage.counts["list"] == 1
     assert storage.writes == [checkpoint_key(s, False) for s in ("activities", "health")]
     assert all(p.read_bytes() == originals[p.name] for p in root.glob("*.csv"))
     assert all(check(storage, s) == old_checks[s] for s in old_checks)

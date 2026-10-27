@@ -355,9 +355,32 @@ function beforeAllSportsContext(tool: ToolContract): ToolContract {
   return previous;
 }
 
+// Project only this explicitly reviewed additive night-data contract back to
+// the historical catalog. Unrelated registrations remain byte-pinned below.
+function beforeNightSignals(tool: ToolContract): ToolContract {
+  const added = new Set(["actual_night_timezone", "configured_timezone", "configured_projection", "source_time", "time_quality_flags", "time_basis", "timestamp_field", "timestamp_unit", "night_context_source_time", "user_context_scope", "user_context_limited", "user_context_resolution", "user_context_resources"]);
+  function previous(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(previous);
+    if (!value || typeof value !== "object") return value;
+    const schema = value as Record<string, unknown>;
+    const properties = schema.properties && typeof schema.properties === "object"
+      ? schema.properties as Record<string, unknown> : {};
+    const night = (Object.hasOwn(properties, "wake_date") && Object.hasOwn(properties, "night_of"))
+      || (Object.hasOwn(properties, "sleep_night") && Object.hasOwn(properties, "hrv_night"));
+    const removed = new Set([...added, ...(night ? ["user_context", "view", "resources"] : [])]);
+    return Object.fromEntries(Object.entries(schema).map(([key, child]) => {
+      if (key === "properties" && child && typeof child === "object")
+        return [key, Object.fromEntries(Object.entries(child).filter(([name]) => !removed.has(name)).map(([name, field]) => [name, previous(field)]))];
+      if (key === "required" && Array.isArray(child)) return [key, child.filter(name => !removed.has(name))];
+      if (key === "enum" && Array.isArray(child)) return [key, child.filter(name => name !== "actual_night_timezone")];
+      return [key, previous(child)];
+    }));
+  }
+  return { ...tool, outputSchema: previous(tool.outputSchema) as Record<string, unknown> };
+}
 it.each([false, true])("preserves catalog bytes apart from reviewed SDK provenance and D4 metric leaves with writes=%s", async writes => {
   const tools = structuredClone(modes.find(mode => mode.writes === writes && mode.refresh)!.tools)
-    .map(beforeAllSportsContext).map(beforeGarminSdkUpgrade).map(beforeExplicitInspection);
+    .filter(tool => !["night_signals", "night_signals_history", "night_context_history", "add_night_context", "night_baseline", "night_training_history"].includes(tool.name)).map(beforeNightSignals).map(beforeAllSportsContext).map(beforeGarminSdkUpgrade).map(beforeExplicitInspection);
   const schema = requireTool(tools, "strength_session").outputSchema as {
     properties: { session: { properties: { sets: { items: { properties: Record<string, unknown> } } } } };
   };
@@ -384,7 +407,7 @@ it.each([false, true])("preserves previous contracts apart from reviewed optiona
         .map(([name, item]) => [name, previousSchema(item)]))];
     }));
   }
-  const tools = modes.find(mode => mode.writes === writes && mode.refresh)!.tools.map(beforeAllSportsContext).map(beforeExplicitInspection)
+  const tools = modes.find(mode => mode.writes === writes && mode.refresh)!.tools.filter(tool => !["night_signals", "night_signals_history", "night_context_history", "add_night_context", "night_baseline", "night_training_history"].includes(tool.name)).map(beforeNightSignals).map(beforeAllSportsContext).map(beforeExplicitInspection)
     .filter(tool => tool.name !== "training_history") // Worker 07's one additive read tool.
     .map(tool => {
       // Only these two reviewed detail outputs/descriptions change in Worker 06.
@@ -426,7 +449,7 @@ it.each([false, true])("preserves previous contracts apart from reviewed optiona
 });
 
 it("matches the deterministic catalog from all actual registration modes", async () => {
-  expect(modes.map(mode => mode.tools.length)).toEqual([20, 24, 22, 26]);
+  expect(modes.map(mode => mode.tools.length)).toEqual([25, 29, 28, 32]);
   const rendered = renderCatalog(modes);
   expect(renderCatalog([...modes].reverse().map(mode => ({ ...mode, tools: [...mode.tools].reverse() })))).toBe(rendered);
   await expect(rendered).toMatchFileSnapshot("../../docs/TOOL_CATALOG.md");

@@ -1,3 +1,4 @@
+import { hrvTimeProvenanceSchema } from "./detail-projection";
 import { ApplicationToolError } from "./application-errors";
 import { healthHistoryIndexKey } from "./lib";
 import { nightContext } from "./night-context";
@@ -15,7 +16,7 @@ export type HistoryIndexState =
   | "index_only";
 
 const DAY_MS = 86_400_000;
-export const HEALTH_HISTORY_BUILDER_REVISION = 2;
+export const HEALTH_HISTORY_BUILDER_REVISION = 3;
 
 function parseDate(value: string): Date {
   const parsed = new Date(`${value}T00:00:00Z`);
@@ -132,6 +133,30 @@ export function timestampSeconds(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed / 1000 : null;
 }
 
+/** Only documented absolute instants belong in a time-dependent HRV metric. */
+function hrvTimestampSeconds(reading: Record<string, unknown>): number | null {
+  const value = reading.timestamp;
+  const raw = asRecord(reading.raw);
+  if (reading.time_basis === "local_only" || reading.time_basis === "ambiguous"
+    || reading.timestamp_field === "readingTimeLocal"
+    || String(reading.timestamp_unit ?? "").startsWith("local_wall_")) return null;
+  const explicitGmt = reading.time_basis === "utc" || reading.timestamp_field === "readingTimeGMT"
+    || (raw?.readingTimeGMT !== undefined && raw.readingTimeGMT === value);
+  if (!explicitGmt && raw?.readingTimeLocal !== undefined && raw.readingTimeLocal === value) return null;
+  if (typeof value === "number" || (typeof value === "string" && /^\d{9,13}$/.test(value.trim()))) {
+    const result = timestampSeconds(value);
+    return result !== null && result >= 0 && result < Date.UTC(2200, 0, 1) / 1000 ? result : null;
+  }
+  if (typeof value !== "string") return null;
+  const source = value.trim().replace(" ", "T");
+  const dated = /^(\d{4}-\d{2}-\d{2})T/.exec(source);
+  if (!dated) return null;
+  const calendar = new Date(`${dated[1]}T00:00:00Z`);
+  if (!Number.isFinite(calendar.getTime()) || calendar.toISOString().slice(0, 10) !== dated[1]) return null;
+  const zoned = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(source);
+  if (!zoned && !explicitGmt) return null;
+  return timestampSeconds(zoned ? source : `${source}Z`);
+}
 function linearSlopePerHour(points: Array<[number, number]>): number | null {
   if (points.length < 2) return null;
   const origin = points[0][0];
@@ -159,11 +184,13 @@ export function summarizeHrvPayload(day: string, value: unknown): Record<string,
   for (const raw of rawReadings) {
     const reading = asRecord(raw);
     if (!reading) continue;
-    readings.push({ timestamp: reading.timestamp ?? null, hrv_ms: reading.hrv_ms ?? null });
+    const provenance = hrvTimeProvenanceSchema.safeParse(reading);
+    if (!provenance.success) return { date: day, status: "invalid_schema" };
+    readings.push({ timestamp: reading.timestamp ?? null, hrv_ms: reading.hrv_ms ?? null, ...provenance.data });
     const hrv = normalizedNumber(reading.hrv_ms);
     if (hrv === null) continue;
     values.push(hrv);
-    const timestamp = timestampSeconds(reading.timestamp);
+    const timestamp = hrvTimestampSeconds(reading);
     if (timestamp !== null) timed.push([timestamp, hrv]);
   }
   const summary = asRecord(payload.summary) ?? {};
@@ -187,6 +214,7 @@ export function summarizeHrvPayload(day: string, value: unknown): Record<string,
     date: day,
     status: "available",
     detailed_readings_available: values.length > 0,
+    ...(typeof payload.actual_night_timezone === "string" ? { actual_night_timezone: payload.actual_night_timezone } : {}),
     sleep_start_gmt: payload.sleep_start_gmt ?? null,
     sleep_end_gmt: payload.sleep_end_gmt ?? null,
     sleep_start_garmin_local: payload.sleep_start_garmin_local ?? null,
@@ -252,6 +280,7 @@ export function summarizeSleepPayload(day: string, value: unknown): Record<strin
   return {
     date: day,
     status: "available",
+    ...(typeof payload.actual_night_timezone === "string" ? { actual_night_timezone: payload.actual_night_timezone } : {}),
     sleep_start_gmt: payload.sleep_start_gmt ?? null,
     sleep_end_gmt: payload.sleep_end_gmt ?? null,
     sleep_start_garmin_local: payload.sleep_start_garmin_local ?? null,
@@ -357,7 +386,15 @@ export function indexedHistoryRows(
     for (const raw of index.days) {
       const row = asRecord(raw);
       if (!row || typeof row.date !== "string" || !allowed.has(row.date)) continue;
-      rows.set(row.date, { ...row, index_state: "indexed" });
+      const priorTimeBasis = stream === "hrv" && index.builder_revision !== HEALTH_HISTORY_BUILDER_REVISION;
+      rows.set(row.date, {
+        ...row,
+        ...(priorTimeBasis && asRecord(row.derived) ? {
+          derived: { ...asRecord(row.derived), slope_ms_per_hour: null },
+          time_quality_flags: ["legacy_index_hrv_time_basis_unverified"],
+        } : {}),
+        index_state: "indexed",
+      });
     }
   }
   return rows;
@@ -371,7 +408,7 @@ export function indexedHistorySourceRevisions(
   for (const value of indexes) {
     const index = asRecord(value);
     if (!index || index.schema_version !== 1
-      || index.builder_revision !== HEALTH_HISTORY_BUILDER_REVISION
+      || (index.builder_revision !== 2 && index.builder_revision !== HEALTH_HISTORY_BUILDER_REVISION)
       || index.kind !== `slipstream-${stream}-month-index`) continue;
     const sources = asRecord(index.source_revisions);
     if (!sources) continue;
@@ -406,34 +443,91 @@ function statusCounts(dates: string[], rows: Map<string, Record<string, unknown>
 function withNightContext(row: Record<string, unknown>, timezone: string | null) {
   const day = typeof row.date === "string" ? row.date : "";
   const { sleep_start_garmin_local, sleep_end_garmin_local, ...publicRow } = row;
-  return {
-    ...publicRow,
-    ...nightContext(day, row.sleep_start_gmt, row.sleep_end_gmt, timezone,
-      sleep_start_garmin_local, sleep_end_garmin_local),
-  };
+  const context = nightContext(day, row.sleep_start_gmt, row.sleep_end_gmt, timezone,
+    sleep_start_garmin_local, sleep_end_garmin_local,
+    typeof row.actual_night_timezone === "string" ? row.actual_night_timezone : null);
+  const priorFlags = Array.isArray(row.time_quality_flags)
+    ? row.time_quality_flags.filter((flag): flag is string => typeof flag === "string") : [];
+  return { ...publicRow, ...context, time_quality_flags: [...new Set([...context.time_quality_flags, ...priorFlags])] };
 }
-
 function withHrvNightContext(
   row: Record<string, unknown>, timezone: string | null,
   matchingSleep?: Record<string, unknown>,
 ) {
   const own = withNightContext(row, timezone);
-  if (row.status !== "available" || own.local_time_source === "garmin_local"
-    || matchingSleep?.status !== "available") {
-    return { ...own, night_context_stream: own.local_time_source === "unavailable" ? null : "hrv" };
-  }
+  const ownResult = { ...own, night_context_stream: own.local_time_source === "unavailable" ? null : "hrv" };
+  // An explicit HRV night zone outranks every fallback. A matching sleep's
+  // explicit zone in turn outranks an HRV wall clock whose location is unknown.
+  const ownHasWindow = own.sleep_start_local !== null && own.sleep_end_local !== null
+    && !own.time_quality_flags.includes("invalid_sleep_interval");
+  if (row.status !== "available" || (own.actual_night_timezone !== null && ownHasWindow)
+    || matchingSleep?.status !== "available") return ownResult;
   const sleepContext = withNightContext(matchingSleep, timezone);
-  if (sleepContext.local_time_source !== "garmin_local") {
-    return { ...own, night_context_stream: own.local_time_source === "unavailable" ? null : "hrv" };
-  }
+  const sleepHasWindow = sleepContext.sleep_start_local !== null && sleepContext.sleep_end_local !== null
+    && !sleepContext.time_quality_flags.includes("invalid_sleep_interval");
+  const betterAuthority = own.actual_night_timezone !== null ? sleepHasWindow
+    : sleepContext.local_time_source === "actual_night_timezone"
+    || (own.local_time_source !== "garmin_local" && sleepContext.local_time_source === "garmin_local");
+  if (!betterAuthority) return ownResult;
   const context = nightContext(
     typeof row.date === "string" ? row.date : "",
     matchingSleep.sleep_start_gmt, matchingSleep.sleep_end_gmt, timezone,
     matchingSleep.sleep_start_garmin_local, matchingSleep.sleep_end_garmin_local,
+    own.actual_night_timezone ?? sleepContext.actual_night_timezone,
   );
-  return { ...own, ...context, night_context_stream: "sleep" };
+  const priorFlags = own.time_quality_flags.filter(flag =>
+    !(context.actual_night_timezone !== null && flag === "actual_timezone_unknown"));
+  return {
+    ...own, ...context,
+    // Keep the HRV's original clocks even when the displayed night uses sleep.
+    source_time: own.source_time,
+    night_context_source_time: context.source_time,
+    time_quality_flags: [...new Set([...priorFlags, ...context.time_quality_flags])],
+    night_context_stream: "sleep",
+  };
 }
-
+/** Shared daily-reader authority: validated actual zones outrank wall clocks. */
+export function selectHrvNightSource(
+  hrv: Record<string, unknown> | undefined,
+  sleep: Record<string, unknown> | undefined,
+  timezone: string | null,
+): Record<string, unknown> | undefined {
+  const own = hrv?.status === "available" ? withNightContext(hrv, timezone) : null;
+  const matching = sleep?.status === "available" ? withNightContext(sleep, timezone) : null;
+  if (own && own.actual_night_timezone !== null) {
+    const complete = (context: ReturnType<typeof withNightContext> | null) => context !== null
+      && context.sleep_start_local !== null && context.sleep_end_local !== null
+      && !context.time_quality_flags.includes("invalid_sleep_interval");
+    if (complete(own)) return hrv;
+    return complete(matching) ? sleep : hrv;
+  }
+  if (matching?.local_time_source === "actual_night_timezone") return sleep;
+  if (own?.local_time_source === "garmin_local") return hrv;
+  if (matching?.local_time_source === "garmin_local") return sleep;
+  return own && hrv?.sleep_start_gmt != null ? hrv : sleep;
+}
+/** Daily projection keeps the HRV clock and the selected display clock separate. */
+export function dailyHrvNightContext(
+  wakeDate: string,
+  hrv: Record<string, unknown> | undefined,
+  sleep: Record<string, unknown> | undefined,
+  timezone: string | null,
+) {
+  const selected = selectHrvNightSource(hrv, sleep, timezone);
+  const project = (source: Record<string, unknown> | undefined) => nightContext(wakeDate,
+    source?.sleep_start_gmt, source?.sleep_end_gmt, timezone,
+    source?.sleep_start_garmin_local, source?.sleep_end_garmin_local,
+    typeof source?.actual_night_timezone === "string" ? source.actual_night_timezone : null);
+  const own = project(hrv);
+  if (selected === hrv) return own;
+  const context = nightContext(wakeDate, selected?.sleep_start_gmt, selected?.sleep_end_gmt, timezone,
+    selected?.sleep_start_garmin_local, selected?.sleep_end_garmin_local,
+    own.actual_night_timezone ?? (typeof selected?.actual_night_timezone === "string" ? selected.actual_night_timezone : null));
+  const priorFlags = own.time_quality_flags.filter(flag =>
+    !(context.actual_night_timezone !== null && flag === "actual_timezone_unknown"));
+  return { ...context, source_time: own.source_time, night_context_source_time: context.source_time,
+    time_quality_flags: [...new Set([...priorFlags, ...context.time_quality_flags])] };
+}
 const NIGHT_WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
 function clockMinutes(timestamp: unknown): number | null {

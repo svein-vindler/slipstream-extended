@@ -3,7 +3,39 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { outputSchemas } from "../src/mcp-output";
-import contract from "./generated/source-status-contract.json";
+import contractMetadata from "./generated/source-status-contract.meta.json";
+// Await each complete fixture module separately; avoid a single large pool RPC.
+const {case_count: caseCount, ...producerMetadata} = contractMetadata;
+const contract = {...producerMetadata, cases: [
+  (await import("./generated/source-status-contract.case-00.json")).default,
+  (await import("./generated/source-status-contract.case-01.json")).default,
+  (await import("./generated/source-status-contract.case-02.json")).default,
+  (await import("./generated/source-status-contract.case-03.json")).default,
+  (await import("./generated/source-status-contract.case-04.json")).default,
+  (await import("./generated/source-status-contract.case-05.json")).default,
+  (await import("./generated/source-status-contract.case-06.json")).default,
+  (await import("./generated/source-status-contract.case-07.json")).default,
+  (await import("./generated/source-status-contract.case-08.json")).default,
+  (await import("./generated/source-status-contract.case-09.json")).default,
+  (await import("./generated/source-status-contract.case-10.json")).default,
+  (await import("./generated/source-status-contract.case-11.json")).default,
+  (await import("./generated/source-status-contract.case-12.json")).default,
+  (await import("./generated/source-status-contract.case-13.json")).default,
+  (await import("./generated/source-status-contract.case-14.json")).default,
+  (await import("./generated/source-status-contract.case-15.json")).default,
+  (await import("./generated/source-status-contract.case-16.json")).default,
+  (await import("./generated/source-status-contract.case-17.json")).default,
+  (await import("./generated/source-status-contract.case-18.json")).default,
+  (await import("./generated/source-status-contract.case-19.json")).default,
+  (await import("./generated/source-status-contract.case-20.json")).default,
+  (await import("./generated/source-status-contract.case-21.json")).default,
+  (await import("./generated/source-status-contract.case-22.json")).default,
+  (await import("./generated/source-status-contract.case-23.json")).default,
+  (await import("./generated/source-status-contract.case-24.json")).default,
+  (await import("./generated/source-status-contract.case-25.json")).default,
+  (await import("./generated/source-status-contract.case-26.json")).default,
+]};
+if (contract.cases.length !== caseCount) throw new Error("Synthetic source-status fixture case count changed");
 import { clearSummaryCaches } from "../src/r2-storage";
 import { PROTOCOL_VERSION_META_KEY, CLIENT_CAPABILITIES_META_KEY } from "@modelcontextprotocol/server";
 

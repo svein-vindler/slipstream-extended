@@ -25,7 +25,7 @@ from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2Store, missing_object
 
 SCHEMA_VERSION = 1
-BUILDER_REVISION = 2
+BUILDER_REVISION = 3
 STREAMS = ("hrv", "sleep")
 SOURCE_PREFIXES = {
     "hrv": "health/hrv/",
@@ -120,6 +120,41 @@ def _timestamp_seconds(value: Any) -> float | None:
     return parsed.timestamp()
 
 
+def _hrv_timestamp_seconds(reading: dict[str, Any]) -> float | None:
+    """Only provenance-backed UTC observations contribute to a timed statistic."""
+    timestamp = reading.get("timestamp")
+    basis = reading.get("time_basis")
+    field = reading.get("timestamp_field")
+    if basis not in {None, "utc"} or field == "readingTimeLocal":
+        return None
+    raw = reading.get("raw")
+    raw = raw if isinstance(raw, dict) else {}
+    known_gmt = field == "readingTimeGMT" or (
+        raw.get("readingTimeGMT") is not None and raw["readingTimeGMT"] == timestamp
+    )
+    if not known_gmt and raw.get("readingTimeLocal") is not None and raw["readingTimeLocal"] == timestamp:
+        return None
+    number = _number(timestamp)
+    if number is not None:
+        if 946684800 <= number <= 4102444800:
+            unit = "epoch_seconds"
+        elif 946684800000 <= number <= 4102444800000:
+            unit = "epoch_milliseconds"
+        else:
+            return None
+        if reading.get("timestamp_unit") not in {None, unit}:
+            return None
+        return _timestamp_seconds(timestamp)
+    if not isinstance(timestamp, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None and not (basis == "utc" or known_gmt):
+        return None
+    return _timestamp_seconds(timestamp)
+
 def _linear_slope_per_hour(points: list[tuple[float, float]]) -> float | None:
     if len(points) < 2:
         return None
@@ -150,7 +185,7 @@ def summarize_hrv_payload(day: str, payload: dict[str, Any]) -> dict[str, Any]:
             continue
         numeric = float(value)
         values.append(numeric)
-        timestamp = _timestamp_seconds(reading.get("timestamp"))
+        timestamp = _hrv_timestamp_seconds(reading)
         if timestamp is not None:
             timed.append((timestamp, numeric))
 

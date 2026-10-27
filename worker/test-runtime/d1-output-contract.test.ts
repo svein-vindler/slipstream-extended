@@ -122,6 +122,10 @@ beforeAll(async () => {
   jwk = { ...await exportJWK(pair.publicKey), kid: "d1-contract", alg: "RS256", use: "sig" };
 });
 beforeEach(async () => {
+  // Pin only the wall clock: repeated data reads still compare every output field.
+  // Timers and I/O remain real, so the concurrency gate retains its actual behavior.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-10-26T12:00:00.000Z"));
   clearSummaryCaches(); stored.clear(); calls.length = 0; logs.length = 0; external.length = 0; responses.length = 0;
   failedGet = undefined; gate = undefined; rpcId = 0;
   for (const method of ["error", "warn", "log", "info"] as const)
@@ -157,7 +161,7 @@ afterEach(async context => {
     for (const [key, body] of stored) expect(await (await env.SLIPSTREAM_DATA.get(key))?.text()).toBe(body);
   } finally {
     await env.SLIPSTREAM_DATA.delete([...stored.keys()]);
-    clearSummaryCaches(); vi.restoreAllMocks();
+    clearSummaryCaches(); vi.useRealTimers(); vi.restoreAllMocks();
   }
 });
 
@@ -537,10 +541,22 @@ for (const protocol of ["2026-07-28", "2025-03-26"]) {
       expect(calls.filter(call => call.operation === "head")).toHaveLength(reads > 1 ? 1 : 0);
       const lists = calls.filter(call => call.operation === "list");
       const activityDetail = tool === "strength_session" || tool === "endurance_session";
-      expect(lists).toHaveLength(activityDetail ? 1 : 0);
-      if (activityDetail) expect(lists[0]).toEqual({ operation: "list", key: "activities/2026/123/context/v1/", limit: 100 });
+      // Every detail read resolves current explicit context independently of its source.
+      expect(lists).toEqual([{ operation: "list", key: activityDetail
+        ? "activities/2026/123/context/v1/"
+        : `health/night-context/v1/${DAY.slice(0, 4)}/${DAY.slice(5, 7)}/${DAY}/`,
+      limit: activityDetail ? 100 : 101 }]);
       expect(calls.some(call => ["put", "delete"].includes(call.operation))).toBe(false);
     });
+  contractTest(`${protocol}: resolves the current request clock independently of unchanged night data`, async () => {
+    await initialize(protocol);
+    const first = success(await call(protocol, "hrv_curve", { date: DAY }), outputSchemas.hrv_curve);
+    expect(first.view).toEqual({ schema_version: 1, context_status: "not_stored",
+      context_revision: null, context_updated_at: null, resolved_at: "2026-10-26T12:00:00.000Z" });
+    vi.setSystemTime(new Date("2026-10-26T12:00:01.000Z"));
+    const later = success(await call(protocol, "hrv_curve", { date: DAY }), outputSchemas.hrv_curve);
+    expect(later).toEqual({ ...first, view: { ...first.view, resolved_at: "2026-10-26T12:00:01.000Z" } });
+  });
   contractTest(`${protocol}: isolates concurrent positive A and invalid marker B without cache mutation`, async () => {
     const bad = hrv(OTHER_DAY); bad.readings[0].hrv_ms = { private: MARKER }; await put(OTHER_HRV, bad); await initialize(protocol);
     const beforeActivities = success(await call(protocol, "list_activities", {}), outputSchemas.list_activities);

@@ -2,6 +2,7 @@
 import type { McpServer, RequestId, ServerContext, CallToolResult } from "@modelcontextprotocol/server";
 
 const MESSAGES = {
+  night_context_in_progress: "Another context append for this night is pending. This attempt was not saved. Read night_context_history and wait for the earlier operation to finish. An earlier write with an unknown outcome must not be repeated; ask the maintainer if it remains unresolved.",
   context_in_progress: "Another context append for this activity is pending. This attempt was not saved. Read coach_input and wait for the earlier operation to finish before submitting this change again. An earlier write with an unknown outcome must not be repeated; ask the maintainer if it remains unresolved.",
   gct_declaration: "The side declaration must match one verified running session and its exact stored FIT hash. Read the stored activity and confirm the source before retrying.",
   profile_in_progress: "This immutable profile write is already reserved. Read coach_profile to check whether it completed; do not create another version to bypass the reservation.",

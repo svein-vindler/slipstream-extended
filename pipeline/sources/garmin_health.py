@@ -1,4 +1,4 @@
-"""Fetch daily Garmin health summaries without storing raw time-series data."""
+"""Fetch Garmin health summaries, optionally retaining existing signal curves."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from datetime import date, timedelta
 from typing import Any
 
 from .garmin import _login
+from .garmin_policy import GarminReadOnlyViolation
+from .training_readiness import ReadinessRead
 
 
 def _days(start: date, end: date):
@@ -141,7 +143,9 @@ def _weight_rows(raw: Any):
 
 
 def fetch(start: date, end: date, *, request_pause: float = 0.15,
-          client=None, diagnostics: dict | None = None) -> list[dict[str, object]]:
+          client=None, diagnostics: dict | None = None,
+          signal_sink: Callable[[str, str, Any], None] | None = None,
+          collect_stress: bool = False) -> list[dict[str, object]]:
     if start > end:
         raise ValueError("health start date cannot be after end date")
     g = client or _login()
@@ -220,6 +224,8 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15,
         ) or []:
             if not isinstance(item, dict):
                 continue
+            if signal_sink is not None and start.isoformat() <= str(_date_of(item) or "") <= end.isoformat():
+                signal_sink(str(_date_of(item)), "body_battery", item)
             samples = [
                 _number(sample[1]) for sample in item.get("bodyBatteryValuesArray") or []
                 if isinstance(sample, (list, tuple)) and len(sample) > 1
@@ -270,6 +276,8 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15,
             merge(_date_of(dto) or day, _sleep_fields(sleep))
 
         heart = call(f"heart rate {day}", lambda d=day: g.get_heart_rates(d), request_pause) or {}
+        if signal_sink is not None:
+            signal_sink(day, "heart_rate", heart)
         if isinstance(heart, dict):
             values = _heart_values(heart)
             minimum = heart.get("minHeartRate")
@@ -288,5 +296,39 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15,
                 "Lowest Respiration": _first(respiration, "lowestRespirationValue", "minRespirationValue"),
                 "Highest Respiration": _first(respiration, "highestRespirationValue", "maxRespirationValue"),
             })
+
+    if collect_stress and signal_sink is not None:
+        stress = {"source_attempts": 0, "fitness_http_attempts": 0,
+                  "component_auth_http_attempts": 0, "body_bytes": 0, "elapsed_ms": 0.0,
+                  "source_errors": 0, "responses_closed": 0, "status": "unsupported_client"}
+        method = getattr(g, "get_stress_data", None)
+        if callable(method):
+            stress["status"] = "checked"
+            # Exactly two newest calendar dates at most. No range/backfill or retry.
+            for offset in reversed(range(min(2, total_days))):
+                day = (end - timedelta(days=offset)).isoformat()
+                stress["source_attempts"] += 1
+                if diagnostics is not None:
+                    diagnostics["sdk_calls"] = diagnostics.get("sdk_calls", 0) + 1
+                try:
+                    result = method(day)
+                except GarminReadOnlyViolation:
+                    raise
+                except Exception:
+                    stress["source_errors"] += 1
+                    signal_sink(day, "stress", None)
+                    continue
+                if not isinstance(result, ReadinessRead):
+                    stress["source_errors"] += 1
+                    signal_sink(day, "stress", None)
+                    continue
+                for name in ("fitness_http_attempts", "component_auth_http_attempts", "body_bytes", "elapsed_ms"):
+                    stress[name] += result.metrics[name]
+                stress["responses_closed"] += bool(result.metrics["response_closed"])
+                if result.status != "available":
+                    stress["source_errors"] += 1
+                signal_sink(day, "stress", result.payload if result.status == "available" else None)
+        if diagnostics is not None:
+            diagnostics["stress"] = stress
 
     return [rows[day] for day in sorted(rows)]

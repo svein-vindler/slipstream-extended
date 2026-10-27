@@ -74,3 +74,34 @@ execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
 execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
   "scripts/build_scalar_leaf_contract.py", "worker/test-runtime/generated/scalar-leaf-contract.json",
 ], { cwd: root, stdio: "inherit" });
+
+// Night signals use the actual ordinary collector and canonical writers.
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_night_signals_contract.py", "worker/test-runtime/generated/night-signals-contract.json",
+], { cwd: root, stdio: "inherit" });
+
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_night_products_contract.py", "worker/test-runtime/generated/night-products-contract.json",
+], { cwd: root, stdio: "inherit" });
+
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_night_training_contract.py", "worker/test-runtime/generated/night-training-contract.json",
+], { cwd: root, stdio: "inherit" });
+
+// B retains the additional channels through the actual bounded synthetic facade.
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_night_signals_contract.py", "--additional-signals",
+  "worker/test-runtime/generated/night-additional-signals-contract.json",
+], { cwd: root, stdio: "inherit" });
+
+// Partial-source retention uses the same public collection/storage path.
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_signal_partial_contract.py", "--output",
+  "worker/test-runtime/generated/night-signals-partial-null.json",
+], { cwd: root, stdio: "inherit" });
+
+// Unknown legacy point provenance survives two distinct partial collections.
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "scripts/build_signal_partial_contract.py", "--unknown-revision", "--output",
+  "worker/test-runtime/generated/night-signals-unknown-revision.json",
+], { cwd: root, stdio: "inherit" });

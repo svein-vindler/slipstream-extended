@@ -28,15 +28,23 @@ export const hrvSummarySchema = z.object({
   baselineUpper: detailNumber.optional(),
 }).nullable();
 
+export const hrvTimeProvenanceFields = {
+  time_basis: z.enum(["utc", "local_only", "ambiguous"]).optional(),
+  timestamp_field: z.enum(["readingTimeGMT", "readingTimeLocal", "timestamp", "readingTimestamp"]).optional(),
+  timestamp_unit: z.enum(["iso8601", "epoch_seconds", "epoch_milliseconds", "local_wall_seconds", "local_wall_milliseconds"]).optional(),
+};
+export const hrvTimeProvenanceSchema = z.object(hrvTimeProvenanceFields);
 export const hrvReadingSchema = z.object({
   timestamp: detailClock,
   hrv_ms: detailNumber,
+  ...hrvTimeProvenanceFields,
 });
 
 /** Detail tools project stored fields before either MCP serialization channel. */
 export const hrvDetailSourceSchema = z.object({
   date: text.optional(),
   available: z.boolean().optional(),
+  actual_night_timezone: text.optional(),
   sleep_start_gmt: detailClock.optional(),
   sleep_end_gmt: detailClock.optional(),
   sleep_start_garmin_local: detailClock.optional(),
@@ -67,6 +75,7 @@ export const sleepDetailStageSchema = z.object({
 });
 export const sleepDetailSourceSchema = z.object({
   date: text.optional(),
+  actual_night_timezone: text.optional(),
   sleep_start_gmt: detailClock.optional(),
   sleep_end_gmt: detailClock.optional(),
   sleep_start_garmin_local: detailClock.optional(),

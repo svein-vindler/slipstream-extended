@@ -232,3 +232,7 @@ operations and 10 GB-month of Standard storage each month. The free allowance
 does not apply to Infrequent Access storage, so Slipstream uses Standard R2.
 Limits can change; verify the current Cloudflare R2 and Workers documentation
 before a large deployment.
+
+## Stored night signals and time provenance
+
+See [stored night signals](NIGHT_SIGNALS.md) for additive HR/HRV curves, native and15/30-minute bulk views, explicit IANA/source-clock projections, quality states and cumulative request budgets. Ordinary history reads and historical source objects retain their existing behavior; no historical backfill starts automatically.
