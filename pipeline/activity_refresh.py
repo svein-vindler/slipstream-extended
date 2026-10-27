@@ -93,6 +93,11 @@ def refresh_activity(
     if not is_supported_activity(activity):
         return {"id": activity_id, "status": "unsupported"}
 
+    from .sources.provider_capabilities import unsupported_result
+    unsupported = unsupported_result(garmin, "activity_detail")
+    if unsupported is not None:
+        return {"id": activity_id, **unsupported}
+
     exercise_sets = None
     if "strength" in activity_type(activity):
         exercise_sets = garmin.get_activity_exercise_sets(activity_id)
@@ -175,6 +180,12 @@ def run(
         )
     if force and not activity_id:
         raise ValueError("force requires an explicit activity_id")
+
+    from .sources.provider_capabilities import unsupported_result
+    unsupported = unsupported_result(garmin, "activity_detail")
+    if unsupported is not None:
+        log_report("activity_refresh", unsupported)
+        return unsupported
 
     store = store or R2Store()
     garmin = garmin or _login()

@@ -42,11 +42,11 @@ body-composition, strength and GPS-free endurance analysis. It does not expose:
 - GPS coordinates or routes
 - raw FIT/TCX files
 - arbitrary R2 keys or objects
-- Garmin session tokens or passwords
+- Garmin session tokens, Personal API keys, access tokens, account bindings or passwords
 - Cloudflare or GitHub credentials
 
 Garmin data access has a fail-closed application-level read-only policy. The
-shared login installs it before API access and returns a facade exposing only
+legacy shared login installs it before API access and returns a facade exposing only
 the reads used by the pipeline. Both the SDK data-request boundary and its HTTP
 session reject non-GET requests, unreviewed endpoints, request bodies, method
 overrides and redirects. Unknown SDK transport layouts fail closed. There is no
@@ -84,7 +84,7 @@ billing alerts and monitor Workers, R2 and GitHub Actions usage.
 
 GitHub Actions secrets:
 
-- `GARMINTOKENS`
+- `GARMINTOKENS` (legacy), `GARMIN_PERSONAL_API_KEY` (Personal) and `GARMIN_ACCOUNT` (private account binding)
 - `CLOUDFLARE_ACCOUNT_ID`
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
@@ -137,8 +137,7 @@ sensitive output into public issues.
 - Dependabot proposes weekly dependency and GitHub Actions updates.
 - CI runs Python and npm vulnerability audits, Python lint/tests, TypeScript
   checks, unit tests and Workers-runtime Durable Object tests before merge.
-- Garmin access relies on the community `garminconnect` package because Garmin
-  has no official personal API; upstream changes can require maintenance.
+- The default legacy connection uses community `garminconnect`; the optional official Garmin Personal API has different feature coverage. Upstream changes can require maintenance for either adapter.
 
 ## Incident response
 
@@ -165,3 +164,22 @@ removes the stored fitness exports.
 
 Slipstream Extended is independent and is not affiliated with or endorsed by Garmin,
 Cloudflare, GitHub, Anthropic or OpenAI.
+
+### Optional Garmin Personal collector
+
+The Personal adapter exchanges its API key only at Garmin's fixed token endpoint;
+fitness access uses fixed GET routes, no redirects, no arbitrary URLs or bodies.
+A shared transport policy enforces token POST only at its exact endpoint,
+and a closed GET route/query allowlist before constructing credentials or issuing HTTP.
+Each job verifies the bound account before reading fitness payloads, and stops
+further HTTP after a rejection or unknown response. Requests, response sizes,
+archive members and inflated sizes are bounded. The 128-attempt local ceiling is
+an application resource bound, not a claim about Garmin's quota. API keys/tokens
+are never stored in canonical R2 objects or included in output. The account binding
+is private local metadata or an Actions secret, never a public repository variable.
+Personal API read-only credential scopes were not established by the reviewed
+Garmin documentation; the application guard is not a provider-issued scope.
+Source selection never bypasses the legacy read-only guard or permits fitness
+writes. Unsupported source features preserve existing detailed artifacts.
+
+Personal original archives keep byte-integrity evidence separate from activity association. FIT CRC validation does not prove a Garmin activity ID or authorize canonical promotion. Other original formats beyond FIT/GPX/TCX remain unsupported by this adapter.

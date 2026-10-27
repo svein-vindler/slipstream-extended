@@ -420,6 +420,13 @@ def run(
             (first + timedelta(days=offset)).isoformat()
             for offset in range((last - first).days + 1)
         )
+    from .sources.provider_capabilities import unsupported_result
+    unsupported = unsupported_result(garmin, "body_composition_detail")
+    if unsupported is not None:
+        unsupported.update(sleep={"status": "unsupported"}, body_composition={"status": "unsupported"})
+        log_report("health_detail_backfill", unsupported)
+        return unsupported
+
     store = store or R2Store()
     health_csv = store.get("summary/health_daily.csv")
     shared = garmin

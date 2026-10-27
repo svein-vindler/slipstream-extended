@@ -20,7 +20,14 @@ def run(*, run_id: str, wake_date: str, request_id: str | None = None,
     report = {"schema_version": 1, "kind": "latest-night", "wake_date": wake_date,
               "status": "pending", "sleep_status": "not_checked", "hrv_status": "not_checked"}
     source_checked = True
+    from .sources.provider_capabilities import capabilities_for
+    supported = capabilities_for(garmin)
     for stream in ("sleep", "hrv"):
+        if stream == "sleep" and not supported["sleep_stages"]:
+            report["sleep_status"] = "unsupported"
+            report["unsupported_features"] = ["sleep_stages"]
+            source_checked = False
+            continue
         try:
             raw = (garmin.get_sleep_data(wake_date) if stream == "sleep"
                    else garmin.get_hrv_data(wake_date))

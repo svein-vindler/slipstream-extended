@@ -106,9 +106,48 @@ R2_SECRET_ACCESS_KEY
 
 Do not use a full-account Cloudflare token or commit these values.
 
-## 4. Create the Garmin session secret
+## 4. Choose the Garmin connection
 
-Authenticate the GitHub CLI, then run the login helper from the repository root:
+Existing installations continue using `legacy` when `GARMIN_PROVIDER` is unset.
+A new installation can choose `legacy` (the existing community Garmin Connect
+connection) or `personal` (Garmin's official Personal API). See the current
+[Garmin API documentation](https://developer.garmin.com/gc-developer-program/personal/personal-api/),
+[FAQ](https://developer.garmin.com/gc-developer-program/personal/personal-faq/) and
+[response schemas](https://developer.garmin.com/gc-developer-program/personal/swagger-docs/).
+Garmin price, numerical quotas, Connect+ requirements and general history limits
+were not established by those reviewed sources; check Garmin's current terms.
+
+Compare features locally without logging in or requesting data:
+
+```bash
+python -m pipeline.provider_setup --capabilities
+```
+
+| Feature in this adapter | Legacy | Personal |
+| --- | --- | --- |
+| Activity and daily health summaries | Yes | Yes |
+| HRV, heart rate and weight trend | Yes | Yes |
+| Body Battery curve | Yes | Bounded interval extrema; full resolution unverified |
+| Full sleep stage timeline and raw stress | Yes | Unsupported |
+| Training readiness and full body composition detail | Yes | Unsupported |
+| Full detailed activity import, performed strength sets, TCX/GPX conversion | Yes | Unsupported |
+| Original activity archive through the collector | Yes | FIT/TCX/GPX only in this adapter; automatic detailed import still requires legacy |
+
+Personal jobs skip unsupported detail work and report `unsupported`; local
+bootstrap may finish as `complete_with_unsupported`. This is not full data parity.
+Existing detailed artifacts remain available. No automatic provider fallback is
+performed. The Worker API and stored canonical paths remain shared.
+
+Original ZIPs have bounded members and decompression with ZIP CRC validation.
+FIT members additionally use the pinned FIT SDK integrity/CRC check; GPX/TCX
+members require safe XML and the expected root element. Other original formats
+from Garmin are not validated by this adapter. `original_validation` reports
+byte digests and the request-route association basis. This is not independent
+proof that file contents belong to that activity; that association remains
+unverified. No filename convention, embedded activity ID or UTC offset is
+invented, and these bytes never enter the automatic detailed import in Personal mode.
+
+### Existing connection (legacy)
 
 ```bash
 gh auth login
@@ -117,9 +156,78 @@ python scripts/garmin_login.py
 
 Complete Garmin MFA if prompted. The helper stores the refreshable session as
 the encrypted GitHub Actions secret `GARMINTOKENS`; the password is not stored.
-This session is not a Garmin-issued read-only scope. Fitness reads are restricted
-by the application's method/endpoint guard; separate authentication and token
-renewal may use POST. Treat the session as a secret with possible write privileges.
+Leave `GARMIN_PROVIDER` unset or set the repository variable to `legacy`.
+The session is not a Garmin-issued read-only scope; the application restricts
+fitness requests. Authentication and renewal may use POST.
+
+### Personal API and local account binding
+
+Obtain your Personal API key through Garmin's own program and keep it in a private
+UTF-8 text file outside the repository. Never paste the key into chat, a command
+argument, a repository variable or an issue. Set `GARMIN_PERSONAL_API_KEY_FILE`
+to that file's path in the process that runs setup. A private bootstrap environment
+file is loaded only by `local_bootstrap`; it is not read automatically by setup.
+The application exchanges the key for one access token per job; the documented
+access token lasts 24 hours and has no refresh flow. Key/account errors stop the
+job without trying the other connection.
+
+For a **new, empty Personal-only installation**, run:
+
+```bash
+python -m pipeline.provider_setup --provider personal --new-install
+```
+
+For an existing installation, first set `GARMINTOKENS_FILE` to the private legacy
+session file (or provide the existing process-local `GARMINTOKENS`). Then run:
+
+```bash
+python -m pipeline.provider_setup --provider personal
+```
+
+The existing-account path checks that the current and target connections identify
+the same Garmin account before saving `.garmin-provider.local.json`. The new-install
+option must never be used to rebind existing data. Once bound, a later Personal
+switch does not need an unexpired legacy session. The private metadata contains
+an account identifier, not the API key. It is ignored by Git. Set
+`GARMIN_PROVIDER_FILE` to this metadata file for subsequent local jobs; relative
+paths in a bootstrap environment file resolve beside that file.
+
+For GitHub Actions, use your own installation repository's Settings:
+
+1. Keep the existing restricted R2 secrets from section 3.
+2. Save the API key as the encrypted Actions secret `GARMIN_PERSONAL_API_KEY`.
+3. Save the verified `account` from the private metadata file as the encrypted
+   Actions secret `GARMIN_ACCOUNT`. It must not be a repository variable.
+4. Finish running data jobs before changing hosted settings. Upload secrets first;
+   set the repository variable `GARMIN_PROVIDER` to `personal` last.
+5. Run the read-only installer check with `--online --repo OWNER/REPO
+   --garmin-provider personal` to verify the configured mode and secret names.
+   It does not prove live Garmin coverage or run a sync.
+
+Each workflow receives only the selected Garmin credential and freezes its source
+for that job. Credentials already handed to a running job are not replaced by a
+later configuration change. Hosted changes are explicit operator steps, not a
+side effect of the local setup command.
+
+### Switching back later
+
+Keep the same private metadata/account binding and supply a valid legacy session:
+
+```bash
+python -m pipeline.provider_setup --provider legacy
+```
+
+This checks the legacy account and atomically replaces the local source choice.
+A wrong account leaves the old choice unchanged. For hosted jobs, keep
+`GARMIN_ACCOUNT`, ensure `GARMINTOKENS` is present, finish running jobs, then set
+`GARMIN_PROVIDER` to `legacy`. Keep the account secret even on legacy after first
+binding, so later jobs continue verifying it and preserving mixed-source HRV.
+
+Switching never deletes or migrates history and never starts a backfill. Stable
+Garmin activity identifiers remain shared. Missing incoming HRV observations do
+not remove earlier good readings; incoming non-null values can update the same
+known instant. Provider provenance and unverified time bases remain distinguishable.
+Do not reuse one installation/bucket for a different Garmin account.
 
 ## 5. Seed summaries and detailed data
 

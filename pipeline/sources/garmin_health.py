@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 import time
 from collections.abc import Callable
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from .garmin import _login
@@ -62,6 +62,9 @@ def _call(label: str, fn: Callable[[], Any], pause: float, diagnostics: dict | N
                 time.sleep(pause)
             return result
         except Exception as exc:  # garminconnect exposes several exception types
+            from .garmin_personal import PersonalSourceError
+            if isinstance(exc, (PersonalSourceError, GarminReadOnlyViolation)):
+                raise
             rate_limited = "TooManyRequests" in type(exc).__name__ or "429" in str(exc)
             if rate_limited and attempt < len(delays):
                 wait = delays[attempt]
@@ -95,7 +98,7 @@ def _sleep_fields(raw: dict[str, Any]):
         "Light Sleep Seconds": _first(dto, "lightSleepSeconds", "lightSeconds"),
         "REM Sleep Seconds": _first(dto, "remSleepSeconds", "remSeconds"),
         "Awake Sleep Seconds": _first(dto, "awakeSleepSeconds", "awakeSeconds"),
-        "Sleep Score": _first(dto, "sleepScore") or overall.get("value"),
+        "Sleep Score": dto["sleepScore"] if dto.get("sleepScore") is not None else overall.get("value"),
     }
 
 
@@ -128,6 +131,33 @@ def _weight_rows(raw: Any):
         or raw.get("dailyWeightSummaries")
         or []
     )
+    if raw.get("_slipstream_source", {}).get("weight_unit") == "kg":
+        grouped = {}
+        for item in items:
+            if isinstance(item, dict):
+                grouped.setdefault(_date_of(item), []).append(item)
+        result = []
+        for day, values in grouped.items():
+            if len(values) == 1:
+                result.append((day, _number(values[0].get("weight"), 3)))
+                continue
+            timed = []
+            for item in values:
+                value = item.get("timestampGMT")
+                try:
+                    if not isinstance(value, str) or not ("T" in value or " " in value):
+                        raise ValueError("Missing explicit GMT measurement clock")
+                    instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    if instant.tzinfo is None:
+                        instant = instant.replace(tzinfo=timezone.utc)
+                    timed.append((instant, _number(item.get("weight"), 3)))
+                except ValueError:
+                    timed = []
+                    break
+            latest = max((value[0] for value in timed), default=None)
+            weights = {value for instant, value in timed if instant == latest}
+            result.append((day, next(iter(weights)) if len(weights) == 1 else None))
+        return result
     normalized = []
     for item in items:
         if not isinstance(item, dict):
@@ -138,7 +168,8 @@ def _weight_rows(raw: Any):
         value = _first(detail, "weight", "value")
         if value is None:
             value = _first(item, "latestWeightValue", "maxWeight", "minWeight")
-        normalized.append((day, _weight_kg(value)))
+        explicit_kg = raw.get("_slipstream_source", {}).get("weight_unit") == "kg"
+        normalized.append((day, _number(value, 3) if explicit_kg else _weight_kg(value)))
     return normalized
 
 
@@ -149,6 +180,8 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15,
     if start > end:
         raise ValueError("health start date cannot be after end date")
     g = client or _login()
+    from .provider_capabilities import capabilities_for
+    supported = capabilities_for(g)
     rows: dict[str, dict[str, object]] = {}
 
     def call(label, fn, pause):
@@ -270,7 +303,8 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15,
                 "Stress Duration Seconds": stats.get("stressDuration"),
             })
 
-        sleep = call(f"sleep details {day}", lambda d=day: g.get_sleep_data(d), request_pause) or {}
+        sleep = (call(f"sleep details {day}", lambda d=day: g.get_sleep_data(d), request_pause) or {}
+                 if supported["sleep_stages"] else {})
         if isinstance(sleep, dict):
             dto = sleep.get("dailySleepDTO") if isinstance(sleep.get("dailySleepDTO"), dict) else sleep
             merge(_date_of(dto) or day, _sleep_fields(sleep))
@@ -302,7 +336,9 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15,
                   "component_auth_http_attempts": 0, "body_bytes": 0, "elapsed_ms": 0.0,
                   "source_errors": 0, "responses_closed": 0, "status": "unsupported_client"}
         method = getattr(g, "get_stress_data", None)
-        if callable(method):
+        if not supported["raw_stress"]:
+            stress["status"] = "unsupported"
+        elif callable(method):
             stress["status"] = "checked"
             # Exactly two newest calendar dates at most. No range/backfill or retry.
             for offset in reversed(range(min(2, total_days))):

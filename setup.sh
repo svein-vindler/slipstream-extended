@@ -57,6 +57,7 @@ if ! (cd worker && npx wrangler whoami >/dev/null 2>&1); then
 fi
 ok "Cloudflare Wrangler authenticated"
 
+"$PYTHON" -m pipeline.provider_setup --capabilities
 "$PYTHON" scripts/check_installation.py
 
 cat <<'EOF'
@@ -64,7 +65,7 @@ cat <<'EOF'
 Local preparation is complete.
 
 Continue with docs/INSTALL.md, starting at section 2. The remaining steps create
-a private R2 bucket, restricted GitHub secrets, the Garmin session, the Worker,
+a private R2 bucket, restricted GitHub secrets, the selected Garmin connection, the Worker,
 and the exact-email Cloudflare Access Managed OAuth policy.
 
 Only create the secrets listed in docs/INSTALL.md; current Slipstream has no

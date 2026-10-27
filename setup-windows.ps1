@@ -89,6 +89,10 @@ finally {
     Pop-Location
 }
 
+& $Python -m pipeline.provider_setup --capabilities
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not display the Garmin connection coverage."
+}
 & $Python scripts/check_installation.py
 if ($LASTEXITCODE -ne 0) {
     throw "Could not complete the local installation check."
@@ -99,7 +103,7 @@ Write-Host "Local preparation is complete." -ForegroundColor Green
 Write-Host ""
 Write-Host "Continue with docs/INSTALL.md, starting at section 2. The remaining"
 Write-Host "steps create a private R2 bucket, restricted GitHub secrets, the Garmin"
-Write-Host "session, the Worker, and the exact-email Cloudflare Access Managed OAuth"
+Write-Host "connection, the Worker, and the exact-email Cloudflare Access Managed OAuth"
 Write-Host "policy."
 Write-Host ""
 Write-WarningMessage "Only create the secrets listed in docs/INSTALL.md. Current Slipstream has no secret-path or unauthenticated connector mode."

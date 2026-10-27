@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +48,9 @@ def is_supported_activity(activity: dict[str, Any]) -> bool:
 
 def is_job_stopping_error(exc: Exception) -> bool:
     """Keep account, rate-limit, and service failures out of activity tombstones."""
+    from .sources.garmin_personal import PersonalSourceError
+    if isinstance(exc, PersonalSourceError):
+        return True
     if isinstance(exc, (ConnectionError, TimeoutError)):
         return True
     response = getattr(exc, "response", None)
@@ -133,6 +136,11 @@ def run(
         raise ValueError("Backfill flags must be booleans")
     budget = metadata_budget or MetadataBudget()
     calls_before = budget.calls
+    from .sources.provider_capabilities import unsupported_result
+    unsupported = unsupported_result(garmin, "activity_detail")
+    if unsupported is not None:
+        return unsupported
+
     store = store or R2Store()
     output = Path(output_dir)
     existing_keys = store.list_keys("activities/")
@@ -206,7 +214,7 @@ def run(
                     return
                 failure = {"attempts": min(attempts + 1, MAX_HISTORICAL_FAILURE_ATTEMPTS),
                            "last_error": "activity_import_failed",
-                           "last_attempt": datetime.now(timezone.utc).isoformat()}
+                           "last_attempt": datetime.now(UTC).isoformat()}
                 if attempts >= MAX_HISTORICAL_FAILURE_ATTEMPTS:
                     failure["attempts_saturated"] = True
                 failures[aid] = failure
@@ -243,7 +251,7 @@ def run(
         "schema_version": BACKFILL_SCHEMA_VERSION,
         "kind": "activity-backfill",
         "start_date": start_date, "end_date": end_date,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
         "activities_found": len(records), "eligible_activities": len(eligible),
         "complete_activities": len(eligible) - len(incomplete),
         # Older schedulers only understand remaining > blocked. Reserve one

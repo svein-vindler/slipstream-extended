@@ -333,10 +333,11 @@ Useful documents:
 
 ## Scope
 
-Garmin does not provide an official personal API. Slipstream uses the community
-`garminconnect` library and may need maintenance if Garmin changes private
-interfaces. It is intentionally single-tenant and read-only with respect to
-Garmin.
+Slipstream supports Garmin's official Personal API alongside the existing
+community `garminconnect` connection. Their data coverage differs; see the
+[connection comparison](docs/INSTALL.md#4-choose-the-garmin-connection). Both
+adapters may need maintenance as Garmin changes its interfaces. Slipstream is
+intentionally single-tenant and read-only with respect to Garmin fitness data.
 
 The reviewed Garmin client is pinned to `garminconnect` 0.3.20. This is a
 compatibility update, not an expansion of exposed Garmin methods, collection or
@@ -353,3 +354,15 @@ Cloudflare, GitHub, Anthropic or OpenAI.
 Stored overnight HR/HRV, Body Battery and stress curves are described in [night signals](docs/NIGHT_SIGNALS.md). See [explicit night context](docs/NIGHT_USER_CONTEXT.md) and [personal reference curves](docs/NIGHT_REFERENCE_CURVES.md) for their separate provenance and bounded read contracts.
 
 [Training and subsequent nights](docs/NIGHT_TRAINING.md) compares recorded local activity summaries with stored UTC sleep windows using a bounded offline product; missing coverage and uncertain associations remain explicit.
+
+
+### Garmin connection choice
+
+Slipstream supports the existing `legacy` connection (default) and the official
+Garmin Personal API (`personal`). Both feed the shared stored-data interface;
+Personal currently supports summaries and selected curves, with explicit limits
+for full activity details, sleep stages, stress and readiness. Compare coverage
+without network access using `python -m pipeline.provider_setup --capabilities`.
+See [connection setup and same-account switching](docs/INSTALL.md#4-choose-the-garmin-connection).
+Switching is explicit and reversible for the same Garmin account. It does not
+delete history, change activity identifiers or start a historical import.
