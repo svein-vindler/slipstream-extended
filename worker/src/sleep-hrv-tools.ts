@@ -1,3 +1,4 @@
+import { currentNightView } from "./night-view";
 import { applicationToolResult } from "./application-errors";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
@@ -22,7 +23,19 @@ export class SleepHrvTools {
   private getR2Json(...args: Parameters<R2Storage["getR2Json"]>) {
     return this.storage.getR2Json(...args);
   }
-  private text<T extends Record<string, unknown>>(obj: T) { return structuredToolResult(obj); }
+  private async text<T extends Record<string, unknown>>(obj: T) {
+    if (typeof obj.date === "string" && typeof obj.available === "boolean")
+      return structuredToolResult(await currentNightView(this.env, obj.date, obj));
+    if (Array.isArray(obj.days)) {
+      const days: unknown[] = [];
+      for (const row of obj.days) {
+        const day = row && typeof row === "object" && typeof row.date === "string" ? row.date : null;
+        days.push(day ? await currentNightView(this.env, day, row) : row);
+      }
+      return structuredToolResult({ ...obj, days, user_context_scope: days.length ? "daily_rows" : "not_resolved_for_weekly" });
+    }
+    return structuredToolResult(obj);
+  }
 
   async readCanonicalHistoryRow(
     stream: "hrv" | "sleep",
@@ -196,14 +209,14 @@ export class SleepHrvTools {
         });
       }
       const readings = (payload.readings ?? []).map(row => ({
-        timestamp: row.timestamp ?? null, hrv_ms: row.hrv_ms ?? null,
+        ...row, timestamp: row.timestamp ?? null, hrv_ms: row.hrv_ms ?? null,
       }));
       return this.text({
         available: true,
         date: payload.date ?? args.date,
         ...nightContext(typeof payload.date === "string" ? payload.date : args.date, payload.sleep_start_gmt,
           payload.sleep_end_gmt, validatedHealthTimezone(this.env.HEALTH_TIMEZONE),
-          payload.sleep_start_garmin_local, payload.sleep_end_garmin_local),
+          payload.sleep_start_garmin_local, payload.sleep_end_garmin_local, payload.actual_night_timezone),
         sleep_start_gmt: payload.sleep_start_gmt ?? null,
         sleep_end_gmt: payload.sleep_end_gmt ?? null,
         summary: payload.summary ?? null,
@@ -266,8 +279,11 @@ export class SleepHrvTools {
           if (row?.status !== "available") continue;
           const own = nightContext(day, row.sleep_start_gmt, row.sleep_end_gmt,
             validatedHealthTimezone(this.env.HEALTH_TIMEZONE),
-            row.sleep_start_garmin_local, row.sleep_end_garmin_local);
-          if (own.local_time_source === "garmin_local") continue;
+            row.sleep_start_garmin_local, row.sleep_end_garmin_local,
+            typeof row.actual_night_timezone === "string" ? row.actual_night_timezone : null);
+          // Known zone authority and complete window availability are separate.
+          if (own.actual_night_timezone !== null && own.sleep_start_local !== null && own.sleep_end_local !== null
+            && !own.time_quality_flags.includes("invalid_sleep_interval")) continue;
           try {
             const stored = await this.getR2Json(sleepObjectKeys(day));
             if (!stored) continue;
@@ -333,7 +349,7 @@ export class SleepHrvTools {
         ...nightContext(typeof payload.date === "string" ? payload.date : args.date,
           payload.sleep_start_gmt, payload.sleep_end_gmt,
           validatedHealthTimezone(this.env.HEALTH_TIMEZONE),
-          payload.sleep_start_garmin_local, payload.sleep_end_garmin_local),
+          payload.sleep_start_garmin_local, payload.sleep_end_garmin_local, payload.actual_night_timezone),
         sleep_start_gmt: payload.sleep_start_gmt ?? null,
         sleep_end_gmt: payload.sleep_end_gmt ?? null,
         confirmed: payload.confirmed ?? null,

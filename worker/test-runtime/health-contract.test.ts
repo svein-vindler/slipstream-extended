@@ -1,6 +1,6 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { outputSchemas } from "../src/mcp-output";
 import contract from "./generated/health-contract.json";
@@ -81,6 +81,7 @@ async function history(stream: Stream, day: string, subject: string, full = fals
   const output = outputSchemas[name].parse(result.structuredContent);
   expect(JSON.parse(result.content[0].text)).toEqual(output);
   expect(JSON.stringify(output)).not.toContain("synthetic-provider-field");
+  for (const row of output.days) expect(row.view?.resolved_at).toBe("2026-10-26T12:00:00.000Z");
   return output;
 }
 
@@ -99,7 +100,14 @@ beforeAll(async () => {
     return Response.json({ keys: [jwk] });
   });
 });
+beforeEach(() => {
+  // Resolution time belongs to this request; freeze Date alone so full-response
+  // equality still detects any change to source metrics, revisions or context.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-10-26T12:00:00.000Z"));
+});
 afterEach(async () => {
+  vi.useRealTimers();
   expect(writes).toEqual([]); // Ordinary MCP reads never write data, indexes or receipts.
   for (const key of Object.keys(contract.states.initial)) await env.SLIPSTREAM_DATA.delete(key);
 });

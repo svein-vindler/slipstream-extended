@@ -23,12 +23,13 @@ from .garmin_policy import GarminReadOnlyViolation
 from .training_readiness import ReadinessRead, bounded_read
 
 _READINESS_ROUTE = r"/metrics-service/metrics/trainingreadiness/([0-9]{4}-[0-9]{2}-[0-9]{2})"
+_STRESS_ROUTE = r"/wellness-service/wellness/dailyStress/([0-9]{4}-[0-9]{2}-[0-9]{2})"
 _REVIEWED_HEADERS = Client.get_api_headers
 _REVIEWED_ADAPTER_SEND = HTTPAdapter.send
 _REVIEWED_SESSION_SEND = requests.Session.send
 
 READ_METHODS = frozenset({
-    "get_training_readiness_bounded",
+    "get_training_readiness_bounded", "get_stress_data",
     "get_activity_page",
     "get_activities_by_date", "get_activity", "get_activity_exercise_sets",
     "download_activity", "get_daily_steps", "get_sleep_daily", "get_hrv_data_range",
@@ -136,6 +137,7 @@ def _install_transport_policy(sdk):
             or origin.path or origin.query or origin.fragment):
         _deny()
     readiness_capability = object()
+    stress_capability = object()
 
     def readiness_path(path):
         match = re.fullmatch(_READINESS_ROUTE, path)
@@ -143,6 +145,11 @@ def _install_transport_policy(sdk):
             _deny()
         _valid_day(match[1])
 
+    def stress_path(path):
+        match = re.fullmatch(_STRESS_ROUTE, path)
+        if not match:
+            _deny()
+        _valid_day(match[1])
     def readiness_transport_valid():
         # Pin the reviewed SDK/session/header surface. No saved, unguarded send
         # is exposed to the application; the lower guard is always traversed.
@@ -176,9 +183,16 @@ def _install_transport_policy(sdk):
     @wraps(send)
     def send_read(method, url, **kwargs):
         context = kwargs.pop("_readiness_context", None)
-        bounded = isinstance(context, tuple) and len(context) == 2 and context[0] is readiness_capability
-        if context is not None and not bounded:
+        stress_context = kwargs.pop("_stress_context", None)
+        readiness = isinstance(context, tuple) and len(context) == 2 and context[0] is readiness_capability
+        stress = (isinstance(stress_context, tuple) and len(stress_context) == 2
+                  and stress_context[0] is stress_capability)
+        if (context is not None and not readiness or stress_context is not None and not stress
+                or readiness and stress):
             _deny()
+        bounded = readiness or stress
+        if stress:
+            context = stress_context
         if (method != "GET" or not isinstance(url, str)
                 or not kwargs.keys() <= ({"headers", "timeout", "allow_redirects", "stream", "verify"}
                                         if bounded else {"params", "headers", "timeout", "allow_redirects"})):
@@ -189,7 +203,10 @@ def _install_transport_policy(sdk):
             _deny()
         if bounded:
             readiness_transport_valid()
-            readiness_path(target.path)
+            if stress:
+                stress_path(target.path)
+            else:
+                readiness_path(target.path)
             if (kwargs.get("stream") is not True or kwargs.get("verify") is not True
                     or kwargs.get("allow_redirects") is not False):
                 _deny()
@@ -252,21 +269,45 @@ def _install_transport_policy(sdk):
             _deny()
         return result
 
-    return read_readiness
+    def read_stress(cdate):
+        _valid_day(cdate)
+        path = f"/wellness-service/wellness/dailyStress/{cdate}"
+        stress_path(path)
+        readiness_transport_valid()
+        try:
+            headers = client.get_api_headers()
+        except GarminConnectAuthenticationError:
+            return ReadinessRead("auth_required")
+        headers = {**headers, "Accept": "application/json", "Accept-Encoding": "identity"}
+
+        def fixed_send(auth_headers, timeout, metrics):
+            return session.request("GET", f"https://{origin.netloc}{path}", headers=auth_headers,
+                timeout=timeout, stream=True, verify=True, allow_redirects=False,
+                _stress_context=(stress_capability, metrics))
+
+        result = bounded_read(fixed_send, headers)
+        if result.status == "redirect":
+            _deny()
+        return result
+
+    return read_readiness, read_stress
 
 
 class ReadOnlyGarmin:
     """Expose only explicitly reviewed reads, with no runtime opt-out flag."""
-    __slots__ = ("__sdk", "__readiness")
+    __slots__ = ("__sdk", "__readiness", "__stress")
 
     def __init__(self, sdk):
-        self.__readiness = _install_transport_policy(sdk)
+        self.__readiness, self.__stress = _install_transport_policy(sdk)
         self.__sdk = sdk
 
     def get_training_readiness_bounded(self, cdate):
         """Fixed bounded GET; <=1 fitness send, zero auth/refresh/replay."""
         return self.__readiness(cdate)
 
+    def get_stress_data(self, cdate):
+        """Exact bounded stress GET; one fitness send, zero auth/refresh/retry."""
+        return self.__stress(cdate)
     def get_activity_page(self, start_date, end_date, *, offset=0, limit=20):
         """Fixed GET route and query, zero SDK/network retries (auth replay <=1).
 

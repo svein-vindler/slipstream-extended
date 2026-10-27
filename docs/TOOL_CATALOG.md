@@ -4,10 +4,10 @@ Generated from the authenticated Worker `tools/list` response, including domain 
 
 | Profile writes | Refresh configured | Registered tools |
 | --- | --- | --- |
-| off | no | 20 |
-| off | yes | 24 |
-| on | no | 22 |
-| on | yes | 26 |
+| off | no | 25 |
+| off | yes | 29 |
+| on | no | 28 |
+| on | yes | 32 |
 
 Profile writes and refresh availability are independent. Disabling profile writes does not disable sync. Every mode still requires authentication and existing server limits. Annotations describe intent; server validation, transport controls and budgets enforce safety. No tool allows Garmin fitness-account writes.
 
@@ -298,6 +298,106 @@ Save a new immutable, versioned running analysis profile after the user explicit
     "effective_from",
     "zones",
     "references"
+  ],
+  "type": "object"
+}
+```
+
+### `add_night_context`
+
+Append explicit user context to one documented wake-date. Call only on explicit user request. Omitted fields are retained; explicit null clears only that field. Source is user, never an inferred diagnosis. If saved is true, retry only an unavailable read, never this saved append.
+
+**Effect:** Explicit user confirmation required; append-only profile/context write to private R2; no Garmin account write.
+
+**Availability:** MCP_WRITES_ENABLED must be literal true.
+
+**Registered input schema** (bounds/defaults; runtime rules above also apply):
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "actual_night_timezone": {
+      "anyOf": [
+        {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "alcohol": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "illness": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "late_bedtime": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "morning_condition": {
+      "anyOf": [
+        {
+          "maximum": 5,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "note": {
+      "anyOf": [
+        {
+          "maxLength": 1000,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sleep_quality": {
+      "anyOf": [
+        {
+          "maximum": 5,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "travel": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "wake_date": {
+      "description": "YYYY-MM-DD",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "wake_date"
   ],
   "type": "object"
 }
@@ -677,6 +777,369 @@ Distinct activity types with counts.
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {},
+  "type": "object"
+}
+```
+
+### `night_baseline`
+
+Read one bounded precomputed personal night reference product. Each night contributes one within-night median per bin before linear P10/P25/P50/P75/P90. Explicit exclusions, context filters and coverage remain visible. No source-night scan, provider call or write.
+
+**Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
+
+**Availability:** All authenticated registration modes.
+
+**Registered input schema** (bounds/defaults; runtime rules above also apply):
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "alignment": {
+      "default": "sleep_start",
+      "enum": [
+        "sleep_start",
+        "wake",
+        "clock"
+      ],
+      "type": "string"
+    },
+    "bin_minutes": {
+      "anyOf": [
+        {
+          "const": 15,
+          "type": "number"
+        },
+        {
+          "const": 30,
+          "type": "number"
+        }
+      ],
+      "default": 30
+    },
+    "channel": {
+      "default": "hrv",
+      "enum": [
+        "heart_rate",
+        "hrv",
+        "body_battery",
+        "stress"
+      ],
+      "type": "string"
+    },
+    "compare": {
+      "anyOf": [
+        {
+          "const": "previous",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end_date": {
+              "description": "YYYY-MM-DD",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "type": "string"
+            },
+            "start_date": {
+              "description": "YYYY-MM-DD",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "start_date",
+            "end_date"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "context_filter": {
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "actual_night_timezone": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "alcohol": {
+          "type": "boolean"
+        },
+        "illness": {
+          "type": "boolean"
+        },
+        "late_bedtime": {
+          "type": "boolean"
+        },
+        "morning_condition": {
+          "maximum": 5,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sleep_quality": {
+          "maximum": 5,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "travel": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "end_date": {
+      "description": "YYYY-MM-DD",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "type": "string"
+    },
+    "exclude_dates": {
+      "default": [],
+      "items": {
+        "description": "YYYY-MM-DD",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+        "type": "string"
+      },
+      "maxItems": 366,
+      "type": "array"
+    },
+    "period": {
+      "default": "28",
+      "enum": [
+        "7",
+        "28",
+        "90",
+        "365",
+        "custom"
+      ],
+      "type": "string"
+    },
+    "start_date": {
+      "description": "YYYY-MM-DD",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "end_date"
+  ],
+  "type": "object"
+}
+```
+
+### `night_context_history`
+
+Read bounded append-only explicit user context for one wake-date. Current effective context is independent of analysis age. No provider request or storage write is made.
+
+**Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
+
+**Availability:** All authenticated registration modes.
+
+**Registered input schema** (bounds/defaults; runtime rules above also apply):
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "before_context_id": {
+      "pattern": "^nctx-[a-f0-9]{24}$",
+      "type": "string"
+    },
+    "limit": {
+      "default": 10,
+      "maximum": 20,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "wake_date": {
+      "description": "YYYY-MM-DD",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "wake_date"
+  ],
+  "type": "object"
+}
+```
+
+### `night_signals`
+
+Read selected stored overnight HR, HRV, Body Battery or stress for one wake-date as native UTC points or 15/30-minute medians. No interpolation, provider calls or writes. Coverage uses observed cadence; clocks/provenance and a covered ten-minute HR median are explicit.
+
+**Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
+
+**Availability:** All authenticated registration modes.
+
+**Registered input schema** (bounds/defaults; runtime rules above also apply):
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "alignment": {
+      "default": "sleep_start",
+      "enum": [
+        "sleep_start",
+        "utc_clock"
+      ],
+      "type": "string"
+    },
+    "channels": {
+      "default": [
+        "heart_rate",
+        "hrv"
+      ],
+      "items": {
+        "enum": [
+          "heart_rate",
+          "hrv",
+          "body_battery",
+          "stress"
+        ],
+        "type": "string"
+      },
+      "maxItems": 4,
+      "minItems": 1,
+      "type": "array"
+    },
+    "date": {
+      "description": "YYYY-MM-DD",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "type": "string"
+    },
+    "resolution": {
+      "default": "native",
+      "enum": [
+        "native",
+        "15m",
+        "30m"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "date"
+  ],
+  "type": "object"
+}
+```
+
+### `night_signals_history`
+
+Read up to 7 native or 31 compact stored nights. UTC points or 15/30-minute medians with sleep-start/UTC-clock origins, explicit empty bins and bounded reads/output. No provider calls, writes or interpolation.
+
+**Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
+
+**Availability:** All authenticated registration modes.
+
+**Registered input schema** (bounds/defaults; runtime rules above also apply):
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "alignment": {
+      "default": "sleep_start",
+      "enum": [
+        "sleep_start",
+        "utc_clock"
+      ],
+      "type": "string"
+    },
+    "channels": {
+      "default": [
+        "heart_rate",
+        "hrv"
+      ],
+      "items": {
+        "enum": [
+          "heart_rate",
+          "hrv",
+          "body_battery",
+          "stress"
+        ],
+        "type": "string"
+      },
+      "maxItems": 4,
+      "minItems": 1,
+      "type": "array"
+    },
+    "end_date": {
+      "description": "YYYY-MM-DD",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "type": "string"
+    },
+    "resolution": {
+      "default": "native",
+      "enum": [
+        "native",
+        "15m",
+        "30m"
+      ],
+      "type": "string"
+    },
+    "start_date": {
+      "description": "YYYY-MM-DD",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "start_date",
+    "end_date"
+  ],
+  "type": "object"
+}
+```
+
+### `night_training_history`
+
+Read one fixed offline product linking recorded activity ends to the earliest following documented sleep within48hours. Returns at most31 nights per page(default7). Missing data, uncertain ends, export coverage and snapshot context remain explicit; no causal/medical score, source scan, provider request or write.
+
+**Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
+
+**Availability:** All authenticated registration modes.
+
+**Registered input schema** (bounds/defaults; runtime rules above also apply):
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "end_date": {
+      "description": "YYYY-MM-DD",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "type": "string"
+    },
+    "page_size": {
+      "default": 7,
+      "maximum": 31,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "page_start_date": {
+      "description": "YYYY-MM-DD",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "type": "string"
+    },
+    "start_date": {
+      "description": "YYYY-MM-DD",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "start_date",
+    "end_date"
+  ],
   "type": "object"
 }
 ```

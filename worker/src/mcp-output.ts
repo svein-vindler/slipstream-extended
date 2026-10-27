@@ -1,8 +1,12 @@
+import { nightTrainingHistorySchema } from "./night-training";
+import { nightBaselineSchema } from "./night-products";
+import { nightUserContextSchema, nightUserContextViewSchema, addNightContextOutputSchema, nightContextHistoryOutputSchema } from "./night-user-context";
+import { nightSignalsSchema, nightSignalsHistorySchema } from "./night-signals";
 import { dispatchStatusSchema } from "./dispatch-status";
 import { z } from "zod";
 import { trainingContextSchema } from "./training-context";
 import { recordedRunningMeasurementsSchema } from "./recorded-running-segments";
-import { detailClock, hrvReadingSchema, hrvSummarySchema,
+import { detailClock, hrvReadingSchema, hrvSummarySchema, hrvTimeProvenanceFields,
   sleepDetailSummarySchema, sleepDetailScoreSchema, sleepDetailStageSchema,
   strengthSessionSchema, enduranceSessionSchema } from "./detail-projection";
 import { trainingHistorySchema } from "./training-history";
@@ -156,6 +160,9 @@ const sleepStage = z.object({
 });
 
 const nightContextFields = {
+  user_context: nightUserContextSchema.nullable().optional(),
+  user_context_resources: z.object({ r2_get_attempts: z.number().int().nonnegative(), r2_list_attempts: z.number().int().nonnegative() }).optional(),
+  view: nightUserContextViewSchema.optional(),
   wake_date: z.string(),
   night_of: nullableString,
   sleep_start_local: nullableString,
@@ -166,10 +173,29 @@ const nightContextFields = {
   sleep_start_weekday_local: nullableString,
   sleep_end_weekday_local: nullableString,
   timezone: nullableString,
-  local_time_source: z.enum(["garmin_local", "configured_timezone", "unavailable"]),
+  local_time_source: z.enum(["garmin_local", "configured_timezone", "actual_night_timezone", "unavailable"]),
+  actual_night_timezone: nullableString,
+  configured_timezone: nullableString,
+  configured_projection: z.object({
+    timezone: z.string(), night_of: nullableString,
+    sleep_start_local: nullableString, sleep_end_local: nullableString,
+    sleep_midpoint_local: nullableString,
+  }).nullable(),
+  source_time: z.object({
+    sleep_start_gmt: nullableTimestamp, sleep_end_gmt: nullableTimestamp,
+    sleep_start_garmin_local: nullableTimestamp, sleep_end_garmin_local: nullableTimestamp,
+  }),
+  night_context_source_time: z.object({
+    sleep_start_gmt: nullableTimestamp, sleep_end_gmt: nullableTimestamp,
+    sleep_start_garmin_local: nullableTimestamp, sleep_end_garmin_local: nullableTimestamp,
+  }).optional(),
+  time_quality_flags: z.array(z.string()),
 };
 const nightContextSchema = z.object(nightContextFields);
 const healthDayWithNightContext = healthDay.extend({
+  user_context: nightUserContextSchema.nullable().optional(),
+  view: nightUserContextViewSchema.optional(),
+  user_context_resolution: z.enum(["resolved", "not_requested_due_limit"]).optional(),
   sleep_night: nightContextSchema.nullable(),
   hrv_night: nightContextSchema.nullable(),
 });
@@ -224,6 +250,7 @@ const hrvHistoryDay = z.object({
   readings: z.array(z.object({
     timestamp: z.unknown(),
     hrv_ms: z.unknown(),
+    ...hrvTimeProvenanceFields,
   })).optional(),
 });
 const hrvHistoryWeek = z.object({
@@ -327,6 +354,12 @@ const bodyMeasurement = z.object({
 });
 
 export const outputSchemas = {
+  night_training_history: nightTrainingHistorySchema,
+  night_baseline: nightBaselineSchema,
+  add_night_context: addNightContextOutputSchema,
+  night_context_history: nightContextHistoryOutputSchema,
+  night_signals: nightSignalsSchema,
+  night_signals_history: nightSignalsHistorySchema,
   training_history: trainingHistorySchema,
   data_status: z.object({
     connected: z.boolean(),
@@ -365,6 +398,8 @@ export const outputSchemas = {
     note: z.string(),
   }),
   daily_health: z.object({
+    user_context_limited: z.boolean().optional(),
+    user_context_scope: z.literal("recent_31_returned_wake_dates").optional(),
     matched: z.number().int().nonnegative(),
     showing: z.number().int().nonnegative(),
     timezone: nullableString,
@@ -388,6 +423,7 @@ export const outputSchemas = {
     readings: z.array(hrvReadingSchema).optional(),
   }),
   hrv_history: z.object({
+    user_context_scope: z.enum(["daily_rows", "not_resolved_for_weekly"]).optional(),
     ...historyBase,
     days: z.array(hrvHistoryDay),
     weeks: z.array(hrvHistoryWeek),
@@ -406,6 +442,7 @@ export const outputSchemas = {
     stages: z.array(sleepDetailStageSchema).optional(),
   }),
   sleep_history: z.object({
+    user_context_scope: z.enum(["daily_rows", "not_resolved_for_weekly"]).optional(),
     ...historyBase,
     days: z.array(sleepHistoryDay),
     weeks: z.array(sleepHistoryWeek),
@@ -541,9 +578,4 @@ export const outputSchemas = {
   }),
 } as const;
 
-export function structuredToolResult<T extends Record<string, unknown>>(value: T) {
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
-    structuredContent: value,
-  };
-}
+export { structuredToolResult } from "./mcp-result";

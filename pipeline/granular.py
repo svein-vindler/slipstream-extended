@@ -135,9 +135,10 @@ def normalize_hrv(day: str, raw: Any) -> dict[str, Any]:
     for reading in readings:
         if not isinstance(reading, dict):
             raise HrvResponseError()
-        timestamp = next((reading.get(key) for key in (
+        timestamp_field = next((key for key in (
             "readingTimeGMT", "readingTimeLocal", "timestamp", "readingTimestamp",
         ) if reading.get(key) is not None), None)
+        timestamp = reading.get(timestamp_field)
         value = next((reading.get(key) for key in (
             "hrvValue", "value", "hrv", "rmssd",
         ) if reading.get(key) is not None), None)
@@ -146,14 +147,29 @@ def normalize_hrv(day: str, raw: Any) -> dict[str, Any]:
             raise HrvResponseError()
         numeric_time = _number(timestamp)
         if numeric_time is not None:
-            if numeric_time <= 0:
+            if 946684800 <= numeric_time <= 4102444800:
+                timestamp_unit = "epoch_seconds"
+            elif 946684800000 <= numeric_time <= 4102444800000:
+                timestamp_unit = "epoch_milliseconds"
+            else:
                 raise HrvResponseError()
+            basis = "utc"
         else:
             try:
-                datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                parsed_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
             except (AttributeError, TypeError, ValueError) as exc:
                 raise HrvResponseError() from exc
-        normalized.append({"timestamp": timestamp, "hrv_ms": value, "raw": reading})
+            timestamp_unit = "iso8601"
+            basis = "utc" if parsed_time.tzinfo is not None else "ambiguous"
+        if timestamp_field == "readingTimeGMT":
+            basis = "utc"
+        elif timestamp_field == "readingTimeLocal":
+            basis = "local_only"
+            if numeric_time is not None:
+                timestamp_unit = timestamp_unit.replace("epoch_", "local_wall_")
+        normalized.append({"timestamp": timestamp, "hrv_ms": value, "raw": reading,
+                           "time_basis": basis, "timestamp_field": timestamp_field,
+                           "timestamp_unit": timestamp_unit})
 
     # Only an explicit empty list with a matching calendar declaration proves
     # absence. Known summary-only data remains readable without a curve.

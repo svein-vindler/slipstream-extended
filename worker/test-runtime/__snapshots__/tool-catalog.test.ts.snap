@@ -2,16 +2,16 @@
 
 exports[`preserves the complete tool contracts with writes=false 1`] = `
 {
-  "count": 24,
-  "hash": "839bceba5716bc3a2a5f96f97198cd451be186cc68c1d54c3cf2046bda1cbd45",
+  "count": 29,
+  "hash": "3f2c571c719505765fe1bed4ee10e1d71ef4ed0282cfc69c27b02f2b2a6fda2a",
   "writes": false,
 }
 `;
 
 exports[`preserves the complete tool contracts with writes=true 1`] = `
 {
-  "count": 26,
-  "hash": "639155043108bb90562d255793536b27a4dd0df3c6eb254cbc2ed92741554337",
+  "count": 32,
+  "hash": "037cc9d5ee3452e94948856143f66342500ef4b618269cc5bfd0e7a7fad42b42",
   "writes": true,
 }
 `;

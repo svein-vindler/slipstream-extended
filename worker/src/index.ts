@@ -1,3 +1,4 @@
+import { readCurrentNightContext, applyNightUserContext } from "./night-view";
 import { DispatchReader } from "./dispatch-reader";
 import { dispatchStatus } from "./dispatch-status";
 import type { DispatchOperation, DispatchClaim, DispatchDescriptor } from "./dispatch-operations";
@@ -36,6 +37,11 @@ import {
   healthBucketKey, bodyCompositionObjectKeys,
 } from "./lib";
 import { SleepHrvTools } from "./sleep-hrv-tools";
+import { dailyHrvNightContext } from "./health-history";
+import { NightSignalsTools } from "./night-signals";
+import { NightContextTools } from "./night-user-context";
+import { NightProductsTools } from "./night-products";
+import { NightTrainingTools } from "./night-training";
 import { registerTrainingTools } from "./training-tools";
 import { ActivityCoachTools } from "./activity-coach-tools";
 import { exactDate, dateRange, PRIVATE_READ_TOOL_ANNOTATIONS } from "./tool-contracts";
@@ -338,38 +344,50 @@ class FitnessService {
       const timezone = validatedHealthTimezone(this.env.HEALTH_TIMEZONE);
       const contextMonths = new Set(displayed.map((row) => row.date.slice(0, 7)));
       const contexts = await Promise.allSettled([
-        this.nights.nightRowsForHealth("sleep", displayed.filter((row) => row.sleepSeconds != null)
-          .map((row) => row.date)),
-        this.nights.nightRowsForHealth("hrv", displayed.filter((row) => row.hrvLastNightAvg != null)
-          .map((row) => row.date)),
+        // Night authority may come from either canonical stream independently of
+        // CSV metric coverage. Existing per-stream month/read limits still apply.
+        this.nights.nightRowsForHealth("sleep", displayed.map((row) => row.date)),
+        this.nights.nightRowsForHealth("hrv", displayed.map((row) => row.date)),
       ]);
       const emptyContext = () => new Map<string, Record<string, unknown>>();
       const sleepRows = contexts?.[0].status === "fulfilled" ? contexts[0].value : emptyContext();
       const hrvRows = contexts?.[1].status === "fulfilled" ? contexts[1].value : emptyContext();
+      const userDates = new Set([...new Set(displayed.map(row => row.date))].sort().reverse().slice(0, 31));
+      const userContexts = new Map<string, ReturnType<typeof readCurrentNightContext>>();
+      const currentUserContext = (date: string) => {
+        if (!userDates.has(date)) return Promise.resolve(null);
+        let pending = userContexts.get(date);
+        if (!pending) { pending = readCurrentNightContext(this.env, date); userContexts.set(date, pending); }
+        return pending;
+      };
       return this.text({ matched: rows.length, showing: Math.min(args.limit, rows.length),
         timezone,
         weight_kg_semantics: "garmin_daily_latest_or_summary_fallback",
+        user_context_limited: new Set(displayed.map(row => row.date)).size > userDates.size,
+        user_context_scope: "recent_31_returned_wake_dates",
         night_context_limited: contextMonths.size > 13,
         night_context_unavailable: contexts?.some((result) => result.status === "rejected") ?? false,
-        days: displayed.map((row) => {
+        days: await Promise.all(displayed.map(async (row) => {
+          const current = await currentUserContext(row.date);
+          const project = (context: ReturnType<typeof nightContext> | null) => context && current
+            ? applyNightUserContext(this.env, row.date, { ...context }, current) : context;
           const sleep = sleepRows.get(row.date);
           const hrv = hrvRows.get(row.date);
-          const hrvSource = hrv?.sleep_start_garmin_local != null ? hrv
-            : sleep?.sleep_start_garmin_local != null ? sleep
-              : hrv?.sleep_start_gmt != null ? hrv : sleep;
+          const hrvContext = dailyHrvNightContext(row.date, hrv, sleep, timezone);
           return {
             ...toHealthSummary(row),
+            ...(current ? { user_context: current.user_context, view: current.view, user_context_resolution: "resolved" }
+              : { user_context_resolution: "not_requested_due_limit" }),
             sleep_night: row.sleepSeconds != null
-              ? nightContext(row.date, sleep?.sleep_start_gmt, sleep?.sleep_end_gmt, timezone,
-                sleep?.sleep_start_garmin_local, sleep?.sleep_end_garmin_local)
+              ? project(nightContext(row.date, sleep?.sleep_start_gmt, sleep?.sleep_end_gmt, timezone,
+                sleep?.sleep_start_garmin_local, sleep?.sleep_end_garmin_local,
+                typeof sleep?.actual_night_timezone === "string" ? sleep.actual_night_timezone : null))
               : null,
-            hrv_night: row.hrvLastNightAvg != null
-              ? nightContext(row.date, hrvSource?.sleep_start_gmt, hrvSource?.sleep_end_gmt,
-                timezone, hrvSource?.sleep_start_garmin_local,
-                hrvSource?.sleep_end_garmin_local)
+            hrv_night: row.hrvLastNightAvg != null || hrv?.status === "available"
+              ? project(hrvContext)
               : null,
           };
-        }) });
+        })) });
     });
 
     server.registerTool("health_trends", {
@@ -394,6 +412,10 @@ class FitnessService {
     });
 
     this.nights.registerTools(server);
+    new NightSignalsTools(this.env).registerTools(server);
+    new NightContextTools(this.env, this.actorKey).registerTools(server);
+    new NightProductsTools(this.env).registerTools(server);
+    new NightTrainingTools(this.env).registerTools(server);
     registerTrainingTools(server, this.env.SLIPSTREAM_DATA);
 
     server.registerTool("body_composition", {

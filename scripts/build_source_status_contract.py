@@ -221,9 +221,18 @@ def main():
         [("night", "fatal_night_transport"), ("night", "fatal_night_auth"), ("activity", "fatal_activity_transport")])]
     output = Path(sys.argv[1])
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps({"producer_sha256": {module.__name__: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+    contract = {"producer_sha256": {module.__name__: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
         for module in (refresh, health_sync, recent_health, refresh.recent_body, refresh.latest_night,
-                       refresh.latest_activity, refresh.refresh_summaries, refresh.manual_activity_refresh)}, "cases": cases}, indent=2) + "\n", encoding="utf-8")
+                       refresh.latest_activity, refresh.refresh_summaries, refresh.manual_activity_refresh)}, "cases": cases}
+    output.write_text(json.dumps(contract, indent=2) + "\n", encoding="utf-8")
+    # Preserve the full producer contract above. Native test module transport
+    # loads each complete case separately instead of serializing one huge module.
+    metadata = {"case_count": len(cases), **{key: value for key, value in contract.items() if key != "cases"}}
+    output.with_name(f"{output.stem}.meta{output.suffix}").write_text(
+        json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    for index, case in enumerate(cases):
+        output.with_name(f"{output.stem}.case-{index:02d}{output.suffix}").write_text(
+            json.dumps(case, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

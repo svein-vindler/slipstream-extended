@@ -2420,7 +2420,8 @@ def test_health_history_month_index_is_incremental_and_gzip_compressed():
 
     assert first["months_written"][0]["days"] == 1
     assert store.puts == [(key, "application/json", "gzip")]
-    assert payload["builder_revision"] == 2
+    # Revision3 excludes unproven/local-only clocks from UTC-derived slopes.
+    assert payload["builder_revision"] == 3
     assert payload["days"][0]["garmin"]["last_night_avg_ms"] == 42
     assert payload["days"][0]["sleep_start_garmin_local"] == "2026-09-20T00:00:00.0"
 

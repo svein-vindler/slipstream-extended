@@ -349,3 +349,7 @@ permissions. See [SDK compatibility and safe upgrade order](docs/GARMIN_SDK_COMP
 Yannique Hecht. The clean public history intentionally does not claim GitHub
 fork ancestry. Slipstream Extended is not affiliated with or endorsed by Garmin,
 Cloudflare, GitHub, Anthropic or OpenAI.
+
+Stored overnight HR/HRV, Body Battery and stress curves are described in [night signals](docs/NIGHT_SIGNALS.md). See [explicit night context](docs/NIGHT_USER_CONTEXT.md) and [personal reference curves](docs/NIGHT_REFERENCE_CURVES.md) for their separate provenance and bounded read contracts.
+
+[Training and subsequent nights](docs/NIGHT_TRAINING.md) compares recorded local activity summaries with stored UTC sleep windows using a bounded offline product; missing coverage and uncertain associations remain explicit.

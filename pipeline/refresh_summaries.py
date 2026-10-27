@@ -14,6 +14,7 @@ from .granular import json_bytes
 from .health_writer import write_health_dataset
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2Store, missing_object
+from .signal_series import DailySignalCollector
 from .sources import garmin, garmin_health
 from .summary_export import publish_derived as export_summaries
 from .summary_publication import prepare_normal_base
@@ -130,12 +131,14 @@ def run(data_dir="data", *, store=None, client=None, now=None, force_reconcile=F
     windows = select_windows(store, data_dir, now, force_reconcile=force_reconcile, required_wide_scopes=missing)
     client = client or garmin._login()
     health_stats = {"sdk_calls": 0, "source_errors": 0, "invalid_dates": 0}
+    signals = DailySignalCollector(store)
     activity_window, health_window = windows["activities"], windows["health"]
     with provider_diagnostics(client) as calls:
         activities = garmin.fetch(days_back=activity_window["days_argument"], data_dir=data_dir,
                                   client=client, end_date=activity_window["end"])
         health = garmin_health.fetch(health_window["start"], health_window["end"], client=client,
-                                    request_pause=request_pause, diagnostics=health_stats)
+                                    request_pause=request_pause, diagnostics=health_stats, signal_sink=signals.collect,
+                                    collect_stress=True)
     # An activity without a UTC start cannot be serialized. Preserve prior data
     # and leave that scope due rather than recording a successful reconciliation.
     activity_complete = all(_valid_activity(activity) for activity in activities)
@@ -149,6 +152,7 @@ def run(data_dir="data", *, store=None, client=None, now=None, force_reconcile=F
     # Receipts are published only after both summaries, snapshots and manifest
     # have been successfully exported. Partial metrics retain old CSV values.
     manifest = export_summaries(data_dir, store=store, base=base, flow_id=flow_id)
+    signal_report = signals.publish()
     hashes = {entry["name"]: entry["sha256"] for entry in manifest["files"]}
     ready = {"activities": activity_complete, "health": health_complete}
     checkpoints = 0
@@ -173,6 +177,7 @@ def run(data_dir="data", *, store=None, client=None, now=None, force_reconcile=F
                           for stream, window in windows.items()},
               "activity_rows_fetched": len(activities), "health_rows_fetched": len(health),
               "health_diagnostics": health_stats, "provider_diagnostics": calls,
+              "signals": signal_report,
               "checkpoints_written": checkpoints,
               "elapsed_ms": round((time.perf_counter() - started) * 1000)}
     log_report("refresh_summaries", report)

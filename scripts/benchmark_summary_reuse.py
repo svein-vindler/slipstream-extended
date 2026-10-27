@@ -72,7 +72,7 @@ class SummaryClient:
             def paginate(self, **kwargs):
                 client.counts["list"] += 1
                 return [{"Contents": [{"Key": key, "Size": len(value["Body"])}
-                                      for key, value in client.objects.items()]}]
+                                      for key, value in client.objects.items() if key.startswith(kwargs.get("Prefix", ""))]}]
 
         return Paginator()
 

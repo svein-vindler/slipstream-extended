@@ -49,7 +49,8 @@ def _recent_allowed(check, stream, now):
         return (check.get("schema_version") == SCHEMA_VERSION
                 and check.get("kind") == "health-index-reconciliation"
                 and check.get("policy_revision") == POLICY_REVISION
-                and check.get("builder_revision") == BUILDER_REVISION
+                # Revision2 receipts remain eligible for bounded recent rebuilding.
+                and check.get("builder_revision") in {2, BUILDER_REVISION}
                 and check.get("stream") == stream and check.get("scope") == "full"
                 and check.get("status") == "checked" and checked.tzinfo is not None
                 and timedelta(0) <= now - checked < INTERVAL)

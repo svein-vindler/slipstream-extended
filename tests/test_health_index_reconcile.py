@@ -232,3 +232,34 @@ def test_real_store_counts_list_pages_across_large_inventory_and_recent_scope():
     assert recent["r2_operations"]["list_pages"] == 4
     assert recent["r2_operations"]["get"] == 6
     assert recent["r2_operations"]["put"] == 0
+
+
+def test_valid_revision2_receipts_keep_rollout_to_bounded_recent_months(client):
+    for stream in SOURCE_PREFIXES:
+        receipt = doc(client, checkpoint_key(stream))
+        receipt["builder_revision"] = 2
+        client.objects[checkpoint_key(stream)]["Body"] = json.dumps(receipt).encode()
+        for month in ("2020-02", "2026-09", "2026-10"):
+            key = index_key(stream, month)
+            old_index = doc(client, key)
+            old_index["builder_revision"] = 2
+            client.objects[key]["Body"] = gzip_json(old_index)
+    historical = {index_key(stream, "2020-02"): client.objects[index_key(stream, "2020-02")]["Body"]
+                  for stream in SOURCE_PREFIXES}
+    client.reset()
+    result = refresh(client)
+    assert all(row["scope"] == "recent" for row in result["results"].values()), (
+        "Revision3 must not trigger a full-history rollout rebuild"
+    )
+    # First write retains the existing bucket-budget inventory (one page/14 metadata rows).
+    assert result["r2_operations"] == {"get": 10, "head": 0, "list_pages": 5,
+                                       "listed_objects": 18, "put": 4}
+    assert all("2020" not in key for key in client.reads)
+    assert all(client.objects[key]["Body"] == old for key, old in historical.items())
+    assert all(doc(client, index_key(stream, month))["builder_revision"] == 3
+               for stream in SOURCE_PREFIXES for month in ("2026-09", "2026-10"))
+    client.reset()
+    repeated = refresh(client)
+    assert all(row["scope"] == "recent" for row in repeated["results"].values())
+    assert repeated["r2_operations"] == {"get": 6, "head": 0, "list_pages": 4,
+                                         "listed_objects": 4, "put": 0}
