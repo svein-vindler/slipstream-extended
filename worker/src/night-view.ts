@@ -1,14 +1,14 @@
 import { R2Storage } from "./r2-storage";
 /** Current explicit user context is independent of source/analysis freshness. */
 import { readNightUserContext, type NightContextReadHooks, type NightUserContextRead } from "./night-user-context";
-import { nightContext, validatedHealthTimezone } from "./night-context";
+import { nightContext, validatedHealthTimezone, type NightFormatting } from "./night-context";
 
 type Row = Record<string, unknown>;
 function record(value: unknown): Row | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Row : null;
 }
 
-export function applyNightUserContext(env: Env, wakeDate: string, value: Row, current: NightUserContextRead): Row {
+export function applyNightUserContext(env: Env, wakeDate: string, value: Row, current: NightUserContextRead, formatting?: NightFormatting): Row {
   const nested = record(value.night_context);
   const prior = nested ?? value;
   const originalSource = record(prior.source_time);
@@ -24,8 +24,8 @@ export function applyNightUserContext(env: Env, wakeDate: string, value: Row, cu
     : zoneWasDeclared || typeof user?.actual_night_timezone === "string"
       ? user?.actual_night_timezone ?? null
       : typeof prior.actual_night_timezone === "string" ? prior.actual_night_timezone : null;
-  const context = nightContext(wakeDate, start, end, validatedHealthTimezone(env.HEALTH_TIMEZONE),
-    source.sleep_start_garmin_local, source.sleep_end_garmin_local, actual);
+  const context = nightContext(wakeDate, start, end, validatedHealthTimezone(env.HEALTH_TIMEZONE, formatting),
+    source.sleep_start_garmin_local, source.sleep_end_garmin_local, actual, formatting);
   // Display follows the selected sleep clock, while the HRV's own raw clocks
   // remain separately available even after a user timezone override.
   const projected: Row = {
