@@ -4,7 +4,7 @@ import { applyNightUserContext } from "./night-view";
 import type { McpServer, RequestId } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { R2Storage, type R2ReadLimits } from "./r2-storage";
-import { nightContext, validatedHealthTimezone } from "./night-context";
+import { nightContext, validatedHealthTimezone, type NightFormatting } from "./night-context";
 import { exactDate, PRIVATE_READ_TOOL_ANNOTATIONS } from "./tool-contracts";
 
 const LIMITS = {
@@ -213,6 +213,7 @@ function channelValues(channels: Channels): Channel[] {
 /** R2 GET has no AbortSignal. Every owned await is checked before and after.
  * An over-deadline operation cannot become success; settlement is not a hard10s guarantee. */
 class SignalRequest {
+  readonly formatting: NightFormatting = { zones: new Map(), instants: new Map() };
   readonly started = performance.now();
   readonly resources = {
     r2_get_attempts: 0, r2_list_attempts: 0, stored_bytes: 0, decoded_bytes: 0, decoded_budget_bytes: 0,
@@ -550,19 +551,28 @@ function finish(channel: Channel, start: number, end: number, hr: boolean, state
 }
 
 function compact(channel: Channel, start: number, end: number, width: number, origin: number) {
+  // finish() orders the points by UTC. Consume each point once across adjacent bins.
+  let cursor = 0;
+  const nextTime = () => cursor < channel.points.length
+    ? Date.parse(channel.points[cursor].timestamp_utc) : Infinity;
+  let time = nextTime();
   for (let first = origin; first < end; first += width) {
     const last = Math.min(first + width, end);
-    const points = channel.points.filter(point => {
-      const time = Date.parse(point.timestamp_utc);
-      return time >= first && time < last;
-    });
+    while (time < first) { cursor++; time = nextTime(); }
+    const values: number[] = [];
+    while (time < last) {
+      values.push(channel.points[cursor].value);
+      cursor++;
+      time = nextTime();
+    }
     channel.bins.push({
       start_utc: iso(Math.max(start, first)), end_utc: iso(last),
-      median: median(points.map(point => point.value)), count: points.length,
+      median: median(values), count: values.length,
     });
   }
   channel.points = [];
 }
+
 function complete(channel: Channel) {
   return ["available", "no_data"].includes(channel.status)
     && !channel.quality_flags.some(flag => flag.startsWith("source_"))
@@ -577,7 +587,7 @@ export class NightSignalsTools {
   constructor(private readonly env: Env) {}
 
   private async night(day: string, state: SignalRequest, resolution: Resolution, alignment: Alignment, selected: ChannelName[]): Promise<NightResult> {
-    const zone = validatedHealthTimezone(this.env.HEALTH_TIMEZONE);
+    const zone = validatedHealthTimezone(this.env.HEALTH_TIMEZONE, state.formatting);
     const channels = emptyChannels(selected, "not_stored");
     const output: NightResult = {
       date: day, wake_date: day, night_of: null, sleep_start_utc: null, sleep_end_utc: null,
@@ -604,9 +614,9 @@ export class NightSignalsTools {
     }
     const sourceContext = nightContext(day, sleep.data.sleep_start_gmt, sleep.data.sleep_end_gmt, zone,
       sleep.data.sleep_start_garmin_local, sleep.data.sleep_end_garmin_local,
-      typeof sleep.data.actual_night_timezone === "string" ? sleep.data.actual_night_timezone : null);
+      typeof sleep.data.actual_night_timezone === "string" ? sleep.data.actual_night_timezone : null, state.formatting);
     output.night_context = sourceContext;
-    Object.assign(output, applyNightUserContext(this.env, day, output, current));
+    Object.assign(output, applyNightUserContext(this.env, day, output, current, state.formatting));
     const context = nightProjectionSchema.parse(output.night_context);
     output.night_of = context.night_of;
     output.timezone = context.timezone;
@@ -825,7 +835,7 @@ export class NightSignalsTools {
         state.resources.returned_points = 0;
         return this.result({
           date: args.date, wake_date: args.date, night_of: null, sleep_start_utc: null, sleep_end_utc: null,
-          timezone: null, configured_timezone: validatedHealthTimezone(this.env.HEALTH_TIMEZONE),
+          timezone: null, configured_timezone: validatedHealthTimezone(this.env.HEALTH_TIMEZONE, state.formatting),
           actual_night_timezone: null, night_context: null, status: "budget_exhausted",
           resolution: args.resolution, alignment: args.alignment, bin_origin_utc: null, method_version: "night-signals-v1",
           channels: emptyChannels(args.channels, "read_error"),

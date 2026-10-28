@@ -52,6 +52,14 @@ daily minimum. Five two-minute samples `[80,48,46,44,42]` in a ten-minute night
 have median46. In a longer night, a shifted full window containing
 `[48,46,44,42]` at80% coverage can instead yield45.
 
+Bulk requests reuse timezone validators and date formatters within that request.
+Each UTC instant is still projected separately, including both sides of DST
+transitions and travel-zone changes. Formatting state is not shared across
+requests; source clocks, nulls and quality flags keep their existing meaning.
+Compact bins consume the sorted UTC readings once while preserving the same
+half-open boundaries, median/count and explicit empty intervals. Request ranges,
+resource limits and failure responses are unchanged.
+
 ## Availability and limits
 
 Channels distinguish `not_stored`, dated `no_data`, `invalid_schema` and
@@ -167,3 +175,4 @@ A synthetic ordinary refresh measured 63 SDK calls, 66 connectapi calls and two 
 A populated synthetic 31-night compact read measured 93 GETs, 31 context LISTs, 10416 processed points and 992 returned bins. Its structured result was 181170 bytes; the component's largest observed wire result was 384245 bytes. Output stays compact under the original limits; denser requests can still require shorter chunks.
 
 Current explicit night context is described in [NIGHT_USER_CONTEXT.md](NIGHT_USER_CONTEXT.md). Bounded offline personal reference products are described in [NIGHT_REFERENCE_CURVES.md](NIGHT_REFERENCE_CURVES.md).
+

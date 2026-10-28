@@ -29,14 +29,25 @@ export interface NightContext {
   time_quality_flags: string[];
 }
 
+/** Formatting state is owned by one request; it contains zones, never source nights. */
+export interface NightFormatting {
+  zones: Map<string, Intl.DateTimeFormat>;
+  instants: Map<string, Intl.DateTimeFormat>;
+}
+
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 /** Invalid or absent configuration must never silently become the Worker's UTC zone. */
-export function validatedHealthTimezone(value: string | undefined): string | null {
+export function validatedHealthTimezone(value: string | undefined, formatting?: NightFormatting): string | null {
   if (!value?.trim() || value.length > 128) return null;
   try {
-    return new Intl.DateTimeFormat("en-US", { timeZone: value.trim() })
-      .resolvedOptions().timeZone;
+    const zone = value.trim();
+    let formatter = formatting?.zones.get(zone);
+    if (!formatter) {
+      formatter = new Intl.DateTimeFormat("en-US", { timeZone: zone });
+      formatting?.zones.set(zone, formatter);
+    }
+    return formatter.resolvedOptions().timeZone;
   } catch (error) {
     if (error instanceof RangeError) return null;
     throw error;
@@ -99,11 +110,16 @@ function garminLocalInstant(instant: Date, value: unknown) {
   return wallInstant(wallMilliseconds, offsetMinutes);
 }
 
-function localInstant(instant: Date, timezone: string) {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
-  }).formatToParts(instant);
+function localInstant(instant: Date, timezone: string, formatters: Map<string, Intl.DateTimeFormat>) {
+  let formatter = formatters.get(timezone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-GB", {
+      timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+    });
+    formatters.set(timezone, formatter);
+  }
+  const parts = formatter.formatToParts(instant);
   const part = (type: string) => parts.find((item) => item.type === type)?.value ?? "";
   const year = part("year");
   const month = part("month");
@@ -149,6 +165,7 @@ export function nightContext(
   sleepStartGarminLocal: unknown,
   sleepEndGarminLocal: unknown,
   actualNightTimezone: string | null | undefined,
+  formatting?: NightFormatting,
 ): NightContext;
 export function nightContext(
   wakeDate: string,
@@ -158,16 +175,19 @@ export function nightContext(
   sleepStartGarminLocal: unknown = null,
   sleepEndGarminLocal: unknown = null,
   actualNightTimezone: string | null = null,
+  formatting?: NightFormatting,
 ): NightContext {
+  const requestFormatting = formatting ?? { zones: new Map<string, Intl.DateTimeFormat>(), instants: new Map<string, Intl.DateTimeFormat>() };
+  const formatters = requestFormatting.instants;
   const start = utcInstant(sleepStartGmt);
   const end = utcInstant(sleepEndGmt);
   const garminStart = start ? garminLocalInstant(start, sleepStartGarminLocal) : null;
   const garminEnd = end ? garminLocalInstant(end, sleepEndGarminLocal) : null;
-  const configuredStart = timezone && start ? localInstant(start, timezone) : null;
-  const configuredEnd = timezone && end ? localInstant(end, timezone) : null;
-  const actualTimezone = validatedHealthTimezone(actualNightTimezone ?? undefined);
-  const actualStart = actualTimezone && start ? localInstant(start, actualTimezone) : null;
-  const actualEnd = actualTimezone && end ? localInstant(end, actualTimezone) : null;
+  const configuredStart = timezone && start ? localInstant(start, timezone, formatters) : null;
+  const configuredEnd = timezone && end ? localInstant(end, timezone, formatters) : null;
+  const actualTimezone = validatedHealthTimezone(actualNightTimezone ?? undefined, requestFormatting);
+  const actualStart = actualTimezone && start ? localInstant(start, actualTimezone, formatters) : null;
+  const actualEnd = actualTimezone && end ? localInstant(end, actualTimezone, formatters) : null;
   const useGarmin = garminStart !== null;
   const startLocal = actualStart ?? garminStart ?? configuredStart;
   // Never combine a travel-night Garmin start with an unrelated configured-zone end.
@@ -180,14 +200,14 @@ export function nightContext(
   const midpointInstant = validSleepInterval && start && end
     ? new Date(start.getTime() + (end.getTime() - start.getTime()) / 2) : null;
   const midpoint = !midpointInstant ? null
-    : actualTimezone ? localInstant(midpointInstant, actualTimezone)
+    : actualTimezone ? localInstant(midpointInstant, actualTimezone, formatters)
     : useGarmin && garminEnd && garminStart.offsetMinutes === garminEnd.offsetMinutes
       ? wallInstant(midpointInstant.getTime() + garminStart.offsetMinutes * 60_000,
         garminStart.offsetMinutes)
       : useGarmin && zoneMatchesGarmin && timezone
-        ? localInstant(midpointInstant, timezone)
-        : !useGarmin && timezone ? localInstant(midpointInstant, timezone) : null;
-  const configuredMidpoint = midpointInstant && timezone ? localInstant(midpointInstant, timezone) : null;
+        ? localInstant(midpointInstant, timezone, formatters)
+        : !useGarmin && timezone ? localInstant(midpointInstant, timezone, formatters) : null;
+  const configuredMidpoint = midpointInstant && timezone ? localInstant(midpointInstant, timezone, formatters) : null;
   const timeQualityFlags: string[] = actualTimezone ? [] : ["actual_timezone_unknown"];
   if (!validSleepInterval) timeQualityFlags.push("invalid_sleep_interval");
   if ([sleepStartGmt, sleepEndGmt, sleepStartGarminLocal, sleepEndGarminLocal]
