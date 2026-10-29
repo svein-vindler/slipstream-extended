@@ -4,9 +4,9 @@
 #
 #    pip-compile --generate-hashes --index-url=https://pypi.org/simple --no-emit-index-url --no-strip-extras --output-file=requirements.txt --pip-args='--retries 0 --timeout 20 --keyring-provider disabled' requirements.in
 #
-boto3==1.43.116 \
-    --hash=sha256:89fa15e7d1788fb17cbd694b034beba57f43f30f58f4506913a5b62220f8ba01 \
-    --hash=sha256:9dca4dbd464b189041b27b5a02280bd5e02c3051bebf6bd03cd0e47aaf558030
+boto3==1.43.118 \
+    --hash=sha256:ab8f3d2c622ef039338b4f228d97ea55f1abd573d84bb9b9a5ee8cb6780c0ccd \
+    --hash=sha256:c0620f799e0f0c222ba42c337b65cdbcd3da38a3121187f634d8926cbbb28a9c
     # via -r requirements.in
 botocore==1.43.118 \
     --hash=sha256:7f3f9d88cc9e847587690f82a42e3c3c292c3026c92c1e60d68a9310018e003f \
@@ -358,12 +358,6 @@ six==1.17.0 \
     --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274 \
     --hash=sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81
     # via python-dateutil
-tzdata==2026.5 ; sys_platform == "win32" \
-    --hash=sha256:8cc73c0a0bfca7dbfa59235d60b2eff82231dee33f53d206db1acd9173cfc0a7 \
-    --hash=sha256:b683bd1b6659ddcd810ff02ad09ba821d4bf1065072805063eb35c49617905ac
-    # via
-    #   -r requirements.in
-    #   garminconnect
 ua-generator==2.1.6 \
     --hash=sha256:532b8769f3dbb914b5ace2846a47cdfa2b3a2d17a9c82cfef53d19280045b18e \
     --hash=sha256:877285e6adab3d6b0f9b295d954d121fc21a0305be8526038218e8f08be76df6
