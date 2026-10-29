@@ -3,5 +3,5 @@ garminconnect==0.3.20
 # Garmin's timezone lookup needs an IANA database on Windows; retain the marker
 # and verified hashes when regenerating the shared locks on Linux.
 tzdata==2026.5 ; sys_platform == "win32"
-boto3==1.43.116
+boto3==1.43.118
 garmin-fit-sdk==21.218.0
