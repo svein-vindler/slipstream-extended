@@ -49,7 +49,8 @@ it does not establish a particular complete, fresh activity/night package.
   windows. Normal admitted
   claims allow at most two run GETs; after the original two-hour expiry only an
   explicit status request can spend a remaining ticket, with at most one run GET.
-  No automatic work starts after expiry.
+  No automatic polling window starts after expiry. A new explicit sync request
+  has the separate, single-use overlap lane described below.
 - After all three tickets are spent, a later expressly requested
   `refresh_status(request_id=..., terminal_inspection=true)` can admit at most
   one additional inspection for that same modern targeted operation. Omitted
@@ -62,6 +63,44 @@ it does not establish a particular complete, fresh activity/night package.
   Unknown, failed and interrupted observations spend it; no refund/reset/TTL
   release or legacy adoption. `polls` remains three and the daily debit remains.
   Existing per-call bounds still apply, including one run GET after expiry.
+- A new explicit `sync_latest_activity` or `sync_latest_night` request can
+  reconcile at most one old blocker before ordinary admission, including an old
+  active job for the same scope. This is not a background poll or an automatic
+  `terminal_inspection`. The old job must be modern, targeted, still active,
+  past its original two-hour expiry and at exactly three spent polls. Its exact
+  startup receipt, already verified active run/source/descriptor and owner must
+  all still match. The persisted job scope/owner must match the original request.
+  For an activity repair, the immutable receipt-bound descriptor separately names
+  the resolved activity/date; it may fill omitted original fields, but cannot
+  contradict an explicit original date or activity ID. Its resolved scope and
+  repair origin must match that transformation. General, candidate, unmarked
+  legacy, conflicted and open-claim records cannot enter this lane.
+  New requests capture one admission instant for requestedAt and the2hour expiry.
+  Older modern producers used two clock reads. A differing requestedAt is accepted
+  only when it is no later than admission and the unchanged original
+  sync-latest-kind[-repair] lease token is this operation ID, with lease expiry
+  minus its original300s (normal) or60s (repair) equal to job expiry minus2hours.
+  Missing/replaced/mismatched lease evidence stays held; no skew tolerance, lease
+  reconstruction, migration, data rewrite or age-only release is permitted.
+  `overlap_reconcile_used: true` and an `overlap_reconcile` read claim are saved
+  together under the coordinator's transaction/revision CAS before I/O. The lane
+  reserves the operation and actor/operation/run25second gates, allows one
+  bounded startup-receipt GET and one exact GitHub run GET, and permits no report,
+  diagnostics, run-list or dispatch calls. Each control object remains bounded
+  at64KiB. `polls`, `terminal_inspection_used` and the old daily debit stay intact.
+  An active run, missing/failed/mismatched read or interruption spends the one
+  opportunity and keeps the guard; changing date, actor or alias cannot refill
+  it. An old timestamp only admits this check and never proves job termination.
+- Only in that already-verified overlap lane, matching authoritative GitHub
+  terminal metadata settles job ownership even if the final data report is
+  missing, or the run failed/cancelled. Startup, repository, workflow, event,
+  ref, source SHA, exact run, owner and revision checks remain mandatory. This
+  does not attest to source checks, package completeness or freshness: those
+  keep their separate unknown/stale/partial status. Ordinary polling and explicit
+  terminal-inspection report-coverage rules are unchanged. After settlement,
+  `beginFresh` atomically checks active jobs and blockers again; any new dispatch
+  still needs its ordinary cooldown and daily allowance. A second blocker is
+  returned without another reconciliation read in the same request.
 - Each claim can reserve one fixed request receipt and one fixed report and
   diagnostics object, each under the existing 64 KiB control-object limit.
   Metadata reads do not create an additional run-GET allowance.
@@ -105,11 +144,11 @@ Synthetic operation counts and wall time do not attest live cost, billed CPU or
 production exploitation.
 
 A rollout must check compatibility with older in-flight consumers. New code
-reads older operations without the optional inspection field. Older strict
-operation readers cannot decode a record with the new marker or claim intent;
+reads older operations without the optional inspection or overlap marker. Older
+strict operation readers cannot decode a record with either new marker or claim intent;
 rollback can therefore make those jobs fail-closed unavailable even though their
 history and spent opportunity remain. Rolling code back does not undo the
-persisted inspection or make it available again. Code rollback
+persisted inspection/reconciliation or make it available again. Code rollback
 that ignores the new owners/claims is unsafe while they exist. Preserve the
 coordinator state and use reviewed forward correction or an explicitly controlled
 quiescent transition. Do not delete rows, reset tickets, repoint R2 or restore data

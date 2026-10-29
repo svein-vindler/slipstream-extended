@@ -462,6 +462,11 @@ export class FreshDataService {
         sync_status: status, dispatch_status: dispatchStatus(operation) });
   }
 
+  private async reconcileBlocker(operation: DispatchOperation): Promise<DispatchOperation> {
+    const reader = new DispatchReader(this.env, this.config, keys => this.jsonNullable(keys, true), this.now, this.fetcher);
+    return (await reader.observe(operation, "overlap_reconcile", this.actorKey)).operation;
+  }
+
   async request(request: FreshRequest): Promise<Json> {
     const snapshot = await this.snapshot(request);
     if (snapshot.status === "ambiguous_activity" || snapshot.status === "activity_date_unknown" && snapshot.source_fresh
@@ -473,9 +478,18 @@ export class FreshDataService {
     }
     const coordinator = this.env.REFRESH_COORDINATOR.getByName("global");
     const active = await coordinator.activeFreshJob(snapshot.scope, this.now());
-    if (active) return this.status(active, false, "shared");
+    if (active) {
+      const operation = await coordinator.dispatchOperation(active.request_id);
+      if (!operation || (await this.reconcileBlocker(operation)).owner_released_at === null)
+        return this.status(active, false, "shared");
+    }
     const blocked = await coordinator.blockingDispatch(request.kind, "targeted:" + snapshot.scope);
-    if (blocked) return this.overlap(snapshot, blocked);
+    if (blocked) {
+      const reconciled = active ? blocked : await this.reconcileBlocker(blocked);
+      if (reconciled.owner_released_at === null) return this.overlap(snapshot, reconciled);
+    }
+    // beginFresh below atomically rechecks both same-scope jobs and blockers;
+    // the old read cannot authorize a duplicate POST or bypass a second owner.
     if (snapshot.source_fresh && ["no_effective_profile", "endurance_data_unavailable"].includes(String(snapshot.package.coach_status))) {
       return this.response(snapshot, `Activity data is stored, but Coach Input is blocked (${snapshot.package.coach_status}). Add an effective profile or use supported analysis before retrying; polling cannot resolve this.`,
         { reason: String(snapshot.package.coach_status) });
@@ -493,8 +507,9 @@ export class FreshDataService {
       ref: this.config.ref, mode: request.kind, scope: freshScope(sent), date: sent.date ?? null,
       activity_id: sent.activityId ?? null, new_expected: sent.newExpected ?? false, repair_only: repairOnly,
       include_granular: false, components: request.kind === "night" ? ["sleep", "hrv"] : ["activity_files", "coach_input", "context"] };
+    const admittedAt = this.now();
     const reservation = await coordinator.beginFresh(snapshot.scope, request.kind,
-      JSON.stringify({ ...request, requestedAt: this.now() }), this.now(), repairOnly, descriptor);
+      JSON.stringify({ ...request, requestedAt: admittedAt }), admittedAt, repairOnly, descriptor);
     if (reservation.operation) return this.overlap(snapshot, reservation.operation);
     if (!reservation.job) return this.response(snapshot, "The targeted sync cooldown or daily safety budget prevents another job.",
       { reason: reservation.reason, retry_after_seconds: Math.max(1, Math.ceil((reservation.retryAfterMs ?? 1000) / 1000)) });
