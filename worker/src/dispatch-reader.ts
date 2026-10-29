@@ -56,7 +56,12 @@ export class DispatchReader {
         if (observed.source && current.descriptor && current.startup_receipt
           && observed.source.source_sha === current.startup_receipt.source.source_sha) {
           const descriptor = current.descriptor;
-          let covered = observed.run.status !== "completed";
+          // This narrow lane already has exact receipt + verified run/source
+          // coverage. Job termination does not require a successful data report.
+          // No report/diagnostics reads or data-readiness inference in this lane.
+          const lifecycleOnly = intent === "overlap_reconcile"
+            && current.dispatch_state === "verified_active" && current.verified_binding !== null;
+          let covered = observed.run.status !== "completed" || lifecycleOnly;
           if (!covered) {
             const raw = await take("report") ? await this.read([`refresh/reports/${observed.run.id}.json`]) : {};
             const diagnostics = await take("diagnostics") ? pipelineDiagnosticsSchema.safeParse(

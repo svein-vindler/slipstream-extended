@@ -42,7 +42,7 @@ const postOutcomeSchema = z.discriminatedUnion("kind", [
 ]);
 export type DispatchIdentity = { operation_id: string; owner_key: string; owner_token: string };
 export type DispatchClaim = { claim_id: string; claim_revision: number;
-  intent: "initial" | "shared" | "status" | "terminal_inspection"; run_get_limit: number; run_gets_used: number;
+  intent: "initial" | "shared" | "status" | "terminal_inspection" | "overlap_reconcile"; run_get_limit: number; run_gets_used: number;
   receipt_used: boolean; report_used: boolean; diagnostics_used: boolean;
   status_actor?: string; status_run_reserved?: boolean };
 export type DispatchBinding = { run_id: number; repository: string; workflow: string; ref: string;
@@ -69,9 +69,10 @@ export type DispatchOperation = DispatchIdentity & {
   general_initial_reads_used: number | null;
   startup_receipt?: DispatchStartupReceipt | null;
   terminal_inspection_used?: true;
+  overlap_reconcile_used?: true;
 };
 const claimSchema = z.strictObject({ claim_id: z.uuid(), claim_revision: z.number().int().safe().nonnegative(),
-  intent: z.enum(["initial", "shared", "status", "terminal_inspection"]), run_get_limit: z.number().int().min(1).max(5),
+  intent: z.enum(["initial", "shared", "status", "terminal_inspection", "overlap_reconcile"]), run_get_limit: z.number().int().min(1).max(5),
   run_gets_used: z.number().int().min(0).max(5), receipt_used: z.boolean(), report_used: z.boolean(), diagnostics_used: z.boolean(),
   status_actor: z.string().min(1).max(128).optional(), status_run_reserved: z.boolean().optional(),
 }).refine(value => value.run_gets_used <= value.run_get_limit);
@@ -86,10 +87,14 @@ const operationSchema = z.strictObject({ operation_id: z.uuid(), owner_key: z.st
   evidence_conflict: z.boolean(), owner_released_at: z.number().finite().nonnegative().nullable(),
   read_claim: claimSchema.nullable(), startup_receipt: dispatchReceiptSchema.nullable().optional(), general_initial_reads_used: z.number().int().min(0).max(5).nullable(),
   terminal_inspection_used: z.literal(true).optional(),
+  overlap_reconcile_used: z.literal(true).optional(),
 }).refine(value => value.operation_id === value.owner_token)
   .refine(value => !value.terminal_inspection_used || value.origin !== "general"
     && value.descriptor !== null && "startup_receipt" in value)
   .refine(value => value.read_claim?.intent !== "terminal_inspection" || value.terminal_inspection_used === true)
+  .refine(value => !value.overlap_reconcile_used || value.origin !== "general"
+    && value.startup_receipt != null && value.verified_binding != null)
+  .refine(value => value.read_claim?.intent !== "overlap_reconcile" || value.overlap_reconcile_used === true)
   .refine(value => !value.startup_receipt || receiptMatches(value, value.descriptor, value.startup_receipt)
     && value.candidate_run_id === value.startup_receipt.run_id
     && (!value.verified_binding || value.verified_binding.source_sha === value.startup_receipt.source.source_sha))
@@ -278,12 +283,12 @@ export class DispatchOperations {
   claim(identity: DispatchIdentity, intent: DispatchClaim["intent"], actorKey: string, nowMs: number,
     reserveStatus: (key: string, now: number, ttl: number) => boolean):
     { acquired: boolean; operation: DispatchOperation | null; claim?: DispatchClaim; retryAfterMs?: number } {
-    if (!Number.isFinite(nowMs) || !["initial", "shared", "status", "terminal_inspection"].includes(intent)) throw new Error("Invalid dispatch claim.");
+    if (!Number.isFinite(nowMs) || !["initial", "shared", "status", "terminal_inspection", "overlap_reconcile"].includes(intent)) throw new Error("Invalid dispatch claim.");
     const op = this.current(identity);
     if (!op || !this.owns(op) || op.read_claim || op.evidence_conflict || !("startup_receipt" in op)) return { acquired: false, operation: op };
     let limit: number;
     if (op.origin === "general") {
-      if (intent === "shared" || intent === "terminal_inspection") return { acquired: false, operation: op };
+      if (intent === "shared" || intent === "terminal_inspection" || intent === "overlap_reconcile") return { acquired: false, operation: op };
       if (intent === "initial") {
         const lease = this.storage.sql.exec<{ token: string; expires_at: number }>(
           "SELECT token, expires_at FROM refresh_leases WHERE lease_key = 'refresh-today'").toArray()[0];
@@ -308,7 +313,65 @@ export class DispatchOperations {
         scope: string; kind: string; run_id: number | null; request: string }>(
         "SELECT polls, expires_at, state, scope, kind, run_id, request FROM fresh_jobs WHERE request_id = ?", op.operation_id).toArray()[0];
       if (!job || job.state !== "active") return { acquired: false, operation: op };
-      if (intent === "terminal_inspection") {
+      if (intent === "overlap_reconcile") {
+        // A new explicit sync request gets one separate, durable chance to
+        // reconcile an old already-verified job. Time admits a read, not release.
+        let request: { requestedAt?: unknown; kind?: unknown; date?: unknown; activityId?: unknown; newExpected?: unknown } | undefined;
+        try { request = JSON.parse(job.request); } catch { /* Unknown request stays held. */ }
+        const requestedAt = request?.requestedAt;
+        const date = request?.date, activityId = request?.activityId;
+        const newExpected = request?.newExpected === undefined ? false : request.newExpected;
+        const validRequest = request?.kind === job.kind
+          && (date === undefined || z.iso.date().safeParse(date).success)
+          && (activityId === undefined || typeof activityId === "string" && /^\d{1,20}$/.test(activityId))
+          && typeof newExpected === "boolean" && (job.kind !== "night" || typeof date === "string");
+        const originalScope = job.kind === "night" ? `night/${date}`
+          : `activity/${date ?? "latest"}/${activityId ?? "latest"}/${newExpected ? "new" : "known"}`;
+        const descriptor = op.descriptor;
+        const repair = descriptor?.repair_only === true;
+        // A repair preserves the original request/job owner, but the producer
+        // resolves date/activity for the independently receipt-bound descriptor.
+        const descriptorMatches = descriptor !== null && descriptor.mode === job.kind
+          && descriptor.new_expected === newExpected && (repair
+            ? job.kind === "activity" && descriptor.activity_id !== null && descriptor.date !== null
+              && descriptor.scope === `activity/${descriptor.date}/${descriptor.activity_id}/${newExpected ? "new" : "known"}`
+              && (date === undefined || date === descriptor.date)
+              && (activityId === undefined || activityId === descriptor.activity_id)
+            : descriptor.scope === originalScope && (date ?? null) === descriptor.date
+              && (activityId ?? null) === descriptor.activity_id);
+        const admittedAt = job.expires_at - 2 * 60 * 60_000;
+        let originalTimeProven = typeof requestedAt === "number" && requestedAt === admittedAt;
+        if (!originalTimeProven && typeof requestedAt === "number" && Number.isSafeInteger(requestedAt)
+          && requestedAt >= 0 && requestedAt <= admittedAt) {
+          // Old producers sampled requestedAt and beginFresh time separately.
+          // An unchanged exact original admission lease can prove that row;
+          // there is no skew tolerance, reconstructed lease or time-only release.
+          const lease = this.storage.sql.exec<{ token: string; expires_at: number }>(
+            "SELECT token, expires_at FROM refresh_leases WHERE lease_key = ?",
+            `sync-latest-${job.kind}${repair ? "-repair" : ""}`).toArray()[0];
+          originalTimeProven = Boolean(lease && lease.token === op.operation_id
+            && Number.isSafeInteger(lease.expires_at)
+            && lease.expires_at - (repair ? 60_000 : 5 * 60_000) === admittedAt);
+        }
+        if (job.polls !== 3 || op.overlap_reconcile_used || !actorKey || actorKey.length > 128
+          || op.dispatch_state !== "verified_active" || !op.startup_receipt || !op.verified_binding
+          || typeof requestedAt !== "number" || !Number.isSafeInteger(requestedAt) || requestedAt < 0
+          || !Number.isSafeInteger(job.expires_at) || !originalTimeProven || nowMs < job.expires_at
+          || !validRequest || job.scope !== originalScope || !descriptorMatches
+          || op.owner_key !== "targeted:" + job.scope || job.run_id !== op.candidate_run_id
+          || op.verified_binding.run_id !== op.candidate_run_id
+          || op.origin !== (repair ? "targeted_repair" : job.kind === "night" ? "targeted_night" : "targeted_activity"))
+          return { acquired: false, operation: op };
+        const keys = ["targeted-poll:" + op.operation_id, "refresh-status-op:" + actorKey + ":" + op.operation_id,
+          "refresh-status:" + actorKey + ":" + op.candidate_run_id];
+        if (keys.some(key => {
+          const row = this.storage.sql.exec<{ expires_at: number }>(
+            "SELECT expires_at FROM refresh_leases WHERE lease_key = ?", key).toArray()[0];
+          return row && row.expires_at > nowMs;
+        })) return { acquired: false, operation: op };
+        for (const key of keys) if (!reserveStatus(key, nowMs, 25_000)) throw new Error("Overlap admission changed.");
+        op.overlap_reconcile_used = true;
+      } else if (intent === "terminal_inspection") {
         if (job.polls !== 3 || op.terminal_inspection_used || !actorKey || actorKey.length > 128
           || !op.descriptor || op.descriptor.scope !== job.scope || op.descriptor.mode !== job.kind
           || op.owner_key !== "targeted:" + job.scope || job.run_id !== op.candidate_run_id
@@ -363,6 +426,7 @@ export class DispatchOperations {
       }
       owned.run_gets_used++;
     } else {
+      if (owned.intent === "overlap_reconcile" && kind !== "receipt") return null;
       if (!["receipt", "report", "diagnostics"].includes(kind)
         || kind !== "receipt" && owned.run_gets_used === 0) return null;
       const key = `${kind}_used` as "receipt_used" | "report_used" | "diagnostics_used";

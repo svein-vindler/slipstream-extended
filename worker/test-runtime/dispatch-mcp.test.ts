@@ -861,3 +861,214 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     expect(await coordinator.dispatchForRun(55)).toMatchObject({ verified_binding: { source_sha: "a".repeat(40) }, owner_released_at: expect.any(Number) });
   });
 }
+
+// Drive actual authenticated MCP + coordinator through all three ordinary polls.
+async function expiredActiveActivity(protocol: string, kind: "activity" | "night" = "activity") {
+  const state = { terminal: false, outcome: "success", sha: "a".repeat(40), status: 200, posts: 0,
+    beforeRun: undefined as (() => Promise<void>) | undefined };
+  provider = async (input, init) => {
+    if (init?.method === "POST") return Response.json({ workflow_run_id: ++state.posts === 1 ? 55 : 66 });
+    const runId = Number(String(input).split("/").at(-1));
+    expect([55, 66]).toContain(runId);
+    if (runId === 55 && state.beforeRun) await state.beforeRun();
+    if (state.status !== 200) return new Response("SYNTHETIC_PROVIDER_TEXT", { status: state.status });
+    return Response.json({ id: runId, status: runId === 55 && state.terminal ? "completed" : "in_progress",
+      conclusion: runId === 55 && state.terminal ? state.outcome : null, event: "workflow_dispatch",
+      path: ".github/workflows/refresh.yml", repository: { full_name: "synthetic/slipstream" },
+      head_repository: { full_name: "synthetic/slipstream" }, head_branch: "main", head_sha: state.sha,
+      created_at: new Date(NOW).toISOString(), updated_at: new Date(Date.now()).toISOString(),
+      html_url: `https://github.com/synthetic/slipstream/actions/runs/${runId}` });
+  };
+  const first = await call(kind === "night" ? "sync_latest_night" : "sync_latest_activity",
+    kind === "night" ? { wake_date: DAY } : { expected_date: DAY, new_activity_expected: true }, protocol);
+  await call("refresh_status", { request_id: first.request_id }, protocol);
+  await call("refresh_status", { request_id: first.request_id }, protocol);
+  expect(await coordinator.freshJob(first.request_id)).toMatchObject({ polls: 3, state: "active" });
+  expect(await coordinator.dispatchOperation(first.request_id)).toMatchObject({ dispatch_state: "verified_active" });
+  vi.mocked(Date.now).mockReturnValue(NOW + 3 * 86_400_000);
+  return { state, id: first.request_id as string };
+}
+
+for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  it.each([
+    ["2026-10-17", "success"], [DAY, "success"], [DAY, "failure"], [DAY, "cancelled"],
+  ])(`reconciles an expired exact job before %s readmission (%s) through ${protocol}`, async (day, outcome) => {
+    const { state, id } = await expiredActiveActivity(protocol);
+    state.terminal = true; state.outcome = outcome;
+    const before = { ...counts };
+    // Missing final report: exact job termination does not attest to data readiness.
+    const next = await call("sync_latest_activity", { expected_date: day, new_activity_expected: true }, protocol);
+    expect(await coordinator.dispatchOperation(id)).toMatchObject({ dispatch_state: "verified_terminal",
+      owner_released_at: expect.any(Number), overlap_reconcile_used: true });
+    expect((await coordinator.dispatchOperation(id))!.terminal_inspection_used).toBeUndefined();
+    // Normal beginFresh retention prunes completed fresh_jobs older than two days.
+    expect(await coordinator.freshJob(id)).toBeNull();
+    expect(next).toMatchObject({ accepted: true, data_ready: false, dispatch_status: { state: "verified_active" } });
+    expect(next.request_id).not.toBe(id);
+    expect(counts.github_get - before.github_get).toBe(2); // old exact run + new initial observation
+    expect(counts.github_post - before.github_post).toBe(1);
+    expect(counts.r2_control_get - before.r2_control_get).toBe(2); // receipts only
+    expect(counts.r2_put).toBe(0);
+  });
+
+  it.each(["active", "403", "429", "wrong_sha", "missing_receipt", "changed_receipt"])(
+    `retains the expired guard on %s and never refunds its overlap check through ${protocol}`, async variant => {
+      const { state, id } = await expiredActiveActivity(protocol);
+      state.terminal = variant !== "active";
+      if (variant === "403" || variant === "429") state.status = Number(variant);
+      if (variant === "wrong_sha") state.sha = "b".repeat(40);
+      if (variant === "missing_receipt") await env.SLIPSTREAM_DATA.delete(`refresh/requests/${id}.json`);
+      if (variant === "changed_receipt") {
+        const receipt = syntheticStartupReceipt((await coordinator.dispatchOperation(id))!, 55);
+        receipt.source.source_sha = "b".repeat(40);
+        await env.SLIPSTREAM_DATA.put(`refresh/requests/${id}.json`, JSON.stringify(receipt));
+      }
+      const before = { ...counts };
+      const blocked = await call("sync_latest_activity", { expected_date: "2026-10-17", new_activity_expected: true }, protocol);
+      expect(blocked).toMatchObject({ reason: "dispatch_overlap", accepted: false, data_ready: false });
+      expect(await coordinator.dispatchOperation(id)).toMatchObject({ owner_released_at: null, read_claim: null,
+        overlap_reconcile_used: true });
+      expect(counts.github_get - before.github_get).toBeLessThanOrEqual(1);
+      expect(counts.r2_control_get - before.r2_control_get).toBe(1);
+      expect(counts.github_post).toBe(1);
+      state.status = 200; state.sha = "a".repeat(40); state.terminal = true;
+      vi.mocked(Date.now).mockReturnValue(NOW + 4 * 86_400_000);
+      const spent = { ...counts }; actor = crypto.randomUUID();
+      await call("sync_latest_activity", { expected_date: "2026-10-18", new_activity_expected: true }, protocol);
+      expect(counts.github_get).toBe(spent.github_get);
+      expect(counts.github_post).toBe(spent.github_post);
+      expect(counts.r2_control_get).toBe(spent.r2_control_get);
+    });
+
+  it(`admits one old exact GET across concurrent distinct requests through ${protocol}`, async () => {
+    const { state, id } = await expiredActiveActivity(protocol); state.terminal = true;
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    state.beforeRun = async () => { entered(); await held; };
+    const before = { ...counts };
+    const pending = call("sync_latest_activity", { expected_date: "2026-10-17", new_activity_expected: true }, protocol);
+    await started;
+    try {
+      const blocked = await call("sync_latest_activity", { expected_date: "2026-10-16", new_activity_expected: true }, protocol);
+      expect(blocked.reason).toBe("dispatch_overlap"); expect(counts.github_post).toBe(1);
+    } finally { release(); }
+    const next = await pending;
+    expect(next.accepted).toBe(true);
+    expect(counts.github_get - before.github_get).toBe(2);
+    expect(counts.github_post - before.github_post).toBe(1);
+    expect((await coordinator.dispatchOperation(id))!.read_claim).toBeNull();
+  });
+}
+
+for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  it.each(["stale", "fresh"])(`separates exact terminal ownership from a %s complete package through ${protocol}`, async freshness => {
+    const { state, id } = await expiredActiveActivity(protocol);
+    const clock = NOW + 2 * 60 * 60_000 + 1;
+    vi.mocked(Date.now).mockReturnValue(clock); state.terminal = true;
+    const prefix = "activities/2026/73";
+    await env.SLIPSTREAM_DATA.put(`${prefix}/activity.v1.json`, JSON.stringify({ schema_version: 1, source: "garmin-fit",
+      activity: { id: "73", type: "strength_training", name: "Synthetic", start_time_local: DAY + "T12:00:00",
+        start_time_gmt: DAY + "T10:00:00Z" }, normalized_strength_session: { sets: [] } }));
+    await env.SLIPSTREAM_DATA.put(`${prefix}/activity.fit`, "synthetic-not-a-real-fit");
+    await env.SLIPSTREAM_DATA.put(`refresh/checks/v1/activity/${DAY}/latest/new.json`, JSON.stringify({
+      scope: `activity/${DAY}/latest/new`, source_checked: true, status: "ready",
+      checked_at: new Date(freshness === "fresh" ? clock : NOW).toISOString() }));
+    const next = await call("sync_latest_activity", { expected_date: "2026-10-15", new_activity_expected: true }, protocol);
+    expect(next.accepted).toBe(true);
+    const before = { ...counts };
+    const old = await call("refresh_status", { request_id: id }, protocol);
+    expect(old).toMatchObject({ terminal: true, data_ready: false, freshness: { complete: true,
+      source_fresh: freshness === "fresh" }, sync_status: { job_state: "completed", data_state: "unknown" },
+      dispatch_status: { state: "verified_terminal", duplicate_guard_held: false } });
+    expect(counts.github_get).toBe(before.github_get);
+    expect(counts.r2_control_get).toBe(before.r2_control_get);
+  });
+}
+
+it.each(["2025-03-26", "2026-07-28"])("uses the same single bounded reconciliation for night requests through %s", async protocol => {
+  const { state, id } = await expiredActiveActivity(protocol, "night"); state.terminal = true;
+  const before = { ...counts };
+  const next = await call("sync_latest_night", { wake_date: "2026-10-17" }, protocol);
+  expect(next).toMatchObject({ accepted: true, data_ready: false });
+  expect(await coordinator.dispatchOperation(id)).toMatchObject({ dispatch_state: "verified_terminal",
+    overlap_reconcile_used: true, owner_released_at: expect.any(Number) });
+  expect(counts.github_get - before.github_get).toBe(2);
+  expect(counts.github_post - before.github_post).toBe(1);
+  expect(counts.r2_control_get - before.r2_control_get).toBe(2);
+});
+
+// Round02: actual repair producer and advancing admission clock, no row repair/migration.
+function provider02() {
+  const state = { terminal: false, posts: 0 };
+  provider = async (input, init) => {
+    if (init?.method === "POST") return Response.json({ workflow_run_id: ++state.posts === 1 ? 55 : 66 });
+    const id = Number(String(input).split("/").at(-1)); expect([55, 66]).toContain(id);
+    return Response.json({ id, status: id === 55 && state.terminal ? "completed" : "in_progress",
+      conclusion: id === 55 && state.terminal ? "success" : null, event: "workflow_dispatch",
+      path: ".github/workflows/refresh.yml", repository: { full_name: "synthetic/slipstream" },
+      head_repository: { full_name: "synthetic/slipstream" }, head_branch: "main", head_sha: "a".repeat(40),
+      created_at: new Date(NOW).toISOString(), updated_at: new Date(Date.now()).toISOString(),
+      html_url: `https://github.com/synthetic/slipstream/actions/runs/${id}` });
+  };
+  return state;
+}
+async function repairSource02() {
+  const prefix = "activities/2026/73";
+  await env.SLIPSTREAM_DATA.put(`${prefix}/activity.v1.json`, JSON.stringify({ schema_version: 1, source: "garmin-fit",
+    source_fit_sha256: "synthetic-fit-sha", activity: { id: "73", type: "running", name: "Synthetic",
+      start_time_local: DAY + "T12:00:00", start_time_gmt: DAY + "T10:00:00Z" }, decode_errors: [] }));
+  await env.SLIPSTREAM_DATA.put(`${prefix}/activity.endurance.v1.json`, JSON.stringify({ schema_version: 1,
+    available: true, activity: { id: "73" }, summary: { distance_m: 5000 }, trackpoints: [] }));
+  for (const name of ["activity.fit", "activity.tcx"]) await env.SLIPSTREAM_DATA.put(`${prefix}/${name}`, "synthetic");
+  await env.SLIPSTREAM_DATA.put("coach/profiles/v1/2026-01-01/hr-" + "a".repeat(24) + ".json",
+    JSON.stringify({ profile_id: "synthetic-profile", effective_from: "2026-01-01",
+      zones: [{ label: "Z1", min_bpm: 100, max_bpm: 150 }] }));
+  const scope = `activity/${DAY}/latest/new`;
+  await env.SLIPSTREAM_DATA.put(`refresh/checks/v1/${scope}.json`, JSON.stringify({ scope, source_checked: true,
+    checked_at: new Date(NOW).toISOString(), status: "ready", activity_id: "garmin-73" }));
+}
+for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  it.each([DAY, "2026-10-17"])(`reconciles actual resolved repair before target %s through ${protocol}`, async day => {
+    const state = provider02(); await repairSource02();
+    const first = await call("sync_latest_activity", { expected_date: DAY, new_activity_expected: true }, protocol);
+    const op = (await coordinator.dispatchOperation(first.request_id))!;
+    const job = (await coordinator.freshJob(first.request_id))!;
+    expect(op).toMatchObject({ origin: "targeted_repair", descriptor: { activity_id: "73", date: DAY,
+      scope: `activity/${DAY}/73/new`, repair_only: true } });
+    expect(job.scope).toBe(`activity/${DAY}/latest/new`);
+    expect(JSON.parse(job.request).activityId).toBeUndefined();
+    await call("refresh_status", { request_id: first.request_id }, protocol);
+    await call("refresh_status", { request_id: first.request_id }, protocol);
+    expect(await coordinator.freshJob(first.request_id)).toMatchObject({ polls: 3, state: "active" });
+    vi.mocked(Date.now).mockReturnValue(NOW + 3 * 86_400_000); state.terminal = true;
+    const before = { ...counts };
+    const next = await call("sync_latest_activity", { expected_date: day, new_activity_expected: true }, protocol);
+    expect(next).toMatchObject({ accepted: true, data_ready: false });
+    expect(next.request_id).not.toBe(first.request_id);
+    expect(await coordinator.dispatchOperation(first.request_id)).toMatchObject({ dispatch_state: "verified_terminal",
+      overlap_reconcile_used: true, owner_released_at: expect.any(Number) });
+    expect(counts.github_get - before.github_get).toBe(2);
+    expect(counts.github_post - before.github_post).toBe(1);
+    expect(counts.r2_control_get - before.r2_control_get).toBe(2);
+  });
+
+  it(`captures one admission instant while the actual MCP writer clock advances through ${protocol}`, async () => {
+    const state = provider02(); let ticking = NOW;
+    vi.mocked(Date.now).mockImplementation(() => ticking++);
+    const first = await call("sync_latest_activity", { expected_date: DAY, new_activity_expected: true }, protocol);
+    const job = (await coordinator.freshJob(first.request_id))!;
+    expect(job.expires_at).toBe(JSON.parse(job.request).requestedAt + 2 * 60 * 60_000);
+    vi.mocked(Date.now).mockReturnValue(job.expires_at - 2 * 60 * 60_000 + 30_000);
+    await call("refresh_status", { request_id: first.request_id }, protocol);
+    await call("refresh_status", { request_id: first.request_id }, protocol);
+    expect(await coordinator.freshJob(first.request_id)).toMatchObject({ polls: 3, state: "active" });
+    vi.mocked(Date.now).mockReturnValue(NOW + 3 * 86_400_000); state.terminal = true;
+    const before = { ...counts };
+    const next = await call("sync_latest_activity", { expected_date: "2026-10-17", new_activity_expected: true }, protocol);
+    expect(next.accepted).toBe(true);
+    expect(await coordinator.dispatchOperation(first.request_id)).toMatchObject({ dispatch_state: "verified_terminal" });
+    expect(counts.github_get - before.github_get).toBe(2);
+    expect(counts.github_post - before.github_post).toBe(1);
+  });
+}
