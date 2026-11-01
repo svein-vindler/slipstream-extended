@@ -45,12 +45,12 @@ body-composition, strength and GPS-free endurance analysis. It does not expose:
 - Garmin session tokens, Personal API keys, access tokens, account bindings or passwords
 - Cloudflare or GitHub credentials
 
-Garmin data access has a fail-closed application-level read-only policy. The
+The ordinary pipeline/MCP Garmin facade has a fail-closed application-level read-only policy. The
 legacy shared login installs it before API access and returns a facade exposing only
 the reads used by the pipeline. Both the SDK data-request boundary and its HTTP
 session reject non-GET requests, unreviewed endpoints, request bodies, method
 overrides and redirects. Unknown SDK transport layouts fail closed. There is no
-configuration switch to permit Garmin writes; `MCP_WRITES_ENABLED` only enables
+configuration switch to permit arbitrary Garmin writes; `MCP_WRITES_ENABLED` only enables
 the separate bounded R2 coach-profile/context tools.
 
 Authentication and token renewal still use the SDK's separate authentication
@@ -184,6 +184,28 @@ writes. Unsupported source features preserve existing detailed artifacts.
 
 Personal original archives keep byte-integrity evidence separate from activity association. FIT CRC validation does not prove a Garmin activity ID or authorize canonical promotion. Other original formats beyond FIT/GPX/TCX remain unsupported by this adapter.
 
+## Opt-in local dated chart reload
+
+The ordinary Garmin facade and MCP remain strict GET-only. The separate local
+`pipeline.history_backfill collect --archive-reload` operator command creates a
+fresh SDK 0.3.20 connection with a narrow physical HTTP guard: its only fitness
+POST is the fixed chart-reload route for the one currently admitted plan date.
+No arbitrary method, URL, device ID or request body is accepted for that route,
+and it is never exposed through the general facade or an MCP tool. Authentication
+remains a separate fixed-endpoint operation. There is no global Garmin write
+switch. Personal archive reload is unsupported with no fallback.
+
+This explicit exception consumes the installer's Garmin archive quota. The
+command serializes all physical sends, enforces local request/body/time limits,
+keeps raw responses and known native/durable proof, persists real429/operator
+not-before pauses, and never steals a lock or adopts an unknown run. Collection
+reads only selected Garmin credentials; a separate explicit publication phase
+reads R2 credentials, uses conditional writes and exact readback, and makes no
+Garmin requests. Plan/status/missing/help are offline. The ignored `.granular`
+job directory and exported CSV are private health data and must not be published.
+These application controls are not a provider-issued read-only scope or a sandbox
+against arbitrary compromised Python code. See [local history operation](docs/LOCAL_HISTORY_BACKFILL.md).
+
 
 Incremental night references use stored R2 data only. A completed sleep/HRV
 source plan can still drain already queued closed references; this is separate
@@ -194,3 +216,10 @@ in-flight evidence prevent automatic adoption of an unknown write. The scoped
 transport guard rejects denial/unknown and incomplete inventory before another
 write; ordinary R2 clients use one total attempt with explicit connect/read I/O
 timeouts. No new schedule, credential or provider write route is introduced.
+
+The opt-in local history publisher uses the same dirty-source hook. Its bounded
+reference drain, canonical intent/source/ready checkpoints and HRV indexes share
+GET400/LIST100/PUT100/2MiB and one store inventory. Known capacity defers targets
+before intent; unknown writes retain the owner and remote intent. A later explicit
+publication may contact R2 for pending references after all curves are published;
+no Garmin request or provider credential is used by that phase.

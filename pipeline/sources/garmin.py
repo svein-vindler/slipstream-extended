@@ -42,6 +42,36 @@ def _login(*, env=None, chosen=None):
     return read_only
 
 
+def _history_login(chosen, install):
+    """Internal dated-history connection; never returned through the read facade.
+
+    The separate operator port installs its physical date/verb guard on both
+    sessions before this centralized SDK construction performs any login call.
+    """
+    from garminconnect import Garmin
+
+    from .provider_config import ProviderSelection
+
+    if (
+        not isinstance(chosen, ProviderSelection)
+        or chosen.provider != "legacy"
+        or not chosen.account
+    ):
+        raise ValueError("Bound legacy history account required.")
+    sdk = Garmin()
+    install(sdk.client._api_session)
+    install(sdk.client.cs)
+    import json
+
+    credential = chosen.credential()
+    if not isinstance(json.loads(credential), dict):
+        raise ValueError("Serialized legacy session required.")
+    sdk.login(credential)
+    if sdk.display_name != chosen.account:
+        raise ValueError("Garmin account mismatch.")
+    return sdk
+
+
 def _parse_start(raw: dict) -> datetime | None:
     # GMT is an explicit source clock; a naive local timestamp is never used here.
     value = raw.get("startTimeGMT")

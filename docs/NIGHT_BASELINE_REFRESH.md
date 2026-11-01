@@ -14,7 +14,11 @@ The hook covers `health_sync.store_day` (sleep/HRV),
 `local_import.run_import_cycle`, the merged `hrv_backfill`, sleep
 `health_detail_backfill`, `night_local_repair`, and HRV R2 `granular_export`.
 Unsupported streams do not trigger storage reads. Local-file-only export stays
-local. No pending/unmerged history-backfill module is assumed to be installed.
+local. The opt-in `pipeline.history_backfill publish` also uses this source hook.
+It drains at most two existing closed periods before source/index work, leaves
+newly queued work for a later explicit publish or ordinary ingestion, and never
+adds a budget/stage or fetches Garmin in its publication phase. See
+[local history](LOCAL_HISTORY_BACKFILL.md) for its separate bounded commands.
 
 The queue is `health/night-products/v1/refresh-queue.json`. A changed canonical
 source uses a conditional dirty intent, conditional source write plus exact

@@ -193,6 +193,18 @@ def _preserve_observations(incoming: dict[str, Any], previous: dict[str, Any]) -
                 "source_revisions_truncated": len(revisions) > 16,
             }}
 
+def prepare_signal_day(day: str, raw_channels: dict[str, Any]) -> dict[str, Any]:
+    """Pure canonical preparation for an explicitly missing daily source.
+
+    No store, credentials, dirty queue or publication is touched. Existing-object
+    preservation remains the responsibility of the conditional importer.
+    """
+    signal_key(day)
+    return {"schema_version": 1, "source": "garmin", "date": day,
+            "channels": {name: _preserve_observations(_channel(day, name, raw), {})
+                         for name, raw in raw_channels.items()}}
+
+
 class DailySignalCollector:
     """Buffer existing replies, then publish one combined additive object per day."""
 
