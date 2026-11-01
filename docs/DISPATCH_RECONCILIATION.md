@@ -67,7 +67,10 @@ it does not establish a particular complete, fresh activity/night package.
   reconcile at most one old blocker before ordinary admission, including an old
   active job for the same scope. This is not a background poll or an automatic
   `terminal_inspection`. The old job must be modern, targeted, still active,
-  past its original two-hour expiry and at exactly three spent polls. Its exact
+  past its original two-hour expiry and have used one, two or three ordinary
+  polls (an integer count). A client may have stopped checking before its third
+  ticket; this does not remove the same single-use overlap opportunity. Zero,
+  negative, fractional or over-budget counts remain ineligible. Its exact
   startup receipt, already verified active run/source/descriptor and owner must
   all still match. The persisted job scope/owner must match the original request.
   For an activity repair, the immutable receipt-bound descriptor separately names
@@ -89,7 +92,9 @@ it does not establish a particular complete, fresh activity/night package.
   diagnostics, run-list or dispatch calls. Each control object remains bounded
   at64KiB. `polls`, `terminal_inspection_used` and the old daily debit stay intact.
   An active run, missing/failed/mismatched read or interruption spends the one
-  opportunity and keeps the guard; changing date, actor or alias cannot refill
+  opportunity and keeps the guard; age alone never releases an active or unknown
+  job. The existing ordinary poll count is not changed or refunded, and remaining
+  ordinary tickets retain their normal status-request rules. Changing date, actor or alias cannot refill
   it. An old timestamp only admits this check and never proves job termination.
 - Only in that already-verified overlap lane, matching authoritative GitHub
   terminal metadata settles job ownership even if the final data report is
@@ -143,6 +148,8 @@ canonical package reads and active coordinator state; it adds no R2 history scan
 Synthetic operation counts and wall time do not attest live cost, billed CPU or
 production exploitation.
 
+A merged patch does not change a Worker still running an older build; private
+rollout and its existing authentication gates remain separate release steps.
 A rollout must check compatibility with older in-flight consumers. New code
 reads older operations without the optional inspection or overlap marker. Older
 strict operation readers cannot decode a record with either new marker or claim intent;
