@@ -19,7 +19,7 @@ from ..schema import (
 )
 
 
-def _login(*, env=None, chosen=None):
+def _login(*, env=None, chosen=None, identity_diagnostic=False):
     # Freeze the choice once; only the selected credential source is read.
     from .provider_config import ProviderSelection, selection
     chosen = selection(os.environ if env is None else env) if chosen is None else chosen
@@ -36,7 +36,19 @@ def _login(*, env=None, chosen=None):
 
     g = Garmin()
     read_only = ReadOnlyGarmin(g, track_provider=chosen.account is not None)  # Install the policy before any API request.
-    g.login(credential)
+    if identity_diagnostic:
+        import json
+
+        from .provider_diagnostic import LegacyDiagnostic
+
+        # The selected *_FILE loader already returned its contents. Never pass a
+        # tokenstore path to this diagnostic, so the SDK cannot persist tokens.
+        if not isinstance(json.loads(credential), dict):
+            raise ValueError("Serialized legacy session required.")
+        with LegacyDiagnostic(g):
+            g.login(credential)
+    else:
+        g.login(credential)
     if chosen.account is not None and g.display_name != chosen.account:
         raise ValueError("Garmin account does not match GARMIN_ACCOUNT.")
     return read_only

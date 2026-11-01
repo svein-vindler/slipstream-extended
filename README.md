@@ -94,6 +94,9 @@ A matching stored revision permits parsed-summary reuse; it is not a new Garmin
 source check. Cache reuse, object upload time, job completion and completeness
 of the requested workout/night must be distinguished from source freshness.
 
+See [refresh diagnostics](docs/REFRESH_DIAGNOSTICS.md) for bounded activity
+discovery, old dispatch reservations and a connection check without a data sync.
+
 ## Install
 
 Each installation needs its own Garmin, GitHub and Cloudflare accounts, plus an

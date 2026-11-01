@@ -145,6 +145,64 @@ def _private_provider_logs():
             logger.removeFilter(projection)
 
 
+def failure_category(error):
+    """Closed diagnostic labels from typed errors, never exception text or names.
+
+    Categories describe a failed attempt; they never authorize retry, provider
+    fallback, lease release or a claim that data is empty.
+    """
+    from botocore.exceptions import ClientError
+    from garminconnect import (
+        GarminConnectAuthenticationError,
+        GarminConnectConnectionError,
+        GarminConnectTooManyRequestsError,
+    )
+
+    from .sources.garmin_personal import PersonalSourceError
+    from .sources.garmin_policy import GarminReadOnlyViolation
+    from .sources.provider_diagnostic import CATEGORIES, ProviderDiagnosticError
+
+    for _ in range(4):
+        if isinstance(error, ProviderDiagnosticError):
+            return error.category if isinstance(error.category, str) and error.category in CATEGORIES else "operation_failed"
+        if isinstance(error, GarminReadOnlyViolation):
+            return "garmin_policy_rejected"
+        if isinstance(error, GarminConnectAuthenticationError):
+            return "garmin_authentication_required"
+        if isinstance(error, GarminConnectTooManyRequestsError):
+            return "garmin_rate_limited"
+        if isinstance(error, GarminConnectConnectionError):
+            return "garmin_connection_failed"
+        if isinstance(error, PersonalSourceError):
+            if not isinstance(error.status, str):
+                return "operation_failed"
+            return {
+                "auth_required": "garmin_authentication_required",
+                "account_mismatch": "garmin_account_mismatch",
+                "rate_limited": "garmin_rate_limited",
+                "schema_unverified": "garmin_response_unverified",
+                "payload_limit": "garmin_response_limit",
+            }.get(error.status, "operation_failed")
+        if isinstance(error, ClientError):
+            response = error.response if isinstance(error.response, dict) else {}
+            detail = response.get("Error")
+            code = detail.get("Code") if isinstance(detail, dict) else None
+            if isinstance(code, str):
+                return {
+                    "ExpiredToken": "r2_authentication_required",
+                    "InvalidAccessKeyId": "r2_authentication_required",
+                    "SignatureDoesNotMatch": "r2_authentication_required",
+                    "AccessDenied": "r2_access_denied",
+                    "SlowDown": "r2_rate_limited",
+                    "RequestTimeout": "r2_request_timeout",
+                }.get(code, "operation_failed")
+            return "operation_failed"
+        error = error.__cause__
+        if error is None:
+            break
+    return "operation_failed"
+
+
 def safe_cli(main):
     """Sanitize only the CLI boundary; run() and its private consumers keep original errors."""
     @functools.wraps(main)
@@ -160,7 +218,11 @@ def safe_cli(main):
             except KeyboardInterrupt:
                 print("Pipeline stopped: interrupted.", file=sys.stderr)
                 raise SystemExit(130) from None
-            except Exception:
-                print("Pipeline failed: operation_failed.", file=sys.stderr)
+            except Exception as exc:
+                try:
+                    category = failure_category(exc)
+                except Exception:
+                    category = "operation_failed"
+                print(f"Pipeline failed: {category}.", file=sys.stderr)
                 raise SystemExit(1) from None
     return wrapped

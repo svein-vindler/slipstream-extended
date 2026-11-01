@@ -303,3 +303,51 @@ activity metadata.
 
 When uncertain, stop and inspect the staged tree with
 `python scripts/public_release_check.py` before pushing anything public.
+
+## Diagnose a failed Garmin job without another data refresh
+
+Hosted CLI failures keep a failed exit code and project only fixed categories,
+such as `garmin_authentication_required`, `garmin_rate_limited`,
+`r2_access_denied` or `operation_failed`. Unknown failures remain unknown:
+a category is not permission to retry, clear a dispatch guard, change provider
+or treat a missing response as an empty day. Raw provider messages remain private.
+
+For a concrete failed-source investigation, explicitly run **Check Garmin
+connection** (`check-garmin-connection.yml`) once in the private installation.
+This manual-only job shares the existing `garmin-sync` concurrency group.
+It uses the configured provider and existing selected credential to authenticate
+and verify identity. It requests no activities, health days or chart reloads,
+has no R2 credentials, and does not trigger the refresh/Coach workflow chain.
+The equivalent local command is `python -m pipeline.provider_check`; it uses
+the current environment and any explicitly selected `GARMIN_PROVIDER_FILE`.
+It reads the selected credential value, or the contents of its explicitly
+configured `GARMINTOKENS_FILE` / `GARMIN_PERSONAL_API_KEY_FILE`. It does not
+automatically load dotenv, persist or rotate credentials, change provider, or
+modify configuration. A necessary normal token refresh before any refusal stays
+in memory; it is not saved to the selected credential file.
+
+The legacy diagnostic installs a policy only on its fresh SDK instance, including
+its separate CFFI authentication POST boundary. At the first non-200 response,
+transport failure or unverified response it stops before SDK refresh/replay;
+redirects are disabled. Normal application login outside this explicit check is
+unchanged. The local diagnostic ceiling is eight physical HTTP attempts, 5 MiB
+of total response data, a checked 120-second elapsed limit and a checked
+30-second response limit, with at least 1.5 seconds between sends and 5/20-second
+connect/read I/O timeouts. These are application bounds, not Garmin quotas or
+CPU-time guarantees; the hosted job also retains its five-minute timeout.
+
+On a failed legacy check, output contains only fixed category/phase, physical
+attempt count and validated HTTP status (or null for no observed response).
+401, 403, 429 and transport/unknown outcomes remain distinct. A 403 can reflect
+an access policy or challenge; it is not proof that a credential expired.
+No URI, account, header, token or provider response text is logged.
+
+An authenticated result only verifies the connection. It does not verify R2
+access, data freshness, completeness, or the existence of a particular workout.
+On a rejection or unknown result, stop. Use the fixed status/phase evidence to
+choose the next explicit investigation; do not infer credential expiry from a
+403 or missing response. If renewal is actually required, use the documented
+login/setup flow and update only the existing selected private Actions secret. Never add passwords to a scheduled job, silently switch
+provider, or retry a rejected token until it happens to work.
+A stale package and a terminal workflow are separate facts; terminal dispatch
+inspection must use the exact original operation/run binding.
