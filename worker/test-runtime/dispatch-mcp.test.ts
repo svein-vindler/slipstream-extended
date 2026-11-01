@@ -862,8 +862,9 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
   });
 }
 
-// Drive actual authenticated MCP + coordinator through all three ordinary polls.
-async function expiredActiveActivity(protocol: string, kind: "activity" | "night" = "activity") {
+// Drive authenticated MCP + coordinator through the requested ordinary poll count.
+async function expiredActiveActivity(protocol: string, kind: "activity" | "night" = "activity",
+  polls: 1 | 2 | 3 = 3, expiredAt = NOW + 3 * 86_400_000) {
   const state = { terminal: false, outcome: "success", sha: "a".repeat(40), status: 200, posts: 0,
     beforeRun: undefined as (() => Promise<void>) | undefined };
   provider = async (input, init) => {
@@ -881,11 +882,10 @@ async function expiredActiveActivity(protocol: string, kind: "activity" | "night
   };
   const first = await call(kind === "night" ? "sync_latest_night" : "sync_latest_activity",
     kind === "night" ? { wake_date: DAY } : { expected_date: DAY, new_activity_expected: true }, protocol);
-  await call("refresh_status", { request_id: first.request_id }, protocol);
-  await call("refresh_status", { request_id: first.request_id }, protocol);
-  expect(await coordinator.freshJob(first.request_id)).toMatchObject({ polls: 3, state: "active" });
+  for (let used = 1; used < polls; used++) await call("refresh_status", { request_id: first.request_id }, protocol);
+  expect(await coordinator.freshJob(first.request_id)).toMatchObject({ polls, state: "active" });
   expect(await coordinator.dispatchOperation(first.request_id)).toMatchObject({ dispatch_state: "verified_active" });
-  vi.mocked(Date.now).mockReturnValue(NOW + 3 * 86_400_000);
+  vi.mocked(Date.now).mockReturnValue(expiredAt);
   return { state, id: first.request_id as string };
 }
 
@@ -1100,4 +1100,106 @@ it.each(["2025-03-26", "2026-07-28"])("accepts a valid missing-workout sync when
   expect(counts.github_post).toBe(1);
   expect(pages.length).toBeGreaterThanOrEqual(1);
   expect(pages.every(page => page.prefix === "activities/2026/" && page.limit === 1000)).toBe(true);
+});
+
+
+// A client can leave after1/2 ordinary windows; the separate overlap lane is
+// still single-use and does not spend/refund those remaining ordinary tickets.
+for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  it.each([
+    [1, DAY, "success"], [2, "2026-10-13", "success"],
+    [1, DAY, "failure"], [2, "2026-10-13", "cancelled"],
+  ] as const)(`reconciles an abandoned exact job after %i polls before %s (%s) through ${protocol}`, async (polls, day, outcome) => {
+    const { state, id } = await expiredActiveActivity(protocol, "activity", polls, NOW + 2 * 60 * 60_000 + 1);
+    state.terminal = true; state.outcome = outcome;
+    const before = { ...counts };
+    const next = await call("sync_latest_activity", { expected_date: day, new_activity_expected: true }, protocol);
+    expect(next).toMatchObject({ accepted: true, data_ready: false }); expect(next.request_id).not.toBe(id);
+    expect(await coordinator.dispatchOperation(id)).toMatchObject({ dispatch_state: "verified_terminal",
+      owner_released_at: expect.any(Number), overlap_reconcile_used: true });
+    expect((await coordinator.dispatchOperation(id))!.terminal_inspection_used).toBeUndefined();
+    expect(await coordinator.freshJob(id)).toMatchObject({ state: outcome === "success" ? "completed" : "failed", polls });
+    expect(counts.github_get - before.github_get).toBe(2); // old exact run + new admitted initial run
+    expect(counts.r2_control_get - before.r2_control_get).toBe(2); // receipts only
+    expect(counts.github_post - before.github_post).toBe(1); expect(counts.r2_put).toBe(0);
+  });
+
+  it.each([
+    [1, "active"], [2, "403"], [1, "429"],
+    [2, "wrong_sha"], [1, "missing_receipt"], [2, "changed_receipt"],
+  ] as const)(`keeps an abandoned %i-poll job held on %s without refilling its overlap lane through ${protocol}`, async (polls, variant) => {
+    const { state, id } = await expiredActiveActivity(protocol, "activity", polls, NOW + 2 * 60 * 60_000 + 1);
+    state.terminal = variant !== "active";
+    if (variant === "403" || variant === "429") state.status = Number(variant);
+    if (variant === "wrong_sha") state.sha = "b".repeat(40);
+    if (variant === "missing_receipt") await env.SLIPSTREAM_DATA.delete(`refresh/requests/${id}.json`);
+    if (variant === "changed_receipt") {
+      const receipt = syntheticStartupReceipt((await coordinator.dispatchOperation(id))!, 55);
+      receipt.source.source_sha = "b".repeat(40);
+      await env.SLIPSTREAM_DATA.put(`refresh/requests/${id}.json`, JSON.stringify(receipt));
+    }
+    const before = { ...counts };
+    const next = await call("sync_latest_activity", { expected_date: "2026-10-13", new_activity_expected: true }, protocol);
+    expect(next).toMatchObject({ accepted: false, data_ready: false, reason: "dispatch_overlap" });
+    expect(await coordinator.dispatchOperation(id)).toMatchObject({ owner_released_at: null, read_claim: null,
+      overlap_reconcile_used: true });
+    expect(await coordinator.freshJob(id)).toMatchObject({ state: "active", polls });
+    expect(counts.github_get - before.github_get).toBeLessThanOrEqual(1);
+    expect(counts.r2_control_get - before.r2_control_get).toBe(1); expect(counts.github_post).toBe(1);
+    state.terminal = true; state.status = 200; state.sha = "a".repeat(40);
+    vi.mocked(Date.now).mockReturnValue(NOW + 3 * 60 * 60_000); actor = crypto.randomUUID();
+    const spent = { ...counts };
+    await call("sync_latest_activity", { expected_date: "2026-10-12", new_activity_expected: true }, protocol);
+    expect(counts.github_get).toBe(spent.github_get); expect(counts.github_post).toBe(spent.github_post);
+    expect(counts.r2_control_get).toBe(spent.r2_control_get);
+  });
+
+  it(`keeps one-poll readmission atomic across concurrent explicit requests through ${protocol}`, async () => {
+    const { state, id } = await expiredActiveActivity(protocol, "activity", 1, NOW + 2 * 60 * 60_000 + 1);
+    state.terminal = true;
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    state.beforeRun = async () => { entered(); await held; };
+    const before = { ...counts };
+    const pending = call("sync_latest_activity", { expected_date: "2026-10-13", new_activity_expected: true }, protocol);
+    await started;
+    try {
+      const blocked = await call("sync_latest_activity", { expected_date: "2026-10-12", new_activity_expected: true }, protocol);
+      expect(blocked.reason).toBe("dispatch_overlap"); expect(counts.github_post).toBe(1);
+    } finally { release(); }
+    expect((await pending).accepted).toBe(true);
+    expect(counts.github_get - before.github_get).toBe(2);
+    expect(counts.r2_control_get - before.r2_control_get).toBe(2);
+    expect(counts.github_post - before.github_post).toBe(1);
+    expect(await coordinator.freshJob(id)).toMatchObject({ state: "completed", polls: 1 });
+  });
+
+  it.each([0, -1, 1.5, 4])(`rejects corrupt poll count %s without external reads through ${protocol}`, async polls => {
+    const { state, id } = await expiredActiveActivity(protocol, "activity", 1, NOW + 2 * 60 * 60_000 + 1);
+    state.terminal = true;
+    await runInDurableObject(coordinator, (_instance, storage) => storage.storage.sql.exec(
+      "UPDATE fresh_jobs SET polls = ? WHERE request_id = ?", polls, id).toArray());
+    const before = { ...counts };
+    await call("sync_latest_activity", { expected_date: "2026-10-13", new_activity_expected: true }, protocol);
+    expect((await coordinator.dispatchOperation(id))!.owner_released_at).toBeNull();
+    expect((await coordinator.dispatchOperation(id))!.overlap_reconcile_used).toBeUndefined();
+    expect(counts.github_get).toBe(before.github_get); expect(counts.github_post).toBe(before.github_post);
+    expect(counts.r2_control_get).toBe(before.r2_control_get);
+  });
+}
+
+
+it.each(["2025-03-26", "2026-07-28"])("reconciles a two-poll exact night job without consuming a third ordinary ticket through %s", async protocol => {
+  const { state, id } = await expiredActiveActivity(protocol, "night", 2, NOW + 2 * 60 * 60_000 + 1);
+  state.terminal = true;
+  const before = { ...counts };
+  const next = await call("sync_latest_night", { wake_date: "2026-10-13" }, protocol);
+  expect(next).toMatchObject({ accepted: true, data_ready: false });
+  expect(await coordinator.dispatchOperation(id)).toMatchObject({ dispatch_state: "verified_terminal",
+    overlap_reconcile_used: true, owner_released_at: expect.any(Number) });
+  expect(await coordinator.freshJob(id)).toMatchObject({ state: "completed", polls: 2 });
+  expect(counts.github_get - before.github_get).toBe(2);
+  expect(counts.r2_control_get - before.r2_control_get).toBe(2);
+  expect(counts.github_post - before.github_post).toBe(1);
 });

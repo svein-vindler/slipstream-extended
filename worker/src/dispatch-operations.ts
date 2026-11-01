@@ -353,7 +353,7 @@ export class DispatchOperations {
             && Number.isSafeInteger(lease.expires_at)
             && lease.expires_at - (repair ? 60_000 : 5 * 60_000) === admittedAt);
         }
-        if (job.polls !== 3 || op.overlap_reconcile_used || !actorKey || actorKey.length > 128
+        if (!Number.isInteger(job.polls) || job.polls < 1 || job.polls > 3 || op.overlap_reconcile_used || !actorKey || actorKey.length > 128
           || op.dispatch_state !== "verified_active" || !op.startup_receipt || !op.verified_binding
           || typeof requestedAt !== "number" || !Number.isSafeInteger(requestedAt) || requestedAt < 0
           || !Number.isSafeInteger(job.expires_at) || !originalTimeProven || nowMs < job.expires_at
