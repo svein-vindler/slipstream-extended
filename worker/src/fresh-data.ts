@@ -174,12 +174,17 @@ export class FreshDataService {
     return stored ? record(stored.data) : null;
   }
 
-  private async list(prefix: string, limit = 100): Promise<R2Object[]> {
+  private async listPage(prefix: string, limit = 100): Promise<R2Objects> {
     this.diagnostics.canonical_lists++;
     const began = performance.now();
     let listed;
     try { listed = await this.env.SLIPSTREAM_DATA.list({ prefix, limit }); }
     finally { this.diagnostics.r2_read_ms += performance.now() - began; }
+    return listed;
+  }
+
+  private async list(prefix: string, limit = 100): Promise<R2Object[]> {
+    const listed = await this.listPage(prefix, limit);
     if (listed.truncated) throw new Error("Canonical R2 listing exceeded its bounded limit; select an exact activity ID.");
     return listed.objects;
   }
@@ -296,7 +301,16 @@ export class FreshDataService {
       [this.now(), this.now() - 7 * 86_400_000, this.now() + 86_400_000]
         .map((date) => String(new Date(date).getUTCFullYear())))]);
     if (!ids.length) {
-      const recent = (await Promise.all([...years].map((year) => this.list(`activities/${year}/`, 1000)))).flat()
+      const pages = await Promise.all([...years].map((year) => this.listPage(`activities/${year}/`, 1000)));
+      if (pages.some(page => page.truncated)) {
+        // A bounded discovery page cannot prove absence or select the latest
+        // canonical workout. Keep it explicitly incomplete; an authorized
+        // source request still follows the existing lease/cooldown budgets.
+        result.status = "activity_discovery_incomplete";
+        result.missing_components = ["bounded_activity_discovery"];
+        return;
+      }
+      const recent = pages.flatMap(page => page.objects)
         .filter((a) => /\/activity\.v1\.json(?:\.gz)?$/.test(a.key))
         .sort((a, b) => b.uploaded.getTime() - a.uploaded.getTime()).slice(0, 20);
       ids = recent.map((a) => a.key.split("/")[2]);

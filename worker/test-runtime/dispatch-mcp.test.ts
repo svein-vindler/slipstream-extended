@@ -1072,3 +1072,32 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     expect(counts.github_post - before.github_post).toBe(1);
   });
 }
+
+it.each(["2025-03-26", "2026-07-28"])("accepts a valid missing-workout sync when bounded year discovery is truncated through %s", async protocol => {
+  provider02();
+  const original = testEnv.SLIPSTREAM_DATA;
+  const pages: Array<{ prefix: string; limit: number }> = [];
+  testEnv.SLIPSTREAM_DATA = new Proxy(original, { get(target, property) {
+    const method = Reflect.get(target, property);
+    if (property === "list") return async (options: R2ListOptions) => {
+      if (options.prefix === "activities/2026/") {
+        counts.r2_list++;
+        pages.push({ prefix: options.prefix, limit: options.limit! });
+        return { truncated: true, cursor: "synthetic-cursor", delimitedPrefixes: [],
+          objects: Array.from({ length: 1000 }, (_, i) => ({
+            key: `activities/2026/1/context/v1/${i}.json`, uploaded: new Date(NOW),
+          })) };
+      }
+      return Reflect.apply(method, target, [options]);
+    };
+    return typeof method === "function" ? method.bind(target) : method;
+  } });
+  const result = await call("sync_latest_activity", { expected_date: DAY, new_activity_expected: true }, protocol);
+  expect(result).toMatchObject({ accepted: true, data_ready: false,
+    freshness: { status: "activity_discovery_incomplete", complete: false, source_fresh: false,
+      missing_components: ["bounded_activity_discovery"] } });
+  expect(result.request_id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(counts.github_post).toBe(1);
+  expect(pages.length).toBeGreaterThanOrEqual(1);
+  expect(pages.every(page => page.prefix === "activities/2026/" && page.limit === 1000)).toBe(true);
+});

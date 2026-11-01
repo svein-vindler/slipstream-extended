@@ -1,0 +1,30 @@
+name: Check Garmin connection
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: garmin-sync
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GARMIN_PROVIDER: ${{ vars.GARMIN_PROVIDER || 'legacy' }}
+      GARMIN_ACCOUNT: ${{ secrets.GARMIN_ACCOUNT }}
+      GARMINTOKENS: ${{ (vars.GARMIN_PROVIDER == '' || vars.GARMIN_PROVIDER == 'legacy') && secrets.GARMINTOKENS || '' }}
+      GARMIN_PERSONAL_API_KEY: ${{ vars.GARMIN_PROVIDER == 'personal' && secrets.GARMIN_PERSONAL_API_KEY || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Check only the selected connection
+        run: python -m pipeline.provider_check
