@@ -449,6 +449,19 @@ Before making the repository public, confirm `git status` does not show token
 files, `.dev.vars`, generated CSV files or Garmin sessions. Read
 [SECURITY.md](../SECURITY.md) for the full model.
 
+## Optional local HR/HRV history after installation
+
+Finish the normal connection and recent-data checks first. Full local history is
+opt-in and does not run during setup. Follow [Local HR/HRV history](LOCAL_HISTORY_BACKFILL.md)
+for offline planning/status/CSV and a single bounded collection command, then a
+separate conditional R2 publication. That publication uses the normal dirty-source
+and closed-reference helpers; another explicit `publish` can drain pending
+references without another Garmin call. Set Python `HEALTH_TIMEZONE` separately
+from the Worker setting as described below. Use the existing selected-provider settings
+and private credentials; this adds no service, schedule or dependency. Pause
+other Garmin jobs before source collection. A quota or unknown-state HOLD must
+be resolved according to that guide, without deleting locks or retrying blindly.
+
 ### Automatic stored night references
 
 After this version is installed, the existing ordinary ingestion and supported

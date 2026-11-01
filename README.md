@@ -348,7 +348,9 @@ Slipstream supports Garmin's official Personal API alongside the existing
 community `garminconnect` connection. Their data coverage differs; see the
 [connection comparison](docs/INSTALL.md#4-choose-the-garmin-connection). Both
 adapters may need maintenance as Garmin changes its interfaces. Slipstream is
-intentionally single-tenant and read-only with respect to Garmin fitness data.
+intentionally single-tenant. Ordinary ingestion and MCP are read-only with
+respect to Garmin fitness data; the optional local dated chart-reload command
+has its own explicit operator authorization and narrow guard.
 
 The reviewed Garmin client is pinned to `garminconnect` 0.3.20. This is a
 compatibility update, not an expansion of exposed Garmin methods, collection or
@@ -377,3 +379,17 @@ without network access using `python -m pipeline.provider_setup --capabilities`.
 See [connection setup and same-account switching](docs/INSTALL.md#4-choose-the-garmin-connection).
 Switching is explicit and reversible for the same Garmin account. It does not
 delete history, change activity identifiers or start a historical import.
+
+### Optional local HR/HRV archive history
+
+For a new installation or later historical repair, the portable
+[`python -m pipeline.history_backfill`](docs/LOCAL_HISTORY_BACKFILL.md) commands
+provide an offline dated plan, progress and missing-date CSV, bounded local
+collection, persistent quota pause, explicit resume and separate verified R2
+publication. Setup does not start this opt-in job. Personal archive reload is
+unsupported; the legacy dated reload requires its own explicit operator choice.
+
+The optional history publisher uses the same conditional dirty-source/reference
+queue as ordinary ingestion. Its offline status separates delivered canonical
+curves from pending references. Repeating explicit R2-only publication can drain
+closed references without fetching Garmin again, within the same budgets.

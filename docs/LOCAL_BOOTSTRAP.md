@@ -189,3 +189,11 @@ per-process R2 safety ceiling used elsewhere. Progress is written to
 checking canonical object keys in R2. Combined exports using `metric` and `data`
 wrappers are also accepted. Source files and their absolute paths are never
 uploaded or committed.
+
+## Separate raw HR/HRV archive workflow
+
+The opt-in [local HR/HRV history CLI](LOCAL_HISTORY_BACKFILL.md) is a separate
+operator flow when you need a bounded raw-first archive attempt, offline missing
+CSV, persisted quota pause and source-free R2 publication. It does not share or
+reset this bootstrap's R2 backfill plans. Never run both source flows concurrently.
+Installation and provider setup do not launch either historical flow automatically.

@@ -147,6 +147,9 @@ def main(argv=None):
         "Garmin connection verified and saved. Use GARMIN_PROVIDER_FILE for subsequent local jobs."
     )
     print(
+        "Optional history: python -m pipeline.history_backfill --help (setup does not start collection)."
+    )
+    print(
         "Keep the private settings file out of Git. Finish running jobs before changing hosted settings."
     )
 

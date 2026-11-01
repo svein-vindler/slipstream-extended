@@ -1,0 +1,180 @@
+# Optional local HR/HRV history
+
+This opt-in terminal tool collects HR/HRV history locally, then publishes verified
+curves to your existing private R2 bucket in a separate command. It runs from an
+ordinary installed checkout on Windows, Linux or macOS. It does not use GitHub
+Actions, start a service, or change schedules. Installation and setup do not run it.
+
+Keep the computer online and the terminal open while collecting. Cloud Garmin
+jobs and other local Garmin jobs must be paused and finished first. Use one job
+folder and one source owner. Keep the whole job folder: its plan, immutable raw
+responses, source clocks, checksums and progress are private health data. The
+recommended `.granular/` location is ignored by Git. Do not copy a job to another
+state directory to resume it, remove locks, or edit its journal.
+
+## Plan and inspect offline
+
+Use the same private account identity as `GARMIN_ACCOUNT` / provider setup. The
+account argument is hashed in the private plan and is not printed. Use an
+unshared terminal because shell history may retain typed arguments. Neither the
+plan nor status/CSV/help reads credential files or contacts Garmin or R2.
+
+```bash
+python -m pipeline.history_backfill plan --start 2025-01-01 --end 2026-01-01 --streams hr,hrv --provider legacy --account YOUR_PRIVATE_ACCOUNT
+python -m pipeline.history_backfill status
+python -m pipeline.history_backfill missing > .granular/missing-history.csv
+```
+
+The output contains `plan_sha256`. Substitute that exact hash in subsequent
+commands. The immutable newest-first plan has explicit calendar-date and stream
+bounds. It never guesses a first HRV date from the presence of an HR curve.
+Choose an appropriate HRV start date yourself, or use a separate dated HR-only
+plan once the first job is complete. A different `--state` path selects a distinct
+job, not a way to continue a stopped or unknown one. Do not run overlapping jobs
+for the same account. Set `--state` before the subcommand when using an explicit
+private state directory.
+
+## Collect one conservative batch
+
+Use the existing selected-provider environment conventions. For example,
+`GARMIN_PROVIDER`, `GARMIN_ACCOUNT` and `GARMINTOKENS_FILE` select a legacy session;
+`GARMIN_PERSONAL_API_KEY_FILE` selects the Personal key. Private
+`GARMIN_PROVIDER_FILE` settings also work. Only the selected Garmin credential is
+read during collection; R2 credentials are not read. The plan's provider and
+account must match the selected connection. There is no provider fallback.
+
+```bash
+python -m pipeline.history_backfill collect --plan-sha PLAN_SHA256 --confirm-cloud-jobs-paused
+```
+
+Default and maximum per invocation: seven dates, 56 physical HTTP requests,
+eight requests and 5 MiB received per date, one physical request at a time,
+at least 1.5 seconds between sends, less than 900 seconds per date and 2400
+seconds per batch. Authentication and identity sends count too. `--max-dates`
+and `--max-http` may reduce those bounds; they cannot increase them. These are
+local safety limits, not an official Garmin quota. More work requires another
+explicit bounded `collect` or `resume` command. Ready and published targets in
+this job are skipped without a new source call.
+
+For older Connect charts, legacy SDK 0.3.20 has a separate explicitly authorized,
+**date-bound archive request**. Enable it only when you intend to consume Garmin
+chart reload capacity:
+
+```bash
+python -m pipeline.history_backfill collect --plan-sha PLAN_SHA256 --confirm-cloud-jobs-paused --archive-reload
+```
+
+For a date with missing detail this sends at most one fixed archive reload,
+waits the full 120 seconds and reads each missing stream once more. It never
+retries a reload. Positive data is established by after-read data, not the reload
+acknowledgement. Waiting is serial in this initial portable version. Ordinary
+Garmin/MCP access remains GET-only: no shared write switch is introduced.
+Personal API archive reload is unverified and unsupported; requesting it records
+`unsupported` without credentials or HTTP, and never switches to legacy.
+Personal ordinary supported HR/HRV reads keep using the existing adapter.
+
+## Stop, pause and explicitly resume
+
+In another terminal, use the same state folder:
+
+```bash
+python -m pipeline.history_backfill stop
+python -m pipeline.history_backfill status
+```
+
+Stop finishes the current date, closes known progress and starts no next date.
+Ctrl+C, an unknown native exit, torn durable progress, a persistence failure or
+an uncertain storage write retains an owner HOLD. It is not a normal resumable
+stop. There is no lock-steal/reset/adoption command. Preserve all evidence and
+investigate that HOLD before further operation.
+
+A real HTTP429 stores `rate_limited` and an absolute UTC `not_before`, honoring
+Retry-After with a conservative minimum 24 hours. An operator can also persist an
+explicit quota pause without any network:
+
+```bash
+python -m pipeline.history_backfill pause --reason operator_quota --until 2026-12-01T12:00:00Z
+python -m pipeline.history_backfill resume --plan-sha PLAN_SHA256 --confirm-cloud-jobs-paused
+```
+
+An early resume sends zero HTTP and does not load credentials, including after a
+process restart. There is no hot polling, automatic next-day wake-up or automatic
+retry. Two fully empty bounded batches record `no_more_observed`; this is an
+observation pause, not proof of429 or permanent absence. Explicit resume can
+continue safe pending targets after that pause. Previously empty, failed,
+unsupported or rate-limited targets remain in the CSV; this version does not
+retry them implicitly or offer a retry/reset bypass. Do not create an overlapping
+new job to evade the persisted pause or reload an already-attempted date.
+
+Status and CSV distinguish `pending`, `ready` (local, not delivered),
+`empty_unresolved`, `rate_limited`, `denied`, `failed`, `unsupported` and
+`published`. Unknown or unclosed outcomes additionally hold the owner and are not
+promoted. An empty result says only that the attempt returned no readable detail.
+Raw wires and their source clocks/nulls remain preserved even if a later phase
+stops. Missing samples are never zero-filled. Canonical HR keeps existing UTC/unit
+provenance and missing-value flags/counts; exact missing timestamps remain in raw
+evidence. Canonical HRV keeps positive readings, while exact timed nulls are
+retained in additive `archive_hrv_quality_v1` metadata. Existing MCP readers do
+not currently surface that root metadata; the private source proof remains.
+
+## Publish separately to existing R2
+
+Finish/stop collection first. A persisted Garmin quota pause remains in force
+but does not prevent this separate source-free R2 publication. Supply the normal R2 environment configuration for
+your existing bucket (`CLOUDFLARE_ACCOUNT_ID`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY`). This command reads only R2 credentials; it does not load
+Garmin tokens or issue Garmin requests:
+
+```bash
+python -m pipeline.history_backfill publish --plan-sha PLAN_SHA256 --confirm-r2-write
+python -m pipeline.history_backfill status
+```
+
+Each publication handles at most seven verified ready dates. It first drains
+at most two already-queued closed reference periods through the merged stored
+reference helper, before new canonical/index reads. Canonical HR/HRV then uses
+`night_baseline_refresh.publish_source`: dirty intent, conditional source write
+with exact ACK/readback, and ready checkpoint. A changed captured canonical
+preimage holds before source intent; an old unknown intent is never adopted.
+
+Reference control/history/current, sources and indexes share the invocation's
+budgets. No new stage or allowance is created. A full month can consume most of
+GET400; source targets that cannot fit remain `ready`, with
+`baseline_refresh.source_targets_deferred` in status. A full queue or low write
+budget also defers before source intent. Aggregate staged bytes may admit only a
+fitting newest-first prefix, with its affected indexes reserved; the untouched
+suffix remains ready. Lower configured byte caps are respected as well.
+Repeat the explicit `publish` command
+to continue safe work without new Garmin calls. Even when all source targets are
+published, `publish` still needs R2 admission to drain queued references.
+
+New sources can leave references `bounded_pending` for the next explicit publish
+or ordinary ingestion. `published` describes the canonical curve and its index,
+not completion of every reference. Set Python `HEALTH_TIMEZONE` to an IANA zone;
+this CLI does not discover an environment file or use the separate Worker secret.
+Without it reference work reports `calendar_timezone_required`. Open periods wait
+until closure. Missing native input is not zero-filled into a curve; replacing a
+reference preserves immutable history and freshly checks source/context revisions.
+
+Each source publication It binds the first
+configured R2 endpoint/bucket digest for this job and rejects a later target
+change. Existing good curves are preserved. Missing HR objects use create-only
+writes; existing empty/invalid HR objects HOLD rather than being overwritten.
+Empty-detail HRV objects can be conditionally filled at the exact old revision;
+all old summary/context fields are retained. Only actually changed HRV months
+are rebuilt, preserving unrelated canonical days and revision references. A
+legacy-only `.json.gz` monthly source requires review and causes HOLD.
+
+New writes require a genuine parsed HTTP acknowledgement and revision, then exact
+byte/revision/type/encoding readback. A conflict, denial, missing acknowledgement,
+changed readback or unknown outcome stops without a second attempt. Published
+means verified destination evidence, not merely a local curve or an accepted
+reload. R2 limits remain GET400/LIST100/PUT100 and 2 MiB written per job invocation,
+with the existing 5 GiB / 100,000 object bucket ceiling (or lower configured limits).
+Responses remain bounded (64 KiB error/PUT,512 KiB GET,1 MiB LIST), with 16 MiB
+raw / 32 MiB decoded totals, 1 MiB decoded objects and a 900 second job deadline.
+One R2Store shares its cached inventory throughout the invocation. Publication
+uses no Actions or deployments. Full historical completeness and reference completion are separate; neither is
+inferred from successful canonical writes. A synthetic seven-date/two-month
+publication required 44 conditional PUTs (14 intent/source/ready groups plus two
+indexes), all within the unchanged cap. A known deferred group opens no intent.
