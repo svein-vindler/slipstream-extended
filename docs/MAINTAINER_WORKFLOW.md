@@ -232,12 +232,10 @@ with the Cloudflare Vitest plugin. Its ignore rules name only known
 incompatible MCP versions. When an Agents release supports one of those
 versions, remove the matching ignore rule in the same tested change.
 
-The reviewed tooling pair is Wrangler `4.151.3` with
-`@cloudflare/vitest-plugin@1.4.6`. The plugin declares exact `zod@4.6.5`,
-which is affected by
-[GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5).
-Its version-scoped override retains the root's patched `zod@4.6.7`;
-revisit that selector whenever updating the plugin. Keep the other reviewed
+The reviewed tooling pair is Wrangler `4.153.0` with
+`@cloudflare/vitest-plugin@1.4.8`. This plugin declares patched `zod@4.6.6`,
+so the obsolete `@cloudflare/vitest-plugin@1.4.6` override is removed.
+The application's root remains on `zod@4.6.7`. Keep the other reviewed
 overrides and validate the actual installed graph, full audit, typecheck and
 both Worker suites. This development-tooling update does not by itself require
 a production deployment or a compatibility-date change.
