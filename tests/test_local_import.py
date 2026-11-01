@@ -1,5 +1,8 @@
+
 import gzip
 import json
+
+from night_store_protocol import NightStoreProtocol
 
 from pipeline.health_detail_backfill import date_windows
 from pipeline.local_import import (
@@ -12,7 +15,7 @@ from pipeline.local_import import (
 )
 
 
-class MemoryStore:
+class MemoryStore(NightStoreProtocol):
     def __init__(self, objects=None):
         self.objects = dict(objects or {})
         self.puts = []
@@ -105,7 +108,8 @@ def test_import_file_skips_existing_and_writes_canonical_gzip(tmp_path):
     assert result["status"] == "complete"
     assert payload["date"] == "2026-09-20"
     assert payload["available"] is False
-    assert store.puts == [(imported_key, "application/json", "gzip")]
+    assert [row for row in store.puts if row[0].startswith("health/hrv/")] == [(imported_key, "application/json", "gzip")]
+    assert len(store.puts) == 3  # durable intent + canonical + committed proof
 
 
 def test_import_cycle_shares_one_bounded_write_budget_across_streams(tmp_path):
@@ -128,7 +132,8 @@ def test_import_cycle_shares_one_bounded_write_budget_across_streams(tmp_path):
 
     assert result["hrv"]["imported_this_run"] == 2
     assert "sleep" not in result
-    assert len(store.puts) == 2
+    assert len([row for row in store.puts if row[0].startswith("health/hrv/")]) == 2
+    assert len(store.puts) == 6  # Three writes per verified source within the original store cap
 
 
 def test_local_import_is_resumable_across_cycles(tmp_path):
@@ -155,6 +160,7 @@ def test_local_import_is_resumable_across_cycles(tmp_path):
 
     assert result["status"] == "complete"
     assert result["cycles"] == 2
-    assert len(store.puts) == 2
+    assert len([row for row in store.puts if row[0].startswith("health/hrv/")]) == 2
+    assert len(store.puts) == 6  # Three writes per verified source within the original store cap
     assert sleeps == [0]
     assert json.loads((tmp_path / "status.json").read_text())["status"] == "complete"

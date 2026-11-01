@@ -167,7 +167,8 @@ def import_file(
     missing = [
         day for day in sorted(records, reverse=True) if spec.key(day) not in existing
     ]
-    selected = missing[:limit]
+    from .night_baseline_refresh import publish_source, source_capacity
+    selected = missing[:limit if dry_run else source_capacity(store, limit, checkpoint_puts=0)]
     completed = []
     failed = []
     for day in selected:
@@ -175,7 +176,7 @@ def import_file(
             payload = spec.normalize(day, records[day])
             data = gzip_json(payload)
             if not dry_run:
-                store.put(spec.key(day), data, "application/json", encoding="gzip")
+                publish_source(store, spec.key(day), data, "application/json", encoding="gzip")
             completed.append({
                 "date": day,
                 "key": spec.key(day),
@@ -245,6 +246,11 @@ def run_import_cycle(
             remaining_budget -= int(result["imported_this_run"])
             if remaining_budget <= 0:
                 break
+    if not dry_run:
+        from .night_baseline_refresh import refresh_pending
+        baseline_report = refresh_pending(store)
+        for result in results.values():
+            result["baseline_refresh"] = baseline_report
     return results
 
 

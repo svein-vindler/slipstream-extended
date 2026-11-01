@@ -170,12 +170,16 @@ def store_day(store, stream: str, day: str, raw: Any) -> dict[str, Any]:
         from .provider_retention import preserve_provider_hrv
         payload = preserve_provider_hrv(store, key, day, payload, source["provider"])
     data = gzip_json(payload)
-    write = getattr(store, "put_if_changed", None)
-    if callable(write):
-        written = bool(write(key, data, "application/json", encoding="gzip"))
+    if stream in NIGHT_STREAMS:
+        from .night_baseline_refresh import publish_source
+        written = publish_source(store, key, data, "application/json", encoding="gzip")
     else:
-        store.put(key, data, "application/json", encoding="gzip")
-        written = True
+        write = getattr(store, "put_if_changed", None)
+        if callable(write):
+            written = bool(write(key, data, "application/json", encoding="gzip"))
+        else:
+            store.put(key, data, "application/json", encoding="gzip")
+            written = True
     return {"date": day, "source_key": key, "source_sha256": sha256(data),
             "checked_at": datetime.now(UTC).isoformat(), "written": written}
 

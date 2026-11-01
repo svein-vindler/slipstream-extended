@@ -101,6 +101,7 @@ class R2Store:
             secret_key = os.environ["R2_SECRET_ACCESS_KEY"]
 
             import boto3
+            from botocore.config import Config
 
             client = boto3.client(
                 "s3",
@@ -108,6 +109,7 @@ class R2Store:
                 aws_access_key_id=access_key,
                 aws_secret_access_key=secret_key,
                 region_name="auto",
+                config=Config(connect_timeout=5, read_timeout=20, retries={"total_max_attempts": 1}),
             )
         self.client = client
         self.max_bucket_bytes = _limit(
@@ -137,6 +139,21 @@ class R2Store:
     @property
     def remaining_write_attempts(self) -> int:
         return max(0, self.max_writes_per_run - self._writes)
+
+    def can_write_group(self, *, attempts: int, byte_count: int) -> bool:
+        """Conservative serial admission, not a new allowance or reservation.
+
+        Include control/checkpoint/history writes before opening durable intent.
+        Every subsequent PUT still spends the original shared/stage budgets.
+        """
+        if type(attempts) is not int or attempts < 0 or type(byte_count) is not int or byte_count < 0:
+            raise ValueError("Invalid write group")
+        if self._writes + attempts > self.max_writes_per_run or self._write_bytes + byte_count > self.max_write_bytes_per_run:
+            return False
+        if self._initial_inventory is None:
+            self._bucket_budget.inventory = self.inventory()
+        return (self._initial_inventory["objects"] + self._bucket_budget.writes + attempts <= self.max_bucket_objects
+                and self._initial_inventory["bytes"] + self._bucket_budget.write_bytes + byte_count <= self.max_bucket_bytes)
 
     @property
     def write_budget_initialized(self) -> bool:
@@ -326,8 +343,8 @@ class R2Store:
             finally:
                 body.close()
 
-    def put_if_changed(self, key: str, data: bytes, content_type: str, *, encoding: str | None = None) -> bool:
-        """Skip identical single-PUT objects, including their serving metadata."""
+    def matches_object(self, key: str, data: bytes, content_type: str, *, encoding: str | None = None) -> bool:
+        """Read-only identity/serving-metadata check used by incremental writers."""
         try:
             self.operations["head"] += 1
             with timed(self.timings_ms, "head"):
@@ -344,8 +361,13 @@ class R2Store:
                 and (previous.get("ContentEncoding") or None) == (encoding or None)
                 and not previous.get("SSECustomerAlgorithm")
                 and not previous.get("ServerSideEncryption")):
+            return True
+        return False
+
+    def put_if_changed(self, key: str, data: bytes, content_type: str, *, encoding: str | None = None) -> bool:
+        """Skip identical single-PUT objects, including their serving metadata."""
+        if self.matches_object(key, data, content_type, encoding=encoding):
             return False
-        # Unknown/multipart ETags conservatively write through the existing guards.
         self.put(key, data, content_type, encoding=encoding)
         return True
 

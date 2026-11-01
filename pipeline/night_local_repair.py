@@ -211,6 +211,8 @@ def apply(
     skipped_state = skipped_state if skipped_state is not None else _load_skips(state_path)
     completed: dict[str, list[str]] = {"sleep": [], "hrv": []}
     skipped: list[dict[str, str]] = []
+    from .night_baseline_refresh import publish_source, refresh_pending, source_capacity
+    max_objects = source_capacity(store, max_objects, checkpoint_puts=6)
     try:
         for stream, day in pending[:max_objects]:
             key = object_key(stream, day)
@@ -234,7 +236,7 @@ def apply(
             if not backup_path.exists():
                 with backup_path.open("xb") as file:
                     file.write(previous)
-            store.put(key, gzip_json(payload), "application/json", encoding="gzip")
+            publish_source(store, key, gzip_json(payload), "application/json", encoding="gzip")
             completed[stream].append(day)
             if (stream, day) in skipped_state:
                 skipped_state.pop((stream, day))
@@ -245,7 +247,7 @@ def apply(
         for stream, dates in completed.items():
             if dates:
                 sync_dates(store, stream, dates)
-    return {"completed": completed, "skipped": skipped}
+    return {"completed": completed, "skipped": skipped, "baseline_refresh": refresh_pending(store)}
 
 
 def main() -> None:

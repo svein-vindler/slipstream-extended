@@ -1,4 +1,5 @@
 """Hosted output boundaries use synthetic values and no external services."""
+
 import csv
 import importlib
 import json
@@ -11,6 +12,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+from night_store_protocol import NightStoreProtocol
 
 from pipeline import manual_activity_refresh as manual
 from pipeline.sources import garmin_health
@@ -48,7 +50,7 @@ def test_manual_report_remains_private_while_stdout_contains_only_counts(tmp_pat
         writer = csv.writer(handle)
         writer.writerow(["Activity ID", "Activity Date", "Activity Name", "Activity Type"])
         writer.writerow(["garmin-123", "2041-02-03 10:00:00", MARKER, "Run"])
-    class Store:
+    class Store(NightStoreProtocol):
         objects = {}
         calls = []
         def list_keys(self, prefix=""):
@@ -132,7 +134,7 @@ def test_health_provider_never_logs_label_or_dynamic_exception_name(monkeypatch,
     assert "SYNTHETIC_PRIVATE" not in output.out + output.err
     assert len(output.err.splitlines()) == (4 if rate_limited else 1)
 
-class MemoryStore:
+class MemoryStore(NightStoreProtocol):
     def __init__(self, objects=None):
         self.objects = objects or {}
         self.operations = {"get": 0, "put": 0, "head": 0, "list_pages": 0}
@@ -181,7 +183,7 @@ def test_completed_plan_does_not_echo_unknown_saved_private_fields(module, monke
         monkeypatch.setattr(imported, "_refresh_plan_dates", lambda *args: False)
     result = imported.run(store=store)
     output = capsys.readouterr()
-    assert result == plan
+    assert {key: value for key, value in result.items() if key != "baseline_refresh"} == plan
     assert json.loads(store.objects[imported.PLAN_KEY]) == plan
     assert "SYNTHETIC_PRIVATE" not in output.out + output.err
 
@@ -311,6 +313,11 @@ def test_large_invalid_saved_aggregate_is_dropped_without_changing_result(monkey
     plan = {"schema_version": 1, "status": "complete", "target_dates": [], "elapsed_ms": 10**400}
     store = MemoryStore({hrv_backfill.PLAN_KEY: json.dumps(plan).encode()})
     monkeypatch.setattr(hrv_backfill, "_refresh_plan_dates", lambda *args: False)
-    assert hrv_backfill.run(store=store) == plan
+    result = hrv_backfill.run(store=store)
+    assert result.pop("baseline_refresh")["status"] == "complete"
+    assert result == plan
+    assert json.loads(store.objects[hrv_backfill.PLAN_KEY]) == plan
     output = capsys.readouterr()
-    assert json.loads(output.out) == {"kind": "hrv_backfill", "schema_version": 1, "status": "complete"}
+    logged = json.loads(output.out)
+    assert logged.pop("baseline_refresh")["status"] == "complete"
+    assert logged == {"kind": "hrv_backfill", "schema_version": 1, "status": "complete"}

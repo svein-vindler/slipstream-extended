@@ -316,7 +316,12 @@ def test_validation_rejections_are_bounded_by_existing_overlap_and_streams():
         for stream in ("sleep", "hrv") for day in days
     ]
     assert len(report["health_validation_rejections"]) == len(source.calls) == 28
-    assert all(value == 0 for value in client.counts.values())
+    # One bounded queue admission per stream; no failed-source tail drain.
+    from pipeline.night_baseline_refresh import QUEUE_KEY
+
+    assert client.counts == {"get": 2, "head": 0, "put": 0, "list": 0, "upload_bytes": 0}
+    assert client.reads == [QUEUE_KEY, QUEUE_KEY]
+    assert report["baseline_refresh"]["status"] == "not_run_source_failure"
     assert "PRIVATE_RESPONSE_MARKER" not in json.dumps(report)
 
 

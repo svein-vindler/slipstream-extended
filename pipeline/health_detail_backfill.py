@@ -15,6 +15,7 @@ from .activity_backfill import is_job_stopping_error
 from .granular import gzip_json, json_bytes
 from .health_detail import normalize_body_composition, normalize_sleep_detail
 from .health_history_index import sync_dates
+from .night_baseline_refresh import source_capacity
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2BudgetError, R2Store
 from .sources.garmin import _login
@@ -172,6 +173,8 @@ def select_batch(
     refresh_dates: frozenset[str] = frozenset(),
 ) -> list[str]:
     selected = []
+    if limit <= 0:
+        return selected
     for day in target_dates:
         if stream.object_key(day) in existing_keys and day not in refresh_dates:
             continue
@@ -235,6 +238,9 @@ def run_stream(
                     "completed_this_run": [],
                     "failed_this_run": [],
                 })
+                if stream.name == "sleep":
+                    from .night_baseline_refresh import refresh_pending
+                    passive["baseline_refresh"] = refresh_pending(store)
                 return passive
             plan["status"] = "active"
             plan.pop("completed_at", None)
@@ -242,6 +248,9 @@ def run_stream(
         plan = new_plan(stream, health_csv)
         if plan["status"] == "complete":
             store.put(stream.plan_key, json_bytes(plan), "application/json")
+            if stream.name == "sleep":
+                from .night_baseline_refresh import refresh_pending
+                plan["baseline_refresh"] = refresh_pending(store)
             return plan
 
     target_dates = plan.get("target_dates")
@@ -266,7 +275,7 @@ def run_stream(
         selected_dates,
         existing_keys,
         failures,
-        limit=max_days,
+        limit=source_capacity(store, max_days, checkpoint_puts=8) if stream.name == "sleep" else max_days,
         retry_failures=retry_failures or bool(repair_dates),
         refresh_dates=refresh_dates,
     )
@@ -296,7 +305,11 @@ def run_stream(
         data = gzip_json(payload)
         key = stream.object_key(day)
         replacing = key in existing_keys
-        store.put(key, data, "application/json", encoding="gzip")
+        if stream.name == "sleep":
+            from .night_baseline_refresh import publish_source
+            publish_source(store, key, data, "application/json", encoding="gzip")
+        else:
+            store.put(key, data, "application/json", encoding="gzip")
         existing_keys.add(key)
         if replacing:
             refreshed_existing += 1
@@ -390,6 +403,9 @@ def run_stream(
             "repair_requested_days": len(repair_dates),
             "repair_eligible_days": len(selected_dates),
         })
+    if stream.name == "sleep":
+        from .night_baseline_refresh import refresh_pending
+        plan["baseline_refresh"] = refresh_pending(store)
     return plan
 
 
