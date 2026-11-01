@@ -1,6 +1,7 @@
 """Scalar leaf contracts at the actual producer and storage boundaries."""
 
 import pytest
+from night_store_protocol import NightStoreProtocol
 
 from pipeline.granular import normalize_strength_session
 from pipeline.granular_export import export_activity
@@ -88,7 +89,7 @@ def test_qualifier_scalar_conversion_is_unchanged(value, expected):
     }
 
 
-class MemoryStore:
+class MemoryStore(NightStoreProtocol):
     def __init__(self):
         self.objects = {}
         self.calls = []

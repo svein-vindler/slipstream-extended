@@ -11,6 +11,7 @@ from typing import Any
 from .activity_backfill import is_job_stopping_error
 from .granular import gzip_json, json_bytes, normalize_hrv
 from .health_history_index import sync_dates
+from .night_baseline_refresh import source_capacity
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2BudgetError, R2Store
 from .sources.garmin import _login
@@ -81,6 +82,8 @@ def select_hrv_batch(
     retry_failures: bool = False,
 ) -> list[str]:
     selected = []
+    if limit <= 0:
+        return selected
     for day in target_dates:
         if hrv_key(day) in existing_keys:
             continue
@@ -156,6 +159,8 @@ def run(
         if previous_status in {"complete", "complete_with_blocked"}:
             retrying = previous_status == "complete_with_blocked" and retry_failures
             if not changed and not retrying:
+                from .night_baseline_refresh import refresh_pending
+                plan["baseline_refresh"] = refresh_pending(store)
                 log_report("hrv_backfill", plan)
                 return plan
             plan["status"] = "active"
@@ -179,7 +184,7 @@ def run(
         target_dates,
         existing_keys,
         failures,
-        limit=max_days,
+        limit=source_capacity(store, max_days, checkpoint_puts=6),
         retry_failures=retry_failures,
     )
 
@@ -192,7 +197,8 @@ def run(
             payload = _payload(day, garmin.get_hrv_data(day))
             data = gzip_json(payload)
             key = hrv_key(day)
-            store.put(key, data, "application/json", encoding="gzip")
+            from .night_baseline_refresh import publish_source
+            publish_source(store, key, data, "application/json", encoding="gzip")
             existing_keys.add(key)
             failures.pop(day, None)
             completed.append({
@@ -245,6 +251,8 @@ def run(
     if status in {"complete", "complete_with_blocked"}:
         plan["completed_at"] = datetime.now(timezone.utc).isoformat()
     store.put(PLAN_KEY, json_bytes(plan), "application/json")
+    from .night_baseline_refresh import refresh_pending
+    plan["baseline_refresh"] = refresh_pending(store)
     log_report("hrv_backfill", plan)
     return plan
 

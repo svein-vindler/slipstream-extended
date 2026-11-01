@@ -209,9 +209,13 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
             report["health_validation_rejections"] = result.get("health_validation_rejections", [])
             for stream, value in result["streams"].items():
                 unsupported = value.get("status") == "unsupported"
-                checked = not unsupported and value["source_errors"] == 0
-                add(stream, checked, "not_checked" if unsupported else "failed" if not checked else
-                    "not_ready" if value["days_not_ready"] else "checked")
+                days_checked = value.get("days_checked", 0)
+                attempted = type(days_checked) is int and days_checked > 0
+                requested = value.get("days_requested", days_checked)
+                incomplete_admission = type(requested) is int and attempted and days_checked < requested
+                checked = not unsupported and attempted and value["source_errors"] == 0
+                add(stream, checked, "not_checked" if unsupported or not attempted else "failed" if not checked else
+                    "not_ready" if value["days_not_ready"] or incomplete_admission else "checked")
         elif kind == "recent-body-sync":
             checked = result["days_checked"] > 0 and result["source_errors"] == 0
             add("body", checked, "not_checked" if not result["days_checked"] else

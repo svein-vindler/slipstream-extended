@@ -5,6 +5,7 @@ import json
 from datetime import date
 
 import pytest
+from night_store_protocol import NightStoreProtocol
 
 from pipeline import hrv_backfill
 from pipeline.health_history_index import summarize_hrv_payload
@@ -16,7 +17,7 @@ from pipeline.sources.garmin_policy import GarminReadOnlyViolation
 DAY = "2020-01-02"
 
 
-class MemoryStore:
+class MemoryStore(NightStoreProtocol):
     def __init__(self, objects=None):
         self.objects = {
             "summary/health_daily.csv": b"Date,HRV Last Night Average\n2020-01-02,42\n",

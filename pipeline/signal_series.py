@@ -240,7 +240,7 @@ class DailySignalCollector:
             raise R2ReadBoundaryError("schema_unverified")
         return channels, data
 
-    def publish(self) -> dict[str, int]:
+    def publish(self) -> dict[str, Any]:
         counts = {"objects_written": 0, "objects_unchanged": 0, "stored_bytes": 0,
                   "get_attempts": 0, "put_attempts": 0, "preserved_channels": 0,
                   "read_bytes": 0, "write_bytes": 0, "valid_points": 0}
@@ -263,10 +263,13 @@ class DailySignalCollector:
                 changed = False
             else:
                 counts["put_attempts"] += 1
-                self.store.put(signal_key(day), data, "application/json", encoding="gzip")
+                from .night_baseline_refresh import publish_source
+                publish_source(self.store, signal_key(day), data, "application/json", encoding="gzip")
                 changed = True
                 counts["write_bytes"] += len(data)
             counts["objects_written" if changed else "objects_unchanged"] += 1
             counts["stored_bytes"] += len(data)
             counts["valid_points"] += sum(len(channel["readings"]) for channel in channels.values())
+        from .night_baseline_refresh import refresh_pending
+        counts["baseline_refresh"] = refresh_pending(self.store)
         return counts

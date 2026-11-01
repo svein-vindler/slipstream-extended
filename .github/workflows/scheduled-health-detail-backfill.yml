@@ -43,6 +43,7 @@ jobs:
     env:
       GARMIN_PROVIDER: ${{ vars.GARMIN_PROVIDER || 'legacy' }}
       GARMIN_ACCOUNT: ${{ secrets.GARMIN_ACCOUNT }}
+      HEALTH_TIMEZONE: ${{ secrets.HEALTH_TIMEZONE }}
       GARMINTOKENS: ${{ (vars.GARMIN_PROVIDER == '' || vars.GARMIN_PROVIDER == 'legacy') && secrets.GARMINTOKENS || '' }}
       GARMIN_PERSONAL_API_KEY: ${{ vars.GARMIN_PROVIDER == 'personal' && secrets.GARMIN_PERSONAL_API_KEY || '' }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

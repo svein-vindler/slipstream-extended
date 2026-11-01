@@ -23,6 +23,7 @@ from .granular import (
 )
 from .health_history_index import sync_dates
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
+from .r2_store import R2BudgetError
 from .recorded_running_metrics import expanded_recorded_running_metrics
 from .schema import activity_local_date
 from .sources.garmin import _login
@@ -67,7 +68,11 @@ def _write_or_upload(
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
     if store:
-        store.put(key, data, content_type, encoding=encoding)
+        if key.startswith("health/hrv/"):
+            from .night_baseline_refresh import publish_source
+            publish_source(store, key, data, content_type, encoding=encoding)
+        else:
+            store.put(key, data, content_type, encoding=encoding)
     return {"key": key, "bytes": len(data), "sha256": sha256(data)}
 
 
@@ -234,6 +239,9 @@ def run(
     manifest: dict[str, Any] = {"schema_version": 1, "hrv": [], "activities": []}
 
     today = date.today()
+    if store:
+        from .night_baseline_refresh import source_capacity
+        hrv_days = source_capacity(store, hrv_days, checkpoint_puts=10)
     for offset in range(hrv_days - 1, -1, -1):
         day = (today - timedelta(days=offset)).isoformat()
         try:
@@ -246,6 +254,8 @@ def run(
             item["date"] = day
             item["readings"] = payload["reading_count"]
             manifest["hrv"].append(item)
+        except R2BudgetError:
+            raise
         except Exception as exc:
             manifest["hrv"].append({"date": day, "error": str(exc)})
 
@@ -278,6 +288,9 @@ def run(
             }
         manifest["activities"].append(record)
 
+    if store:
+        from .night_baseline_refresh import refresh_pending
+        manifest["baseline_refresh"] = refresh_pending(store)
     manifest_data = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
     _write_or_upload(
         output, "pilot/manifest.json", manifest_data, "application/json", store

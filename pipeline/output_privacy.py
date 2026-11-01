@@ -21,7 +21,7 @@ _COUNTS = (
     "total_days", "completed_days", "blocked_days", "remaining_days",
     "total_activities", "completed_activities", "remaining_activities", "blocked_activities_count",
     "activities_fetched", "activities_preserved", "activities_written", "health_days_fetched",
-    "health_days_written", "days_checked", "days_ready", "days_not_ready", "source_errors",
+    "health_days_written", "days_checked", "days_requested", "days_deferred", "days_ready", "days_not_ready", "source_errors",
     "objects_written", "objects_unchanged", "checkpoints_written", "night_checkpoints_written",
     "months_considered", "months_written", "months_unchanged", "invalid_days", "days",
     "activity_rows_fetched", "health_rows_fetched", "calendar_days",
@@ -81,6 +81,14 @@ def log_report(event, report):
              "refresh_summaries": "summary-window-refresh", "health_index_reconcile": "health-index-maintenance"}
     result = {"kind": kinds.get(event, event), **_counts(report)}
     if isinstance(report, dict):
+        baseline = report.get("baseline_refresh")
+        if isinstance(baseline, dict):
+            status = baseline.get("status")
+            allowed = {"complete", "waiting_until_close", "bounded_pending", "calendar_timezone_required", "not_run_unsupported", "not_run_source_failure", "held"}
+            result["baseline_refresh"] = {"status": status if isinstance(status, str) and status in allowed else "unknown"}
+            for key in ("periods_completed", "products_written", "products_unchanged", "pending", "deferred_open", "closed_pending", "held_periods"):
+                if key in baseline and _number(baseline[key], key):
+                    result["baseline_refresh"][key] = baseline[key]
         for key in ("results", "streams", "windows"):
             parts = report.get(key)
             if isinstance(parts, dict):

@@ -4,6 +4,7 @@ import gzip
 import json
 
 import pytest
+from night_store_protocol import NightStoreProtocol
 
 
 def test_partial_personal_hrv_keeps_previous_points_and_non_null_summary():
@@ -31,7 +32,7 @@ def test_partial_personal_hrv_keeps_previous_points_and_non_null_summary():
         ],
     }
 
-    class Store:
+    class Store(NightStoreProtocol):
         def __init__(self):
             self.body = gzip.compress(json.dumps(old).encode())
 
@@ -65,7 +66,7 @@ def test_provider_provenance_does_not_reuse_the_consumers_different_composition_
 
     from pipeline.health_sync import store_day
 
-    class Store:
+    class Store(NightStoreProtocol):
         body = None
 
         def get_bounded(self, key, maximum):
@@ -115,7 +116,7 @@ def test_returning_to_legacy_also_keeps_prior_personal_observations():
         ],
     }
 
-    class Store:
+    class Store(NightStoreProtocol):
         body = gzip.compress(json.dumps(old).encode())
 
         def get_bounded(self, key, maximum):
@@ -143,7 +144,7 @@ def test_repeated_partial_hrv_is_byte_stable_and_does_not_keep_stale_consumer_co
 
     from pipeline.health_sync import store_day
 
-    class Store:
+    class Store(NightStoreProtocol):
         body = None
 
         def get_bounded(self, key, maximum):
@@ -182,7 +183,7 @@ def test_repeated_partial_hrv_is_byte_stable_and_does_not_keep_stale_consumer_co
 def test_unverifiable_prior_hrv_fails_before_any_write(body):
     from pipeline.health_sync import store_day
 
-    class Store:
+    class Store(NightStoreProtocol):
         def get_bounded(self, *args):
             return body
 

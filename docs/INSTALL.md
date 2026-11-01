@@ -264,8 +264,9 @@ gh workflow run granular-pilot.yml
 ```
 
 Scheduled activity, HRV, sleep and body-composition backfills take over. They
-are resumable and automatically become cheap read-only checks after eligible
-history is complete.
+are resumable and stop re-fetching completed source history after eligible
+history is complete. Night-source commands may still drain previously queued
+closed references from stored R2 data, within their existing budgets.
 
 Full history is optional. You can finish the connector with recent summaries
 and the bounded pilot first, then enable the historical backfill workflows in
@@ -294,6 +295,10 @@ The job never contacts Garmin, is safe to rerun, and skips unchanged months.
 Future HRV and sleep ingestion updates affected months automatically. See
 [HEALTH_HISTORY.md](HEALTH_HISTORY.md) for the equivalent local command and the
 query limits.
+
+Stored sleep heart-rate/HRV references are maintained from imported R2 data
+for closed ISO weeks and calendar months. See [automatic references](#automatic-stored-night-references)
+for the calendar setting, pending work and existing-installation behavior.
 
 ## 6. Deploy the Worker
 
@@ -443,3 +448,35 @@ but an account-level billing alert is still recommended.
 Before making the repository public, confirm `git status` does not show token
 files, `.dev.vars`, generated CSV files or Garmin sessions. Read
 [SECURITY.md](../SECURITY.md) for the full model.
+
+### Automatic stored night references
+
+After this version is installed, the existing ordinary ingestion and supported
+backfill entry points queue changed sleep, HRV and HR sources for closed ISO-week
+and calendar-month references. No extra scheduler or Garmin history download is
+enabled. Weeks retain their ISO week-year and whole Monday–Sunday date range,
+including dates in another month or calendar year. Partial coverage can improve
+without waiting for every night to become available; missing values stay explicit.
+Earlier reference bodies and their provenance are retained before replacement.
+
+Set the calendar timezone for each ingestion environment:
+
+- For GitHub Actions, set the repository Actions secret `HEALTH_TIMEZONE` to
+  your IANA timezone name, for example `Europe/London`. The existing refresh and
+  night-source backfill workflows pass this value to Python.
+- For local commands, set the process environment variable `HEALTH_TIMEZONE`,
+  or pass the documented `timezone` argument when using the Python API.
+- The Worker secret `HEALTH_TIMEZONE` described above is a separate setting;
+  saving it does not configure GitHub Actions or your local Python process.
+
+This calendar setting is a timezone name, with no new Garmin or R2 credential.
+Without a valid calendar timezone, pending work remains
+`calendar_timezone_required`; the pipeline does not assume a UTC closing date.
+Current weeks/months remain `waiting_until_close` without making a successfully
+stored latest night partial. Bounded closed work may remain pending for the next
+ordinary ingestion. See [reference refresh](NIGHT_BASELINE_REFRESH.md).
+
+External one-off archive publishers created before this version are not changed
+by installation. New local publishers must use the documented source helper;
+older direct writes need explicit, bounded enqueueing from exact stored-source
+proofs. Installation never scans or seeds the whole history automatically.

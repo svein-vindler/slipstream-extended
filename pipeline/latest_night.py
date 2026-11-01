@@ -51,6 +51,8 @@ def run(*, run_id: str, wake_date: str, request_id: str | None = None,
             report[f"{stream}_status"] = "import_error"
     report["status"] = "stored" if all(report[f"{s}_status"] == "stored"
                                           for s in ("sleep", "hrv")) else "pending"
+    from .night_baseline_refresh import refresh_pending
+    report["baseline_refresh"] = refresh_pending(store)
     return publish(store, run_id, scope, report, source_checked=source_checked)
 
 

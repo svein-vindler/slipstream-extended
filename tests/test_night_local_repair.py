@@ -1,16 +1,18 @@
 """Safety checks for targeted, existing-object night repairs."""
 
+
 from __future__ import annotations
 
 import gzip
 import json
 
 import pytest
+from night_store_protocol import NightStoreProtocol
 
 from pipeline import night_local_repair as repair
 
 
-class MemoryStore:
+class MemoryStore(NightStoreProtocol):
     def __init__(self, objects):
         self.objects = dict(objects)
         self.writes = []
@@ -99,7 +101,8 @@ def test_apply_backs_up_before_replacing_and_syncs_only_changed_dates(tmp_path, 
     assert result["completed"] == {"sleep": [day], "hrv": []}
     assert (tmp_path / key).read_bytes() == old
     assert repair._json_object(store.get(key))["sleep_start_garmin_local"] == 1783643100000
-    assert store.writes == [(key, "application/json", "gzip")]
+    assert [row for row in store.writes if row[0].startswith("health/sleep/v1/")] == [(key, "application/json", "gzip")]
+    assert len(store.writes) == 3  # Source intent/canonical/verified proof
     assert synced == [("sleep", [day])]
 
 

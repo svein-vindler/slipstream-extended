@@ -9,7 +9,7 @@ from botocore.exceptions import ClientError
 from pipeline.granular import gzip_json
 from pipeline.health_detail_backfill import run as backfill_run
 from pipeline.health_history_index import sync_dates
-from pipeline.health_sync import HealthNotReady, finalize_days, normalize_day, store_day
+from pipeline.health_sync import HealthNotReady, normalize_day, store_day
 from pipeline.latest_night import run as night_run
 from pipeline.r2_store import R2BudgetError, R2Store
 from pipeline.recent_health import run
@@ -79,7 +79,7 @@ def test_source_edit_reads_only_changed_day_and_keeps_other_cached_month_days(en
     client.reset()
     result = refresh()
     canonical_reads = [key for key in client.reads if key.startswith(("health/sleep/v1/", "health/hrv/"))]
-    assert canonical_reads == [canonical(stream)]
+    assert canonical_reads == [canonical(stream)] * 3  # CAS preimage, exact write readback, index rebuild
     assert result["streams"][stream]["objects_written"] == result["streams"][stream]["months_written"] == 1
     assert len(document(client, f"health/indexes/{stream}/v1/2026/09.json")["days"]) == 3
     assert client.objects[canonical("hrv" if stream == "sleep" else "sleep")]["Body"] == old_other
@@ -179,7 +179,7 @@ def test_storage_failures_are_not_mistaken_for_unchanged_or_missing(environment,
         raise ClientError({"Error": {"Code": error}}, "HeadObject")
 
     monkeypatch.setattr(client, "head_object", failing_head)
-    with pytest.raises(ClientError):
+    with pytest.raises(R2BudgetError):
         refresh(days=1)
     assert client.objects[check("sleep")] == before
 
@@ -255,10 +255,11 @@ def test_index_storage_error_is_not_caught_as_missing(environment, monkeypatch):
 def test_day_and_checkpoint_writes_obey_existing_budget(limit):
     client, garmin = HealthClient(), SyntheticGarmin()
     store = R2Store(client=client, bucket="synthetic-health", max_writes_per_run=limit)
-    record = store_day(store, "sleep", DAY, garmin.get_sleep_data(DAY))
     with pytest.raises(R2BudgetError):
-        finalize_days(store, "sleep", [record])
-    assert check("sleep") not in client.objects
+        store_day(store, "sleep", DAY, garmin.get_sleep_data(DAY))
+    # Reserve intent+canonical+committed before the first PUT, including low budgets.
+    assert not client.objects
+    assert client.counts["put"] == 0
 
 
 @pytest.mark.parametrize("days,streams", [(0, ("sleep",)), (15, ("hrv",)), (True, ("sleep",)), (1.5, ("hrv",)), (3, ()), (3, ("invalid",))])

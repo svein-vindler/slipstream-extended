@@ -125,6 +125,36 @@ class FakeR2Client:
         self.puts.append(kwargs)
 
 
+
+class _BackfillStore(R2Store):
+    """Actual guarded store; only the in-memory HTTP/storage peer is synthetic."""
+
+    def __init__(self, objects):
+        from scripts.benchmark_health_reuse import HealthClient
+
+        client = HealthClient()
+        client.objects = {
+            key: {"Body": body,
+                  "ContentType": "text/csv" if key.endswith(".csv") else "application/json",
+                  **({"ContentEncoding": "gzip"} if body.startswith(b"\x1f\x8b") else {})}
+            for key, body in objects.items()
+        }
+        super().__init__(client=client, bucket="synthetic-backfill")
+
+    @property
+    def objects(self):
+        return {key: value["Body"] for key, value in self.client.objects.items()}
+
+    @property
+    def gets(self):
+        return self.client.reads
+
+    @property
+    def puts(self):
+        return [(key, self.client.objects[key].get("ContentType"),
+                 self.client.objects[key].get("ContentEncoding")) for key in self.client.writes]
+
+
 def test_canonical_sport_maps_families():
     assert canonical_sport("running") == "run"
     assert canonical_sport("cycling") == "ride"
@@ -1163,20 +1193,6 @@ def test_hrv_backfill_stores_newest_curves_and_progress():
         b"2026-09-19,38,1\n2026-09-20,40,2\n2026-09-21,42,3\n"
     )
 
-    class FakeStore:
-        def __init__(self):
-            self.objects = {"summary/health_daily.csv": gzip.compress(health)}
-            self.puts = []
-
-        def list_keys(self, prefix=""):
-            return {key for key in self.objects if key.startswith(prefix)}
-
-        def get(self, key):
-            return self.objects[key]
-
-        def put(self, key, data, content_type, *, encoding=None):
-            self.objects[key] = data
-            self.puts.append((key, content_type, encoding))
 
     class FakeGarmin:
         def __init__(self):
@@ -1186,7 +1202,7 @@ def test_hrv_backfill_stores_newest_curves_and_progress():
             self.calls.append(day)
             return {"hrvReadings": [{"readingTimeGMT": day, "hrvValue": 42}]}
 
-    store = FakeStore()
+    store = _BackfillStore({"summary/health_daily.csv": gzip.compress(health)})
     garmin = FakeGarmin()
     result = run_hrv_backfill(max_days=2, store=store, garmin=garmin)
 
@@ -1203,24 +1219,12 @@ def test_hrv_backfill_stores_newest_curves_and_progress():
 def test_hrv_backfill_stores_unavailable_marker_for_valid_empty_response():
     health = b"Date,HRV Last Night Average\n2026-09-20,40\n"
 
-    class FakeStore:
-        def __init__(self):
-            self.objects = {"summary/health_daily.csv": health}
-
-        def list_keys(self, prefix=""):
-            return {key for key in self.objects if key.startswith(prefix)}
-
-        def get(self, key):
-            return self.objects[key]
-
-        def put(self, key, data, content_type, *, encoding=None):
-            self.objects[key] = data
 
     class FakeGarmin:
         def get_hrv_data(self, day):
             return {"hrvSummary": {"calendarDate": day}, "hrvReadings": []}
 
-    store = FakeStore()
+    store = _BackfillStore({"summary/health_daily.csv": health})
     result = run_hrv_backfill(max_days=1, store=store, garmin=FakeGarmin())
 
     assert result["status"] == "complete"
@@ -1244,28 +1248,17 @@ def test_completed_hrv_plan_is_passive():
         b"2026-09-21,42\n2026-09-20,40\n"
     )
 
-    class FakeStore:
-        def __init__(self):
-            self.gets = []
-            self.puts = []
 
-        def list_keys(self, prefix=""):
-            assert prefix == "backfill/hrv/"
-            return {HRV_PLAN_KEY}
+    store = _BackfillStore({"summary/health_daily.csv": health, HRV_PLAN_KEY: json.dumps(plan).encode()})
+    class NoGarmin:
+        def get_hrv_data(self, day):
+            raise AssertionError("A completed source plan must not contact Garmin")
 
-        def get(self, key):
-            self.gets.append(key)
-            if key == HRV_PLAN_KEY:
-                return json.dumps(plan).encode()
-            return health
-
-        def put(self, *args, **kwargs):
-            self.puts.append((args, kwargs))
-
-    store = FakeStore()
-    result = run_hrv_backfill(max_days=50, store=store)
-    assert result == plan
-    assert store.gets == [HRV_PLAN_KEY, "summary/health_daily.csv"]
+    result = run_hrv_backfill(max_days=50, store=store, garmin=NoGarmin())
+    assert {key: value for key, value in result.items() if key != "baseline_refresh"} == plan
+    assert result["baseline_refresh"]["status"] == "complete"
+    assert store.gets == [HRV_PLAN_KEY, "summary/health_daily.csv",
+                          "health/night-products/v1/refresh-queue.json"]
     assert store.puts == []
 
 
@@ -1282,22 +1275,6 @@ def test_hrv_backfill_prioritizes_a_new_date_while_history_is_active():
         b"2026-09-21,42\n2026-09-20,40\n2026-09-19,38\n"
     )
 
-    class FakeStore:
-        def __init__(self):
-            self.objects = {
-                HRV_PLAN_KEY: json.dumps(plan).encode(),
-                "summary/health_daily.csv": health,
-                hrv_key("2026-09-20"): b"existing",
-            }
-
-        def list_keys(self, prefix=""):
-            return {key for key in self.objects if key.startswith(prefix)}
-
-        def get(self, key):
-            return self.objects[key]
-
-        def put(self, key, data, content_type, *, encoding=None):
-            self.objects[key] = data
 
     class FakeGarmin:
         def __init__(self):
@@ -1307,7 +1284,11 @@ def test_hrv_backfill_prioritizes_a_new_date_while_history_is_active():
             self.calls.append(day)
             return {"hrvReadings": [{"readingTimeGMT": day, "hrvValue": 42}]}
 
-    store = FakeStore()
+    store = _BackfillStore({
+                HRV_PLAN_KEY: json.dumps(plan).encode(),
+                "summary/health_daily.csv": health,
+                hrv_key("2026-09-20"): b"existing",
+            })
     garmin = FakeGarmin()
     result = run_hrv_backfill(max_days=1, store=store, garmin=garmin)
 
@@ -1424,20 +1405,6 @@ def test_health_detail_backfill_writes_bounded_sleep_and_body_batches():
         b"2026-09-21,26000,80.0\n"
     )
 
-    class FakeStore:
-        def __init__(self):
-            self.objects = {"summary/health_daily.csv": summary}
-            self.puts = []
-
-        def list_keys(self, prefix=""):
-            return {key for key in self.objects if key.startswith(prefix)}
-
-        def get(self, key):
-            return self.objects[key]
-
-        def put(self, key, data, content_type, *, encoding=None):
-            self.objects[key] = data
-            self.puts.append((key, content_type, encoding))
 
     class FakeGarmin:
         def __init__(self):
@@ -1456,7 +1423,7 @@ def test_health_detail_backfill_writes_bounded_sleep_and_body_batches():
                 ]
             }
 
-    store = FakeStore()
+    store = _BackfillStore({"summary/health_daily.csv": summary})
     garmin = FakeGarmin()
     result = run_health_detail_backfill(
         max_sleep_days=1,
@@ -1483,18 +1450,6 @@ def test_body_composition_backfill_fetches_each_dayview():
         b"2026-09-21,,80.0\n"
     )
 
-    class FakeStore:
-        def __init__(self):
-            self.objects = {"summary/health_daily.csv": summary}
-
-        def list_keys(self, prefix=""):
-            return {key for key in self.objects if key.startswith(prefix)}
-
-        def get(self, key):
-            return self.objects[key]
-
-        def put(self, key, data, content_type, *, encoding=None):
-            self.objects[key] = data
 
     class FakeGarmin:
         def __init__(self):
@@ -1508,7 +1463,7 @@ def test_body_composition_backfill_fetches_each_dayview():
                 ]
             }
 
-    store = FakeStore()
+    store = _BackfillStore({"summary/health_daily.csv": summary})
     garmin = FakeGarmin()
     result = run_health_detail_backfill(
         max_sleep_days=1,
@@ -1536,25 +1491,6 @@ def test_body_composition_repair_refetches_only_requested_existing_days():
         "failures": {},
     }).encode()
 
-    class FakeStore:
-        def __init__(self):
-            self.objects = {
-                "summary/health_daily.csv": summary,
-                stream.plan_key: plan,
-                **{
-                    stream.object_key(day): gzip_json({"date": day, "measurements": [{}]})
-                    for day in ("2026-09-25", "2026-09-26", "2026-09-27")
-                },
-            }
-
-        def list_keys(self, prefix=""):
-            return {key for key in self.objects if key.startswith(prefix)}
-
-        def get(self, key):
-            return self.objects[key]
-
-        def put(self, key, data, content_type, *, encoding=None):
-            self.objects[key] = data
 
     class FakeGarmin:
         def __init__(self):
@@ -1572,7 +1508,14 @@ def test_body_composition_repair_refetches_only_requested_existing_days():
         def __getattr__(self, name):
             raise AssertionError(f"Unexpected Garmin call: {name}")
 
-    store = FakeStore()
+    store = _BackfillStore({
+                "summary/health_daily.csv": summary,
+                stream.plan_key: plan,
+                **{
+                    stream.object_key(day): gzip_json({"date": day, "measurements": [{}]})
+                    for day in ("2026-09-25", "2026-09-26", "2026-09-27")
+                },
+            })
     garmin = FakeGarmin()
     result = run_health_detail_backfill(
         max_body_days=3,
@@ -1593,31 +1536,19 @@ def test_body_composition_repair_preserves_existing_object_if_dayview_is_empty()
     key = stream.object_key(day)
     original = gzip_json({"date": day, "measurements": [{"weight_kg": 80.0}]})
 
-    class FakeStore:
-        def __init__(self):
-            self.objects = {
-                "summary/health_daily.csv": b"Date,Sleep Seconds,Weight KG\n2026-09-27,,80.0\n",
-                stream.plan_key: json.dumps({
-                    "status": "complete", "target_dates": [day], "failures": {},
-                }).encode(),
-                key: original,
-            }
-
-        def list_keys(self, prefix=""):
-            return {item for item in self.objects if item.startswith(prefix)}
-
-        def get(self, item):
-            return self.objects[item]
-
-        def put(self, item, data, content_type, *, encoding=None):
-            self.objects[item] = data
 
     class FakeGarmin:
         def get_daily_weigh_ins(self, date):
             assert date == day
             return {"dateWeightList": [], "totalAverage": {"weight": 80000}}
 
-    store = FakeStore()
+    store = _BackfillStore({
+                "summary/health_daily.csv": b"Date,Sleep Seconds,Weight KG\n2026-09-27,,80.0\n",
+                stream.plan_key: json.dumps({
+                    "status": "complete", "target_dates": [day], "failures": {},
+                }).encode(),
+                key: original,
+            })
     result = run_health_detail_backfill(
         repair_body_start=day, repair_body_end=day, store=store,
         garmin=FakeGarmin(),
@@ -1649,25 +1580,12 @@ def test_completed_health_detail_backfills_do_not_contact_garmin_or_write():
             "completed_this_run": [{"date": "2026-09-21"}],
         }).encode()
 
-    class FakeStore:
-        def __init__(self):
-            self.objects = {"summary/health_daily.csv": summary, **plans}
-            self.puts = []
-
-        def list_keys(self, prefix=""):
-            return {key for key in self.objects if key.startswith(prefix)}
-
-        def get(self, key):
-            return self.objects[key]
-
-        def put(self, *args, **kwargs):
-            self.puts.append((args, kwargs))
 
     class NoGarmin:
         def __getattr__(self, name):
             raise AssertionError(f"Garmin must not be contacted through {name}")
 
-    store = FakeStore()
+    store = _BackfillStore({"summary/health_daily.csv": summary, **plans})
     result = run_health_detail_backfill(store=store, garmin=NoGarmin())
 
     assert result["sleep"]["status"] == "complete"
@@ -1691,20 +1609,6 @@ def test_completed_health_details_can_refresh_recent_existing_dates():
         objects[stream.object_key("2026-09-21")] = gzip_json({"old": True})
     objects.update(plans)
 
-    class FakeStore:
-        def __init__(self):
-            self.objects = objects
-            self.puts = []
-
-        def list_keys(self, prefix=""):
-            return {key for key in self.objects if key.startswith(prefix)}
-
-        def get(self, key):
-            return self.objects[key]
-
-        def put(self, key, data, content_type, *, encoding=None):
-            self.objects[key] = data
-            self.puts.append(key)
 
     class FakeGarmin:
         def __init__(self):
@@ -1719,7 +1623,7 @@ def test_completed_health_details_can_refresh_recent_existing_dates():
             self.body_calls.append(day)
             return {"dateWeightList": [{"calendarDate": day, "weight": 79500}]}
 
-    store = FakeStore()
+    store = _BackfillStore(objects)
     garmin = FakeGarmin()
     result = run_health_detail_backfill(
         max_sleep_days=3,

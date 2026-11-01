@@ -30,6 +30,7 @@ def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
     from .sources.provider_capabilities import capabilities_for
     supported = capabilities_for(garmin)
     end = today or date.today()
+    from .night_baseline_refresh import RecordedSourceHold, source_capacity
     results = {}
     all_records = {}
     validation_rejections = []
@@ -44,7 +45,8 @@ def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
         records = []
         failures = 0
         not_ready = 0
-        for offset in range(days):
+        admitted_days = source_capacity(store, days, checkpoint_puts=4 + 3 * days)
+        for offset in range(admitted_days):
             day = (end - timedelta(days=offset)).isoformat()
             try:
                 raw = (garmin.get_sleep_data(day) if stream == "sleep"
@@ -56,6 +58,8 @@ def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
                 continue
             try:
                 records.append(store_day(store, stream, day, raw))
+            except RecordedSourceHold:
+                not_ready += 1
             except HealthNotReady as exc:
                 not_ready += 1
                 if exc.status in ("invalid_response", "wrong_date", "garmin_not_ready"):
@@ -67,7 +71,8 @@ def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
         index = finalize_days(store, stream, records)
         all_records[stream] = records
         results[stream] = {
-            "days_checked": days, "days_ready": len(records), "days_not_ready": not_ready,
+            "days_checked": admitted_days, "days_requested": days,
+            "days_deferred": days - admitted_days, "days_ready": len(records), "days_not_ready": not_ready,
             "source_errors": failures, "objects_written": sum(item["written"] for item in records),
             "objects_unchanged": sum(not item["written"] for item in records),
             "checkpoints_written": len(records), "months_written": len(index["months_written"]),
@@ -77,6 +82,16 @@ def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
               "status": "complete" if all(item["days_ready"] == days for item in results.values()) else "partial",
               "night_checkpoints_written": publish_completed_nights(store, all_records),
               "streams": results, "health_validation_rejections": validation_rejections}
+    from .night_baseline_refresh import refresh_pending
+    supported_results = [value for value in results.values() if value.get("status") != "unsupported"]
+    if not supported_results:
+        report["baseline_refresh"] = {"status": "not_run_unsupported"}
+    elif all(value["source_errors"] > 0 and value["days_ready"] == 0 for value in supported_results):
+        # Admission already checked bounded queue capacity before source calls.
+        # A wholly failed source phase does not start unrelated tail publication.
+        report["baseline_refresh"] = {"status": "not_run_source_failure"}
+    else:
+        report["baseline_refresh"] = refresh_pending(store)
     log_report("recent_health", report)
     return report
 

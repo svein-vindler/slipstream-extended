@@ -22,6 +22,8 @@ and prepared analyses remain available between refreshes.
 
 - Activity and daily-health summaries
 - Minute-level overnight HRV curves
+- Stored weekly and monthly sleep heart-rate/HRV reference curves, updated
+  incrementally as imported nights are added or corrected
 - Sleep stages, sleep score components, respiration, SpO2 and stress
 - Bounded HRV and sleep history with automatic weekly summaries for long ranges
 - Weight and body-composition measurements, plus bounded morning-weight history
@@ -44,7 +46,8 @@ and prepared analyses remain available between refreshes.
 - Optional [encrypted local backup and isolated recovery testing](docs/PRIVATE_BACKUP.md)
   of user-owned profile/context history and immutable coach inputs; see the
   [backup quick start](docs/BACKUP_QUICKSTART.md) for a separate local installation
-- Resumable historical backfills that become read-only checks when complete
+- Resumable historical backfills that avoid repeated source fetching once complete;
+  pending reference curves continue within the existing storage budgets
 - Detection and replacement of changed Garmin activity files
 - Optional chat-triggered refresh with completion polling
 - R2-first fresh workout and sleep/HRV requests with bounded targeted imports
@@ -110,6 +113,14 @@ Both also run a read-only installation check that points to the next unfinished
 step. Rerun `python scripts/check_installation.py` to resume; optional `--online`
 checks verify your own cloud setup without changing credentials or data. Recent
 data is sufficient to finish setup; full historical backfill remains optional.
+
+Normal night-data ingestion also maintains closed ISO-week and calendar-month
+sleep HR/HRV references from stored R2 data. Improved coverage and corrected
+values update affected periods; open periods wait until closed, and older
+reference versions remain available. Configure the ingestion calendar timezone
+as described in [installation](docs/INSTALL.md#automatic-stored-night-references).
+See [reference refresh](docs/NIGHT_BASELINE_REFRESH.md) for pending work, bounds
+and integration of existing local archive publishers.
 
 ## Connect and use
 

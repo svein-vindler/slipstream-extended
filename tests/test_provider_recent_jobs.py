@@ -4,6 +4,7 @@ import json
 from datetime import date
 
 import pytest
+from night_store_protocol import NightStoreProtocol
 from test_garmin_personal import HTTP, Response, authenticated
 
 
@@ -17,7 +18,7 @@ def personal(http):
 def test_unsupported_recent_stream_has_no_source_or_storage_calls(module):
     import importlib
 
-    class Store:
+    class Store(NightStoreProtocol):
         def __getattr__(self, name):
             raise AssertionError("No storage for unsupported-only stream")
 
@@ -44,7 +45,7 @@ def test_latest_personal_night_saves_hrv_without_advancing_full_night_freshness(
     }
     http = authenticated(("GET", "/hrv-service/hrv/" + day, Response(raw)))
 
-    class Store:
+    class Store(NightStoreProtocol):
         def __init__(self):
             self.objects = {}
 

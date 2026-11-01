@@ -74,7 +74,7 @@ and update the installer's private R2 bucket, never Garmin fitness data.
 - Refresh has a cooldown and bounded status polling.
 - GitHub jobs share a concurrency group, cap each batch and fail closed against
   project R2 storage/object/write budgets.
-- Completed historical backfills perform only a cheap eligibility check until
+- Completed historical source plans perform only a cheap source eligibility check until
   new data appears.
 
 Cloud-account quotas still apply before or around application code. Configure
@@ -183,3 +183,14 @@ Source selection never bypasses the legacy read-only guard or permits fitness
 writes. Unsupported source features preserve existing detailed artifacts.
 
 Personal original archives keep byte-integrity evidence separate from activity association. FIT CRC validation does not prove a Garmin activity ID or authorize canonical promotion. Other original formats beyond FIT/GPX/TCX remain unsupported by this adapter.
+
+
+Incremental night references use stored R2 data only. A completed sleep/HRV
+source plan can still drain already queued closed references; this is separate
+from Garmin source eligibility and does not fetch completed history again.
+Source, control, history and current-product writes consume the same bounded
+stage/bucket budgets. Exact conditional revisions, ACK/readback and durable
+in-flight evidence prevent automatic adoption of an unknown write. The scoped
+transport guard rejects denial/unknown and incomplete inventory before another
+write; ordinary R2 clients use one total attempt with explicit connect/read I/O
+timeouts. No new schedule, credential or provider write route is introduced.

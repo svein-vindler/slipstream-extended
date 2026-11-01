@@ -319,6 +319,8 @@ def test_stress_extension_keeps_existing_r2_write_budget_and_failed_scope_receip
     key = "health/signals/v1/2026/09/2026-09-30.json"
     check = "refresh/checks/v1/summary/health/recent.json"
     original, previous_check = storage.objects[key]["Body"], storage.objects[check]["Body"]
+    queue_key = "health/night-products/v1/refresh-queue.json"
+    previous_queue = storage.objects[queue_key]["Body"]
     state["value"] = 40
     storage.reset()
     with pytest.raises(R2BudgetError):
@@ -326,7 +328,9 @@ def test_stress_extension_keeps_existing_r2_write_budget_and_failed_scope_receip
             client=source, now=NOW + timedelta(minutes=1), request_pause=0)
     assert storage.objects[key]["Body"] == original
     assert storage.objects[check]["Body"] == previous_check
-    assert len([key for key in storage.writes if key.startswith("health/signals/")]) == 1
+    # Three-step intent/source/ready admission defers before any canonical PUT.
+    assert not any(key.startswith("health/signals/") for key in storage.writes)
+    assert storage.objects[queue_key]["Body"] == previous_queue
 
 @pytest.mark.parametrize("drift", ["session", "request", "adapter", "retry", "headers", "version"])
 def test_stress_transport_drift_fails_closed_without_fallback(monkeypatch, drift):
