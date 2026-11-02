@@ -263,3 +263,25 @@ def test_public_history_publisher_drains_month_through_its_existing_storage_guar
     )
     assert result["baseline_refresh"]["products_written"] == 2
     assert result["counts"] == {"published": 1}
+
+
+def test_shared_health_client_pages_real_prefix_and_inventory_responses():
+    from pipeline.r2_store import R2Store
+    from scripts.benchmark_health_reuse import HealthClient
+
+    client = HealthClient()
+    prefix = "health/night-context/v1/2026/10/"
+    client.objects = {
+        prefix + f"synthetic-{i:04d}.json": {"Body": b"{}", "ContentType": "application/json"}
+        for i in range(1001)
+    }
+    store = R2Store(client=client, bucket="synthetic")
+    pages = list(client.get_paginator("list_objects_v2").paginate(Prefix=prefix, MaxKeys=1000))
+    assert [page["KeyCount"] for page in pages] == [1000, 1]
+    assert [page["IsTruncated"] for page in pages] == [True, False]
+    assert pages[0]["NextContinuationToken"] == "1000"
+    assert "NextContinuationToken" not in pages[1]
+    assert store.list_prefix_bounded(prefix, max_keys=3101) == sorted(client.objects)
+    assert store.inventory() == {"objects": 1001, "bytes": 2002}
+    assert store.operations["list_pages"] == 4
+    assert client.counts["list"] == 6

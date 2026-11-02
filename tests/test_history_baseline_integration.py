@@ -400,7 +400,7 @@ def test_full_month_drain_uses_same_400_get_cap_then_retains_safe_source_work(mo
     first = next(
         json.loads(body) for name, body in files.items() if name.endswith("REMOTE-VERIFIED.json")
     )
-    assert first["counts"]["get"] == 386 and first["counts"]["list"] == 94
+    assert first["counts"]["get"] == 386 and first["counts"]["list"] == 34
     assert first["counts"]["put"] == 8
     assert "health/hrv/2026/04/2026-04-29.json" not in server.objects
     result = history_publish.publish(job, job.plan_sha, confirm=True, store=sdk_store(server))

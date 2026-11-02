@@ -69,6 +69,10 @@ class ClosingBranchesTest(unittest.TestCase):
 
     def test_inventory_lists_are_reserved_before_publication_intent(self):
         class PagedInventory(HealthClient):
+            def __init__(self, pages):
+                super().__init__()
+                self.pages = pages
+
             def get_paginator(self, name):
                 ordinary = super().get_paginator(name)
                 client = self
@@ -76,40 +80,71 @@ class ClosingBranchesTest(unittest.TestCase):
                 class Pages:
                     def paginate(self, **kwargs):
                         if kwargs.get("Prefix", ""):
-                            return ordinary.paginate(**kwargs)
+                            yield from ordinary.paginate(**kwargs)
+                            return
                         rows = [
-                            {"Key": key, "Size": len(value["Body"])}
+                            {
+                                "Key": key,
+                                "Size": len(value["Body"]),
+                                "ETag": client._etag(value["Body"]),
+                            }
                             for key, value in sorted(client.objects.items())
                         ]
-                        client.counts["list"] += 8
-                        client.prefixes.append("")
-                        return [{"Contents": rows[i : i + 1]} for i in range(7)] + [
-                            {"Contents": rows[7:]}
-                        ]
+                        assert len(rows) >= client.pages
+                        for index in range(client.pages):
+                            page = (
+                                rows[index : index + 1]
+                                if index < client.pages - 1
+                                else rows[index:]
+                            )
+                            truncated = index < client.pages - 1
+                            client.counts["list"] += 1
+                            client.prefixes.append("")
+                            result = {
+                                "Contents": page,
+                                "IsTruncated": truncated,
+                                "KeyCount": len(page),
+                                "MaxKeys": 1000,
+                                "Prefix": "",
+                            }
+                            if truncated:
+                                result["NextContinuationToken"] = str(index + 1)
+                            yield result
 
                 return Pages()
 
         seed, _ = full_month_service()
-        client = PagedInventory()
-        client.objects = copy.deepcopy(seed.objects)
-        store = R2Store(client=client, bucket="synthetic")
-        original_queue = client.objects[refresh.QUEUE_KEY]["Body"]
-        result = refresh.refresh_pending(store, today="2026-11-01", timezone="UTC", max_periods=1)
-        self.assertEqual(result["status"], "bounded_pending")
-        self.assertEqual(result["products_written"], 0)
-        self.assertEqual(store.operations["put"], 0)
-        self.assertEqual(client.objects[refresh.QUEUE_KEY]["Body"], original_queue)
-        row = json.loads(original_queue)["pending"]["month/2026-10"]
-        self.assertEqual(row["phase"], "dirty")
-        self.assertNotIn("inflight", row)
-        self.assertEqual(result["component_operations"]["list"], 39)
-        self.assertEqual(client.prefixes.count(""), 1)
-        # The ordinary one-page inventory contrast still completes within the
-        # same cap; an eight-page inventory is never moved outside the observer.
-        next_client, next_store = full_month_service(client.objects)
-        resumed = refresh.refresh_pending(
-            next_store, today="2026-11-01", timezone="UTC", max_periods=1
-        )
-        self.assertEqual(resumed["status"], "complete")
-        self.assertEqual(resumed["products_written"], 2)
-        self.assertLessEqual(resumed["component_operations"]["list"], 100)
+        # Eight inventory pages now fit because two month fences replace 62
+        # daily fences. A 62-page inventory still leaves too little reserve.
+        for pages, status, products, lists in (
+            (8, "complete", 2, 41),
+            (62, "bounded_pending", 0, 93),
+        ):
+            with self.subTest(inventory_pages=pages):
+                client = PagedInventory(pages)
+                client.objects = copy.deepcopy(seed.objects)
+                store = R2Store(client=client, bucket="synthetic")
+                original_queue = client.objects[refresh.QUEUE_KEY]["Body"]
+                result = refresh.refresh_pending(
+                    store, today="2026-11-01", timezone="UTC", max_periods=1
+                )
+                self.assertEqual(result["status"], status)
+                self.assertEqual(result["products_written"], products)
+                self.assertEqual(result["component_operations"]["list"], lists)
+                self.assertEqual(client.prefixes.count(""), pages)
+                if not products:
+                    self.assertEqual(store.operations["put"], 0)
+                    self.assertEqual(client.objects[refresh.QUEUE_KEY]["Body"], original_queue)
+                    row = json.loads(original_queue)["pending"]["month/2026-10"]
+                    self.assertEqual(row["phase"], "dirty")
+                    self.assertNotIn("inflight", row)
+                print(
+                    json.dumps(
+                        {
+                            "inventory_reservation": pages,
+                            "component_operations": result["component_operations"],
+                            "products": products,
+                            "status": status,
+                        }
+                    )
+                )
