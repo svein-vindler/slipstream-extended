@@ -385,9 +385,35 @@ class R2Store:
         return self._put(key, data, content_type, encoding=encoding, if_absent=True)
 
     def list_prefix_bounded(self, prefix: str, *, max_keys: int) -> list[str]:
-        """One explicitly bounded namespace check, never an inventory fallback."""
-        if type(max_keys) is not int or not 1 <= max_keys <= 1000:
+        """Bounded namespace check; larger totals page at most 1,000 keys per send."""
+        if type(max_keys) is not int or not 1 <= max_keys <= 3101:
             raise ValueError("Invalid storage listing limit")
+        if max_keys > 1000:
+            keys, seen, tokens = [], set(), set()
+            pages = 0
+            for result in self._pages(Prefix=prefix, MaxKeys=1000):
+                pages += 1
+                self.operations["list_pages"] += 1
+                entries = result.get("Contents", [])
+                token = result.get("NextContinuationToken")
+                if (type(result.get("IsTruncated")) is not bool
+                        or not isinstance(entries, list) or len(entries) > 1000
+                        or any(not isinstance(item, dict) or not isinstance(item.get("Key"), str)
+                               or not item["Key"].startswith(prefix) or item["Key"] in seen
+                               for item in entries)
+                        or len({item["Key"] for item in entries}) != len(entries)
+                        or len(keys) + len(entries) > max_keys
+                        or result["IsTruncated"] and (not isinstance(token, str)
+                            or not 0 < len(token) <= 4096 or token in tokens)):
+                    raise R2ReadBoundaryError("schema_unverified")
+                self.operations["listed_objects"] += len(entries)
+                keys.extend(item["Key"] for item in entries)
+                seen.update(item["Key"] for item in entries)
+                if result["IsTruncated"]:
+                    if len(keys) >= max_keys or pages >= (max_keys + 999) // 1000:
+                        raise R2ReadBoundaryError("schema_unverified")
+                    tokens.add(token)
+            return keys
         self.operations["list_pages"] += 1
         with timed(self.timings_ms, "list"):
             result = self.client.list_objects_v2(Bucket=self.bucket, Prefix=prefix, MaxKeys=max_keys)

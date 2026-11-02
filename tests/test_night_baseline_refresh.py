@@ -107,11 +107,13 @@ class IncrementalTest(unittest.TestCase):
             refresh.publish_source(store, key, canonical(source).encode(), "application/json")
         )
         corrected = refresh.refresh_pending(store, today="2026-11-02", timezone="Europe/Oslo")
-        self.assertEqual(corrected["products_written"], 2)
-        self.assertEqual(corrected["status"], "bounded_pending")
+        self.assertEqual((corrected["periods_completed"], corrected["products_written"]), (2, 4))
+        self.assertEqual(corrected["status"], "complete")
+        print({"corrected_week_and_month": corrected["component_operations"]})
         reopened = WritableSnapshots()
         reopened.objects = store.objects
         remainder = refresh.refresh_pending(reopened, today="2026-11-02", timezone="Europe/Oslo")
+        self.assertEqual(remainder["products_written"], 0)
         self.assertEqual(corrected["products_written"] + remainder["products_written"], 4)
         self.assertEqual(
             json.loads(store.objects[storage_key(week_args)].data)["bins"][4]["p50"], 75

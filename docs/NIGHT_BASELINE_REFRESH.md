@@ -94,9 +94,21 @@ Source SHA/revisions, context listing and exact product preimages are checked
 before publication. Source object bindings and context prefixes are checked again afterward using
 fresh storage reads/listings, without claiming an atomic multi-object R2
 transaction. Initial queued-source capture is shared with native assembly;
-publication fences never reuse that cache. A fully populated 31-night month
-with31 dirty HRV proofs and31 contexts uses386 GET and93 LIST in the synthetic
-store regression, including both fresh fences. Twenty ordinary reads before the
+publication fences never reuse that cache. Each fresh context fence groups the
+requested daily prefixes by calendar month, lists each month afresh, then checks
+the same exact per-day key sets. The logical limit stays at 100 events per day;
+context selection, native inputs and product `source_identity` stay unchanged.
+A month check has a 3,101-key overflow bound and at most four physical pages of
+up to 1,000 keys. A truncated fourth page, duplicates, wrong prefix or malformed
+page stops the check without accepting partial context evidence. Existing
+prefix checks of 1,000 keys or fewer retain their single-page contract.
+
+A fully populated 31-night month with 31 dirty HRV proofs and 31 contexts uses
+386 GET and 54 LIST with a real 21-page synthetic bucket inventory, including both
+fresh fences. The same case with 100 context events per day uses 60 LIST.
+Admission reserves four physical pages per month per fence, including for
+cross-month or cross-ISO-year weeks; it never resets the shared client counter
+or skips the bucket inventory. Twenty ordinary reads before the
 helper make the store total 406 GET while this component still uses 386; the
 helper's scoped cap does not impose a new global limit on ordinary R2 callers.
 A second period defers if the remaining component GET or LIST budget cannot
