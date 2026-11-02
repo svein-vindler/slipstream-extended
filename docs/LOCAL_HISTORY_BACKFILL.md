@@ -56,6 +56,23 @@ local safety limits, not an official Garmin quota. More work requires another
 explicit bounded `collect` or `resume` command. Ready and published targets in
 this job are skipped without a new source call.
 
+The dated legacy port guards both SDK sessions and the SDK's separate DI token
+refresh POST before login, including when SDK 0.3.20 uses CFFI. Only the fixed
+DI refresh endpoint and refresh-token form are admitted. Authentication shares
+the date's HTTP/body/deadline/pacing limits, streams its bounded response before
+SDK parsing and cannot follow redirects. The first HTTP refusal, unverified
+response or transport failure stops the date before any SDK replay, fitness read
+or reload. Normal token renewal before such a failure is still allowed; this
+port does not persist refreshed credentials. Ordinary shared login and the
+separate identity-only diagnostic retain their own policies.
+
+Private date evidence records physical intents, validated HTTP statuses and,
+for transport failures, only the exception class. Auth refresh is always
+`identity_auth`, even during an HR/HRV read. Auth bodies, headers, token values,
+URLs and provider exception text are never written to these journals. A missing
+HTTP status remains unknown; it is not evidence of401 or429. Older journals
+cannot reconstruct auth traffic that their transport did not observe.
+
 For older Connect charts, legacy SDK 0.3.20 has a separate explicitly authorized,
 **date-bound archive request**. Enable it only when you intend to consume Garmin
 chart reload capacity:
@@ -110,6 +127,18 @@ Status and CSV distinguish `pending`, `ready` (local, not delivered),
 `empty_unresolved`, `rate_limited`, `denied`, `failed`, `unsupported` and
 `published`. Unknown or unclosed outcomes additionally hold the owner and are not
 promoted. An empty result says only that the attempt returned no readable detail.
+
+For legacy HR, one validated daily envelope may explicitly contain
+`heartRateValues: null` and `heartRateValueDescriptors: null`, null min/max, the
+known finite summary fields and valid source clocks. That means
+`empty_unresolved`; summary values never become curve samples. The exact raw
+response, profile binding, source UTC/local clocks and nulls are retained. A
+whole HTTP200 body of `null`, a missing curve key, malformed points, wrong
+date/profile or an unknown null-envelope schema stops before a reload. HTTP204
+remains a valid empty response. With the separate archive opt-in, a verified
+empty channel can use the existing one-reload/full120-second-wait path; a still
+empty after-read remains unresolved. No normalizer fabricates a zero curve or
+replaces a good stored curve from this absence.
 Raw wires and their source clocks/nulls remain preserved even if a later phase
 stops. Missing samples are never zero-filled. Canonical HR keeps existing UTC/unit
 provenance and missing-value flags/counts; exact missing timestamps remain in raw
@@ -173,7 +202,16 @@ reload. R2 limits remain GET400/LIST100/PUT100 and 2 MiB written per job invocat
 with the existing 5 GiB / 100,000 object bucket ceiling (or lower configured limits).
 Responses remain bounded (64 KiB error/PUT,512 KiB GET,1 MiB LIST), with 16 MiB
 raw / 32 MiB decoded totals, 1 MiB decoded objects and a 900 second job deadline.
-One R2Store shares its cached inventory throughout the invocation. Publication
+One R2Store shares its cached inventory throughout the invocation.
+Valid S3 URL-encoded LIST keys and prefixes are compared with the SDK's
+once-decoded representation only when the SDK selected that encoding automatically.
+Explicitly requested URL encoding keeps the SDK's encoded response representation;
+logical key/prefix validation still applies. Literal percent signs and plus signs
+are preserved, and continuation tokens remain opaque. Malformed escapes, invalid
+UTF-8, decoded control characters, unsupported encoding and raw/SDK disagreements
+stop before inventory can authorize a write. The logical key limit remains 1024 UTF-8
+bytes; percent-encoded wire text stays within the existing bounded LIST response.
+ Publication
 uses no Actions or deployments. Full historical completeness and reference completion are separate; neither is
 inferred from successful canonical writes. A synthetic seven-date/two-month
 publication required 44 conditional PUTs (14 intent/source/ready groups plus two

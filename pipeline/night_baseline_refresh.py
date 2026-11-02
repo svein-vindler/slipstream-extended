@@ -163,6 +163,29 @@ class _BodyBound:
         return getattr(self.raw, name)
 
 
+def _list_text(value, encoding):
+    """Validate one logical S3 field; percent decoding is strict and once-only."""
+    from urllib.parse import unquote_to_bytes
+
+    require(isinstance(value, str), "Baseline LIST text unverified")
+    require(encoding in (None, "url"), "Baseline LIST encoding unsupported")
+    try:
+        require(
+            len(value.encode("utf-8")) <= (3072 if encoding == "url" else 1024),
+            "Baseline LIST text bound",
+        )
+        if encoding == "url":
+            require(
+                re.search(r"%(?![0-9a-fA-F]{2})", value) is None, "Baseline LIST escape unverified"
+            )
+            value = unquote_to_bytes(value).decode("utf-8", errors="strict")
+        require(len(value.encode("utf-8")) <= 1024, "Baseline LIST logical text bound")
+    except UnicodeError:
+        raise BaselineRefreshStop("Baseline LIST UTF8 unverified") from None
+    require(not any(ord(c) < 32 or ord(c) == 127 for c in value), "Baseline LIST text control")
+    return value
+
+
 def _raw_inventory(body):
     from xml.etree import ElementTree
 
@@ -199,6 +222,16 @@ def _raw_inventory(body):
         require(len(rows) == 1 and not list(rows[0]), "Baseline LIST field unverified")
         return rows[0].text or ""
 
+    def optional(key):
+        nodes = [node for node in root if name(node) == key]
+        require(len(nodes) <= 1, "Baseline LIST field unverified")
+        return single(root, key) if nodes else None
+
+    encoding = optional("EncodingType")
+    require(encoding in (None, "url"), "Baseline LIST encoding unsupported")
+    prefix = optional("Prefix")
+    if prefix is not None:
+        _list_text(prefix, encoding)
     truncated = single(root, "IsTruncated").strip()
     require(truncated in {"true", "false"}, "Baseline LIST truncation unverified")
     rows = [node for node in root if name(node) == "Contents"]
@@ -206,16 +239,46 @@ def _raw_inventory(body):
     result = []
     for row in rows:
         key, size = single(row, "Key"), single(row, "Size").strip()
+        logical = _list_text(key, encoding)
         require(
-            0 < len(key.encode()) <= 1024
-            and "\x00" not in key
+            0 < len(logical.encode()) <= 1024
+            and "\x00" not in logical
             and re.fullmatch(r"[0-9]{1,20}", size),
             "Baseline LIST key/size unverified",
         )
         result.append({"Key": key, "Size": int(size)})
     token = single(root, "NextContinuationToken") if truncated == "true" else None
     require(token is None or 0 < len(token) <= 4096, "Baseline LIST continuation unverified")
-    return {"IsTruncated": truncated == "true", "Contents": result, "NextContinuationToken": token}
+    return {
+        "IsTruncated": truncated == "true",
+        "Contents": result,
+        "NextContinuationToken": token,
+        "EncodingType": encoding,
+        "Prefix": prefix,
+    }
+
+
+def _list_sdk_text(value, encoding, context):
+    """Validate logical names without decoding the SDK's auto-decoded text twice."""
+    effective = encoding if not (context or {}).get("encoding_type_auto_set") else None
+    return _list_text(value, effective)
+
+
+def _inventory_for_sdk(raw, encoding, context):
+    """Match the SDK's auto decode while retaining opaque tokens and raw evidence."""
+    if raw is None:
+        return None
+    require(encoding == raw["EncodingType"], "Baseline LIST parsed/raw encoding disagreement")
+    if encoding == "url" and (context or {}).get("encoding_type_auto_set") is True:
+        raw = {
+            **raw,
+            "Contents": [
+                {**row, "Key": _list_text(row["Key"], encoding)} for row in raw["Contents"]
+            ],
+        }
+        if raw["Prefix"] is not None:
+            raw["Prefix"] = _list_text(raw["Prefix"], encoding)
+    return raw
 
 
 class _WireBudget:
@@ -329,11 +392,11 @@ class _WireBudget:
         self.operation = kind
         self.raw_inventory = None
 
-    def after(self, http_response, parsed, **_):
+    def after(self, http_response, parsed, context=None, **_):
         code = parsed.get("Error", {}).get("Code")
         if http_response.status_code == 200 and code is None:
             if self.operation == "list":
-                raw = self.raw_inventory
+                raw = _inventory_for_sdk(self.raw_inventory, parsed.get("EncodingType"), context)
                 require(
                     raw is not None
                     and parsed.get("IsTruncated") is raw["IsTruncated"]
@@ -343,7 +406,9 @@ class _WireBudget:
                         if isinstance(item, dict)
                     ]
                     == raw["Contents"]
-                    and parsed.get("NextContinuationToken") == raw["NextContinuationToken"],
+                    and parsed.get("NextContinuationToken") == raw["NextContinuationToken"]
+                    and parsed.get("EncodingType") == raw["EncodingType"]
+                    and parsed.get("Prefix") == raw["Prefix"],
                     "Baseline LIST parsed/raw disagreement",
                 )
                 rows = parsed.get("Contents", [])
@@ -360,7 +425,11 @@ class _WireBudget:
                     and all(
                         isinstance(row, dict)
                         and isinstance(row.get("Key"), str)
-                        and 0 < len(row["Key"].encode()) <= 1024
+                        and 0
+                        < len(
+                            _list_sdk_text(row["Key"], parsed.get("EncodingType"), context).encode()
+                        )
+                        <= 1024
                         and "\x00" not in row["Key"]
                         and type(row.get("Size")) is int
                         and row["Size"] >= 0

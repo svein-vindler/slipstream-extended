@@ -31,6 +31,50 @@ def key(stream, day):
     return signal_key(day) if stream == "hr" else f"health/hrv/{day[:4]}/{day[5:7]}/{day}.json"
 
 
+def _validate_missing_hr(day, raw):
+    """One verified legacy envelope declares absence; summaries are not samples."""
+    clocks = ("startTimestampGMT", "endTimestampGMT", "startTimestampLocal", "endTimestampLocal")
+    summaries = ("restingHeartRate", "lastSevenDaysAvgRestingHeartRate")
+    expected = {
+        "userProfilePK",
+        "calendarDate",
+        "heartRateValues",
+        "heartRateValueDescriptors",
+        "maxHeartRate",
+        "minHeartRate",
+        *clocks,
+        *summaries,
+    }
+    try:
+        if (
+            set(raw) != expected
+            or type(raw["userProfilePK"]) is not int
+            or any(
+                raw[k] is not None
+                for k in (
+                    "heartRateValues",
+                    "heartRateValueDescriptors",
+                    "maxHeartRate",
+                    "minHeartRate",
+                )
+            )
+            or any(type(raw[k]) not in (int, float) or not math.isfinite(raw[k]) for k in summaries)
+        ):
+            raise Stop("invalid_null_hr")
+    except OverflowError:
+        raise Stop("invalid_null_hr") from None
+    for field in clocks:
+        value = raw[field]
+        try:
+            if not isinstance(value, str) or len(value) <= 10 or value[10] not in {"T", " "}:
+                raise ValueError()
+            instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if abs((instant.date() - date.fromisoformat(day)).days) > 1:
+                raise ValueError()
+        except ValueError:
+            raise Stop("invalid_null_hr_clock") from None
+
+
 def prepare(stream, day, raw, previous=None, *, wire=b""):
     if not isinstance(raw, dict):
         raise Stop("source_shape")
@@ -41,6 +85,9 @@ def prepare(stream, day, raw, previous=None, *, wire=b""):
         raise Stop("wrong_date")
     if stream == "hr":
         points = raw.get("heartRateValues")
+        if "heartRateValues" in raw and points is None:
+            _validate_missing_hr(day, raw)
+            return None
         if isinstance(points, list):
             for point in points:
                 if (
