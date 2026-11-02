@@ -963,6 +963,25 @@ def _proof(reader, requested):
     return result
 
 
+def _context_months(prefixes):
+    """Group physical checks; logical per-night dependency lists stay unchanged."""
+    months = {}
+    for prefix in prefixes:
+        match = re.fullmatch(r"(health/night-context/v1/(\d{4})/(\d{2})/)(\d{4}-\d{2}-\d{2})/", prefix)
+        require(match is not None, "Night context prefix unverified")
+        month, year, number, day = match.groups()
+        require(date.fromisoformat(day).isoformat() == day and day[:7] == year + "-" + number,
+                "Night context calendar unverified")
+        months.setdefault(month, []).append(prefix)
+    return months
+
+
+def _context_fence_lists(requested):
+    prefixes = [f"health/night-context/v1/{day[:4]}/{day[5:7]}/{day}/" for day in requested]
+    # 31 days * 100 events, plus an overflow sentinel: at most four physical pages.
+    return 4 * len(_context_months(prefixes))
+
+
 def _validate_sources(store, proof, *, check_lists=True):
     for key, binding in proof["objects"].items():
         now = _snapshot(store, key, 524288)
@@ -975,11 +994,12 @@ def _validate_sources(store, proof, *, check_lists=True):
                 and hashlib.sha256(now.data).hexdigest() == binding["sha256"],
                 "Night source revision changed",
             )
-    for prefix, keys in proof["lists"].items() if check_lists else ():
-        require(
-            sorted(store.list_prefix_bounded(prefix, max_keys=101)) == keys,
-            "Night context revision changed",
-        )
+    for month, prefixes in _context_months(proof["lists"] if check_lists else ()).items():
+        current = store.list_prefix_bounded(month, max_keys=3101)
+        for prefix in prefixes:
+            keys = sorted(key for key in current if key.startswith(prefix))
+            require(len(keys) <= 100 and keys == proof["lists"][prefix],
+                    "Night context revision changed")
 
 
 def _today(timezone):
@@ -1159,7 +1179,7 @@ def refresh_pending(store, *, today=None, timezone=None, max_periods=MAX_PERIODS
             ]
             lists_used = io.counts()["list"]
             if (
-                lists_used + sum(wake not in nights for wake in requested) + 2 * len(requested)
+                lists_used + sum(wake not in nights for wake in requested) + 2 * _context_fence_lists(requested)
                 > 100
             ):
                 report.setdefault("budget_deferred", []).append(name)
@@ -1300,7 +1320,7 @@ def refresh_pending(store, *, today=None, timezone=None, max_periods=MAX_PERIODS
                     continue
                 # Admission may have inventoried the bucket inside this observer.
                 # Both fresh context fences must still fit before any intent.
-                if io.counts()["list"] + 2 * len(requested) > 100:
+                if io.counts()["list"] + 2 * _context_fence_lists(requested) > 100:
                     continue
                 chosen = group
                 break

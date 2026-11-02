@@ -401,7 +401,12 @@ class _ReferenceStore:
         return self.store.matches_object(name, *args, **kwargs)
 
     def list_prefix_bounded(self, prefix, **kwargs):
-        if not re.fullmatch(r"health/night-context/v1/[0-9]{4}/[0-9]{2}/[0-9-]{10}/", prefix):
+        daily = re.fullmatch(r"health/night-context/v1/[0-9]{4}/[0-9]{2}/[0-9-]{10}/", prefix)
+        monthly = (
+            re.fullmatch(r"health/night-context/v1/[0-9]{4}/[0-9]{2}/", prefix)
+            and type(kwargs.get("max_keys")) is int and kwargs["max_keys"] == 3101
+        )
+        if not (daily or monthly):
             raise Stop("reference_prefix_outside_contract")
         self.guard.prefixes.add(prefix)
         return self.store.list_prefix_bounded(prefix, **kwargs)
