@@ -481,22 +481,44 @@ class FullQueueAdmissionTest(unittest.TestCase):
             "ContentType": "text/csv",
         }
         store = R2Store(client=client, bucket="synthetic")
-        garmin = SyntheticGarmin()
+
+        class ObservedGarmin(SyntheticGarmin):
+            def _fetch(self, stream, day):
+                self.pending_at_source = json.loads(client.objects[refresh.QUEUE_KEY]["Body"])[
+                    "pending"
+                ]
+                return super()._fetch(stream, day)
+
+        garmin = ObservedGarmin()
         with (
             patch.dict(os.environ, {"HEALTH_TIMEZONE": "UTC"}),
             patch.object(refresh, "_today", return_value="2026-11-02"),
         ):
             result = run(max_days=1, store=store, garmin=garmin)
         retained = json.loads(client.objects[refresh.QUEUE_KEY]["Body"])
-        self.assertLess(len(retained["pending"]), 128)
-        self.assertEqual(garmin.calls, [])
-        self.assertEqual(result["status"], "active")
-        self.assertEqual(result["attempted_this_run"], 0)
+        self.assertEqual(len(garmin.pending_at_source), 126)
+        self.assertNotIn("month/2010-01", garmin.pending_at_source)
+        self.assertNotIn("month/2010-02", garmin.pending_at_source)
+        self.assertEqual(len(retained["pending"]), 128)  # two drained, then week + month added
+        self.assertEqual(garmin.calls, [("hrv", "2026-11-02")])
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["attempted_this_run"], 1)
         self.assertEqual(result["failures"], {})
-        self.assertNotIn("health/hrv/2026/11/2026-11-02.json", client.objects)
+        self.assertIn("health/hrv/2026/11/2026-11-02.json", client.objects)
         self.assertIn(PLAN_KEY, client.objects)
-        # A later ordinary invocation gets its normal budget, not a new stage
-        # allowance inside the first one, and then admits the requested source.
+        # Month-fence savings admit the source in this ordinary budget. A later
+        # invocation admits the logical date again using its stored canonical bytes.
+        self.assertLessEqual(result["baseline_refresh"]["component_operations"]["get"], 400)
+        self.assertLessEqual(result["baseline_refresh"]["component_operations"]["list"], 100)
+        print(
+            json.dumps(
+                {
+                    "full_queue_admission": result["baseline_refresh"],
+                    "store_operations": store.operations,
+                    "pending_at_source": len(garmin.pending_at_source),
+                }
+            )
+        )
         import copy
 
         next_client = HealthClient()
@@ -509,7 +531,7 @@ class FullQueueAdmissionTest(unittest.TestCase):
         ):
             following = run(max_days=1, store=next_store, garmin=next_garmin)
         self.assertEqual(following["attempted_this_run"], 1)
-        self.assertEqual(next_garmin.calls, [("hrv", "2026-11-02")])
+        self.assertEqual(next_garmin.calls, [])
         self.assertIn("health/hrv/2026/11/2026-11-02.json", next_client.objects)
 
 

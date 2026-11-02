@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from contextlib import redirect_stderr, redirect_stdout
@@ -52,12 +51,31 @@ class HealthClient(SummaryClient):
 
         class Paginator:
             def paginate(self, **kwargs):
-                client.counts["list"] += 1
                 prefix = kwargs.get("Prefix", "")
-                client.prefixes.append(prefix)
-                return [{"Contents": [{"Key": key, "Size": len(value["Body"]),
-                                       "ETag": '"' + hashlib.md5(value["Body"], usedforsecurity=False).hexdigest() + '"'}
-                                      for key, value in sorted(client.objects.items()) if key.startswith(prefix)]}]
+                size = kwargs.get("MaxKeys", 1000)
+                assert type(size) is int and 1 <= size <= 1000
+                rows = [
+                    {"Key": key, "Size": len(value["Body"]), "ETag": client._etag(value["Body"])}
+                    for key, value in sorted(client.objects.items())
+                    if key.startswith(prefix)
+                ]
+                offset = 0
+                while True:
+                    client.counts["list"] += 1
+                    client.prefixes.append(prefix)
+                    page = rows[offset : offset + size]
+                    truncated = offset + len(page) < len(rows)
+                    response = {
+                        "Contents": page, "IsTruncated": truncated, "KeyCount": len(page),
+                        "MaxKeys": size, "Prefix": prefix,
+                    }
+                    if truncated:
+                        response["NextContinuationToken"] = str(offset + len(page))
+                    yield response
+                    if not truncated:
+                        break
+                    offset += len(page)
+
 
         return Paginator()
 
