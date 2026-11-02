@@ -228,7 +228,7 @@ class StorageGuard:
             {"kind": kind, "key_sha256": digest(object_key.encode()), "counts": self.counts},
         )
 
-    def after(self, http_response, parsed, model, **kwargs):
+    def after(self, http_response, parsed, model, context=None, **kwargs):
         status = http_response.status_code
         operation = model.name
         if parsed.get("ResponseMetadata", {}).get("HTTPStatusCode") != status:
@@ -244,6 +244,8 @@ class StorageGuard:
             self.failed = True
             raise Stop("unknown_write" if operation == "PutObject" else "storage_denied_or_unknown")
         if operation == "ListObjectsV2":
+            from .night_baseline_refresh import _inventory_for_sdk, _list_sdk_text
+
             contents = parsed.get("Contents")
             count = parsed.get("KeyCount")
             truncated = parsed.get("IsTruncated")
@@ -264,19 +266,24 @@ class StorageGuard:
             for row in contents:
                 name = row.get("Key") if isinstance(row, dict) else None
                 size = row.get("Size") if isinstance(row, dict) else None
+                logical_name = (
+                    _list_sdk_text(name, parsed.get("EncodingType"), context)
+                    if isinstance(name, str)
+                    else None
+                )
                 if (
                     not isinstance(name, str)
-                    or not name
-                    or len(name.encode("utf-8")) > 1024
-                    or any(ord(c) < 32 or ord(c) == 127 for c in name)
-                    or not name.startswith(prefix)
-                    or name in seen
+                    or not logical_name
+                    or len(logical_name.encode("utf-8")) > 1024
+                    or any(ord(c) < 32 or ord(c) == 127 for c in logical_name)
+                    or not logical_name.startswith(prefix)
+                    or logical_name in seen
                     or type(size) is not int
                     or not 0 <= size <= 2**63 - 1
                 ):
                     self.failed = True
                     raise Stop("storage_list_entry_unverified")
-                seen.add(name)
+                seen.add(logical_name)
             if truncated:
                 token = parsed.get("NextContinuationToken")
                 if (
@@ -288,7 +295,7 @@ class StorageGuard:
                 ):
                     self.failed = True
                     raise Stop("storage_list_continuation_unverified")
-            raw = self.raw_inventory
+            raw = _inventory_for_sdk(self.raw_inventory, parsed.get("EncodingType"), context)
             if (
                 raw is None
                 or parsed.get("IsTruncated") is not raw["IsTruncated"]
@@ -306,7 +313,7 @@ class StorageGuard:
                     )
                 )
                 or raw["Prefix"] is not None
-                and raw["Prefix"] != prefix
+                and _list_sdk_text(raw["Prefix"], parsed.get("EncodingType"), context) != prefix
                 or raw["ContinuationToken"] is not None
                 and raw["ContinuationToken"] != self.list_query.get("continuation-token", [None])[0]
             ):

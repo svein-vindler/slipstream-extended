@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -54,6 +55,7 @@ class HistorySource:
         self.reads = {}
         self.identity = None
         self.failed = False
+        self.failure = None
         self.seen_identity = set()
 
     def checkpoint(self):
@@ -72,6 +74,55 @@ class HistorySource:
         self._install(session)
         return session
 
+    def _install_auth(self, client):
+        # SDK0.3.20 uses a separate CFFI (or requests) POST, outside its sessions.
+        # Route it through the same physical guard before the SDK can see it.
+        import requests
+
+        original = client._http_post
+        session = requests.Session()
+
+        def physical(request, **kwargs):
+            fields = parse_qs(request.body, strict_parsing=True, max_num_fields=3)
+            return original(
+                request.url,
+                data={key: values[0] for key, values in fields.items()},
+                headers=dict(request.headers),
+                **kwargs,
+            )
+
+        session.send = physical
+        self._install(session)
+
+        def guarded_post(url, **kwargs):
+            if self.failed:
+                raise self.failure
+            data = kwargs.get("data")
+            if (
+                set(kwargs) - {"data", "headers", "timeout"}
+                or not isinstance(data, dict)
+                or set(data) != {"grant_type", "client_id", "refresh_token"}
+                or data.get("grant_type") != "refresh_token"
+                or any(
+                    not isinstance(value, str) or not 1 <= len(value) <= 8192
+                    for value in data.values()
+                )
+            ):
+                self.failed = True
+                self.failure = Stop("request_rejected")
+                raise self.failure
+            try:
+                request = requests.Request(
+                    "POST", url, data=data, headers=kwargs.get("headers")
+                ).prepare()
+            except Exception:
+                self.failed = True
+                self.failure = Stop("request_rejected")
+                raise self.failure from None
+            return session.send(request)
+
+        client._http_post = guarded_post
+
     def _install(self, session):
         original = session.send
         session.trust_env = False
@@ -81,6 +132,7 @@ class HistorySource:
             target = urlsplit(request.url)
             day = self.intent["date"]
             personal = self.chosen.provider == "personal"
+            auth = False
             if (
                 target.scheme != "https"
                 or target.fragment
@@ -129,8 +181,20 @@ class HistorySource:
                 hrv = target.path == "/hrv-service/hrv/" + day
                 is_reload = target.path == "/wellness-service/wellness/epoch/request/" + day
                 fitness = hr or hrv
-                if auth and target.query:
-                    raise Stop("request_rejected")
+                if auth:
+                    if (
+                        target.query
+                        or not isinstance(request.body, str)
+                        or len(request.body) > 32768
+                    ):
+                        raise Stop("request_rejected")
+                    fields = parse_qs(request.body, strict_parsing=True, max_num_fields=3)
+                    if (
+                        set(fields) != {"grant_type", "client_id", "refresh_token"}
+                        or fields["grant_type"] != ["refresh_token"]
+                        or any(len(values) != 1 or not values[0] for values in fields.values())
+                    ):
+                        raise Stop("request_rejected")
                 if not auth:
                     if target.netloc != "connectapi.garmin.com" or not (
                         identity or hr or hrv or is_reload
@@ -166,7 +230,7 @@ class HistorySource:
                 self.folder / f"http-{self.http_count:02d}.json",
                 {
                     "attempt": self.http_count,
-                    "kind": self.current or "identity_auth",
+                    "kind": self.current if fitness or is_reload else "identity_auth",
                     "at_monotonic": self.last,
                 },
             )
@@ -174,9 +238,23 @@ class HistorySource:
             # Session.send has no allow_redirects parameter handling of its own;
             # false prevents its redirect recursion and the next boundary is guarded.
             request.headers["Accept-Encoding"] = "identity"
-            response = original(request, **kwargs)
+            try:
+                response = original(request, **kwargs)
+            except Exception as error:
+                # Fixed event/class only: never persist provider text, URL or auth material.
+                write(
+                    self.folder / f"http-result-{self.http_count:02d}.json",
+                    {
+                        "attempt": self.http_count,
+                        "http_status": None,
+                        "exception_class": type(error).__name__[:64],
+                    },
+                )
+                raise Stop("transport_failed") from None
             try:
                 status = response.status_code
+                if type(status) is not int or not 100 <= status <= 599:
+                    raise Stop("response_unverified")
                 write(
                     self.folder / f"http-result-{self.http_count:02d}.json",
                     {"attempt": self.http_count, "http_status": status},
@@ -210,11 +288,35 @@ class HistorySource:
                 if length is not None and (not length.isdigit() or int(length) > 5 * 1024 * 1024):
                     raise Stop("body_bound")
                 body = bytearray()
-                for part in response.iter_content(8192):
-                    self.body_bytes += len(part)
-                    if self.body_bytes > 5 * 1024 * 1024 or self.clock.monotonic() - self.last > 30:
-                        raise Stop("body_bound")
-                    body.extend(part)
+                import requests
+
+                parts = (
+                    response.iter_content(8192)
+                    if isinstance(response, requests.Response)
+                    else response.iter_content()
+                )
+                try:
+                    for part in parts:
+                        if not isinstance(part, bytes):
+                            raise Stop("response_unverified")
+                        self.body_bytes += len(part)
+                        self.checkpoint()
+                        if (
+                            self.body_bytes > 5 * 1024 * 1024
+                            or self.clock.monotonic() - self.last > 30
+                        ):
+                            raise Stop("body_bound")
+                        body.extend(part)
+                except Exception as error:
+                    write(
+                        self.folder / f"http-error-{self.http_count:02d}.json",
+                        {
+                            "attempt": self.http_count,
+                            "http_status": status,
+                            "exception_class": type(error).__name__[:64],
+                        },
+                    )
+                    raise Stop("transport_failed") from None
                 if length is not None and len(body) != int(length):
                     raise Stop("body_length")
                 if status == 204 and body:
@@ -232,41 +334,80 @@ class HistorySource:
                     name = f"{self.current}-{self.http_count:02d}.wire"
                     write(self.folder / name, bytes(body))
                     self.captured[self.current] = (name, bytes(body), status)
+                if not personal and hr and status == 200:
+                    # A whole-body null/array cannot declare a bound source day.
+                    # Keep the bounded raw wire, but stop before SDK handling/replay.
+                    try:
+                        value = json.loads(body)
+                    except (ValueError, UnicodeError, RecursionError):
+                        raise Stop("source_shape") from None
+                    if not isinstance(value, dict):
+                        raise Stop("source_shape")
                 if not personal and target.path.endswith("socialProfile"):
-                    identity = json.loads(body)
+                    try:
+                        identity = json.loads(body)
+                    except (ValueError, UnicodeError, RecursionError):
+                        raise Stop("account_binding") from None
                     if (
-                        identity.get("displayName") != self.chosen.account
+                        not isinstance(identity, dict)
+                        or identity.get("displayName") != self.chosen.account
                         or type(identity.get("profileId")) is not int
                     ):
                         raise Stop("account_binding")
                     self.identity = identity["profileId"]
                 if not personal and target.path.endswith("user-settings"):
-                    settings = json.loads(body)
+                    try:
+                        settings = json.loads(body)
+                    except (ValueError, UnicodeError, RecursionError):
+                        raise Stop("settings_unverified") from None
                     if not isinstance(settings, dict) or not isinstance(
                         settings.get("userData"), dict
                     ):
                         raise Stop("settings_unverified")
-                response._content = bytes(body)
-                response._content_consumed = True
-                return response
+                if auth:
+                    try:
+                        value = json.loads(body)
+                    except (ValueError, UnicodeError, RecursionError):
+                        raise Stop("response_unverified") from None
+                    if (
+                        not isinstance(value, dict)
+                        or not isinstance(value.get("access_token"), str)
+                        or not value["access_token"]
+                    ):
+                        raise Stop("response_unverified")
+                # Return only the bounded body, including for streamed CFFI responses.
+                bounded_response = requests.Response()
+                bounded_response.status_code = status
+                bounded_response.headers.update(response.headers)
+                bounded_response._content = bytes(body)
+                bounded_response._content_consumed = True
+                return bounded_response
             finally:
-                response.close()
+                primary = sys.exception() is not None
+                try:
+                    response.close()
+                except Exception:
+                    if not primary:
+                        raise Stop("transport_failed") from None
 
         def guarded(request, **kwargs):
             if self.failed:
-                raise Stop("source_already_stopped")
+                raise self.failure
             try:
                 return bounded(request, **kwargs)
             except ReloadAck:
                 raise
-            except BaseException:
+            except BaseException as error:
                 self.failed = True
+                self.failure = error
                 raise
 
         session.send = guarded
         self.sessions.append(session)
 
     def _ensure(self):
+        if self.failed:
+            raise self.failure
         if self.client is not None:
             return
         if self.chosen.provider == "personal":
@@ -282,7 +423,7 @@ class HistorySource:
 
             if version("garminconnect") != "0.3.20":
                 raise Stop("sdk_version")
-            self.client = _history_login(self.chosen, self._install)
+            self.client = _history_login(self.chosen, self._install, self._install_auth)
 
     def read(self, stream):
         if (

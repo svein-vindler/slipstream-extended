@@ -54,11 +54,11 @@ def _login(*, env=None, chosen=None, identity_diagnostic=False):
     return read_only
 
 
-def _history_login(chosen, install):
+def _history_login(chosen, install, install_auth):
     """Internal dated-history connection; never returned through the read facade.
 
     The separate operator port installs its physical date/verb guard on both
-    sessions before this centralized SDK construction performs any login call.
+    sessions and the separate CFFI/auth POST before any SDK login call.
     """
     from garminconnect import Garmin
 
@@ -73,6 +73,7 @@ def _history_login(chosen, install):
     sdk = Garmin()
     install(sdk.client._api_session)
     install(sdk.client.cs)
+    install_auth(sdk.client)
     import json
 
     credential = chosen.credential()
