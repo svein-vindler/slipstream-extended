@@ -236,6 +236,27 @@ def test_first_denial_survives_response_cleanup_failure(monkeypatch):
     assert error.value.evidence()["http_status"] == 403
 
 
+def assert_cli_diagnostic(line, *, category, http_status):
+    assert line.startswith("Pipeline diagnostic: ")
+    diagnostic = json.loads(line.removeprefix("Pipeline diagnostic: "))
+    assert diagnostic == {
+        "category": category,
+        "component": "garmin",
+        "operation": "authenticate",
+        "stage": "cli",
+        "reason": "identity_profile",
+        "physical_http_attempts": 1,
+        "http_status": http_status,
+        "site": diagnostic["site"],
+    }
+    assert type(diagnostic["physical_http_attempts"]) is int
+    assert type(diagnostic["http_status"]) is int
+    assert set(diagnostic["site"]) == {"module", "line"}
+    assert diagnostic["site"]["module"] == "pipeline.sources.provider_diagnostic"
+    assert type(diagnostic["site"]["line"]) is int
+    assert 1 <= diagnostic["site"]["line"] <= 1_000_000
+
+
 def test_public_diagnostic_cli_exposes_only_closed_failure_evidence(monkeypatch, capsys):
     sends = install_wire(monkeypatch, api_status=403)
     for key in list(__import__("os").environ):
@@ -248,7 +269,7 @@ def test_public_diagnostic_cli_exposes_only_closed_failure_evidence(monkeypatch,
         provider_check.main()
     assert error.value.code == 1
     output = capsys.readouterr()
-    evidence, message = output.err.splitlines()
+    evidence, message, diagnostic = output.err.splitlines()
     assert json.loads(evidence) == {
         "kind": "garmin-provider-check",
         "status": "stopped",
@@ -258,8 +279,10 @@ def test_public_diagnostic_cli_exposes_only_closed_failure_evidence(monkeypatch,
         "http_status": 403,
     }
     assert message == "Pipeline failed: garmin_access_rejected."
+    assert_cli_diagnostic(diagnostic, category="garmin_access_rejected", http_status=403)
     assert output.out == "" and len(sends) == 1
-    assert "synthetic" not in output.err and "https://" not in output.err
+    for private in ("synthetic", "https://", "Traceback", "PRIVATE_", "access_token", "refresh_token"):
+        assert private not in output.err
 
 
 def test_actual_native_cli_first_identity401_has_one_send_and_private_output():
@@ -304,7 +327,7 @@ except SystemExit:
         timeout=20,
     )
     assert result.returncode == 1 and result.stdout == ""
-    evidence, message = result.stderr.splitlines()
+    evidence, message, diagnostic = result.stderr.splitlines()
     assert json.loads(evidence) == {
         "kind": "garmin-provider-check",
         "status": "stopped",
@@ -314,4 +337,6 @@ except SystemExit:
         "http_status": 401,
     }
     assert message == "Pipeline failed: garmin_authentication_required."
-    assert "PRIVATE_NATIVE_SENTINEL" not in result.stderr
+    assert_cli_diagnostic(diagnostic, category="garmin_authentication_required", http_status=401)
+    for private in ("PRIVATE_NATIVE_SENTINEL", "synthetic", "https://", "Traceback", "access_token", "refresh_token"):
+        assert private not in result.stderr

@@ -97,4 +97,21 @@ except SystemExit as error:
                             capture_output=True, text=True, timeout=20)
     assert result.returncode == 1
     assert result.stdout == ""
-    assert result.stderr == "Pipeline failed: garmin_authentication_required.\n"
+    message, diagnostic_line = result.stderr.splitlines()
+    assert message == "Pipeline failed: garmin_authentication_required."
+    assert diagnostic_line.startswith("Pipeline diagnostic: ")
+    diagnostic = json.loads(diagnostic_line.removeprefix("Pipeline diagnostic: "))
+    assert diagnostic == {
+        "category": "garmin_authentication_required",
+        "component": "garmin",
+        "operation": "authenticate",
+        "stage": "cli",
+        "site": diagnostic["site"],
+    }
+    assert set(diagnostic["site"]) == {"module", "line"}
+    assert diagnostic["site"]["module"] == "pipeline.sources.garmin"
+    assert type(diagnostic["site"]["line"]) is int
+    assert 1 <= diagnostic["site"]["line"] <= 1_000_000
+    assert not {"http_status", "phase", "reason", "physical_http_attempts"} & diagnostic.keys()
+    for private in ("SYNTHETIC_PRIVATE", "synthetic", "token", "https://", "Traceback", str(Path(__file__).parents[1])):
+        assert private not in result.stderr

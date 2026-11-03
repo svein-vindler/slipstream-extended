@@ -334,14 +334,34 @@ def test_cli_local_protection_failure_stops_before_github(monkeypatch, tmp_path,
     def denied(*args, **kwargs):
         raise PermissionError("synthetic permission failure")
 
+    calls = []
+
     def unexpected(*args, **kwargs):
+        calls.append("github")
         pytest.fail("Local protection failure must stop before GitHub detection/upload")
 
     monkeypatch.setattr(garmin_login, "os", posix_os(fchmod=denied))
     monkeypatch.setattr(garmin_login, "detect_repo", unexpected)
     monkeypatch.setattr(garmin_login.subprocess, "run", unexpected)
-    with pytest.raises(PermissionError, match="synthetic permission failure"):
+    with pytest.raises(SystemExit) as failure:
         garmin_login.main()
 
-    assert not list(tmp_path.iterdir())
-    assert "Wrote local Garmin token" not in capsys.readouterr().err
+    assert type(failure.value.code) is int and failure.value.code == 1
+    assert calls == [] and not list(tmp_path.iterdir())
+    output = capsys.readouterr()
+    assert output.out == "" and "Wrote local Garmin token" not in output.err
+    assert "Pipeline failed: local_access_denied.\n" in output.err
+    diagnostic, = [line.removeprefix("Pipeline diagnostic: ")
+                   for line in output.err.splitlines() if line.startswith("Pipeline diagnostic: ")]
+    import json
+
+    detail = json.loads(diagnostic)
+    assert set(detail) == {"category", "component", "operation", "site", "stage"}
+    assert detail["category"] == "local_access_denied" and detail["component"] == "local"
+    assert detail["operation"] == "execute" and detail["stage"] == "cli"
+    assert set(detail["site"]) == {"module", "line"}
+    assert detail["site"]["module"] == "scripts.garmin_login"
+    assert type(detail["site"]["line"]) is int and 0 < detail["site"]["line"] < 100000
+    for private in [TOKEN, OLD_TOKEN, "synthetic permission failure", "synthetic@example.invalid",
+                    "synthetic-password", str(tmp_path), "Traceback"]:
+        assert private not in output.out + output.err

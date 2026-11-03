@@ -602,3 +602,138 @@ def test_personal_adapter_logs_original_transport_failure_then_stays_latched(
     assert details[0]["site"]["module"] == "pipeline.sources.garmin_personal"
     assert "http_status" not in details[0]
     assert PRIVATE not in output.out + output.err
+
+
+@pytest.mark.parametrize("mode", ["pilot", "local"])
+@pytest.mark.parametrize("reason", ["password_length_invalid", "unknown_private"])
+def test_backup_cli_keeps_only_allowlisted_reason_and_additive_diagnostic(
+    monkeypatch, capsys, mode, reason
+):
+    import json
+    from pathlib import PurePosixPath
+
+    from pipeline import backup_pilot, private_backup
+    from pipeline.backup_source import BackupError
+
+    touches = []
+
+    class MemoryPath(PurePosixPath):
+        def absolute(self):
+            return self
+
+        def is_symlink(self):
+            return False
+
+        def is_junction(self):
+            return False
+
+        def is_dir(self):
+            return True
+
+        def exists(self):
+            return False
+
+    def forbidden_client(*args, **kwargs):
+        touches.append("client")
+        raise AssertionError("No source access after rejected password")
+
+    if mode == "pilot":
+        monkeypatch.setattr(backup_pilot, "Path", MemoryPath)
+        monkeypatch.setattr(backup_pilot, "_client", forbidden_client)
+        replies = iter(["2026", "900001", "READONLY", "a" * 32,
+                        "synthetic-bucket", "synthetic-access-key", PRIVATE, "short"])
+
+        def prompt(_):
+            if reason == "unknown_private":
+                raise BackupError(PRIVATE)
+            return next(replies)
+
+        monkeypatch.setattr(backup_pilot, "_prompt", prompt)
+        result = backup_pilot.main(["--private-root", "/synthetic-private"])
+    else:
+        def password(_):
+            if reason == "unknown_private":
+                raise BackupError(PRIVATE)
+            return "short"
+
+        monkeypatch.setattr(private_backup.getpass, "getpass", password)
+        result = private_backup.main(["verify", "--backup", "synthetic-private"])
+    assert type(result) is int and result == 2 and touches == []
+    output = capsys.readouterr()
+    assert output.out == ""
+    diagnostic, message = output.err.splitlines()
+    assert diagnostic.startswith("Pipeline diagnostic: ")
+    detail = json.loads(diagnostic.removeprefix("Pipeline diagnostic: "))
+    expected_reason = None if reason == "unknown_private" else reason
+    assert detail["category"] == "backup_boundary" and detail["component"] == "backup"
+    assert detail["stage"] == ("backup_pilot" if mode == "pilot" else "private_backup")
+    assert detail["operation"] == "validate" and detail.get("reason") == expected_reason
+    assert set(detail) == {"category", "component", "stage", "operation", "site"} | (
+        {"reason"} if expected_reason else set())
+    assert detail["site"]["module"] == "pipeline." + detail["stage"]
+    assert type(detail["site"]["line"]) is int and detail["site"]["line"] > 0
+    assert message == "backup_error: " + (expected_reason or "backup_boundary")
+    for private in [PRIVATE, "900001", "synthetic-bucket", "synthetic-access-key", "short",
+                    "synthetic-private", "a" * 32]:
+        assert private not in output.out + output.err
+
+
+def test_login_persistence_denial_is_sanitized_and_prevents_github_at_actual_writer(
+    monkeypatch, capsys
+):
+    import json
+    from pathlib import PurePosixPath
+    from types import SimpleNamespace
+
+    from scripts import garmin_login as command
+
+    events = []
+
+    class MemoryPath(PurePosixPath):
+        def mkdir(self, **kwargs):
+            events.append("mkdir")
+
+        def unlink(self, **kwargs):
+            events.append("unlink")
+
+    def temporary(**kwargs):
+        events.append("temporary")
+        return 701, "/synthetic-private/temporary"
+
+    def protection(*args):
+        events.append("protection")
+        raise PermissionError(PRIVATE)
+
+    def forbidden(*args, **kwargs):
+        events.append("forbidden")
+        raise AssertionError("No token write, publish or GitHub after protection failure")
+
+    client = SimpleNamespace(dumps=lambda: PRIVATE)
+    monkeypatch.setattr(command, "Garmin", lambda *args, **kwargs:
+                        SimpleNamespace(login=lambda: None, client=client))
+    monkeypatch.setattr("builtins.input", lambda *_: "synthetic@example.invalid")
+    monkeypatch.setattr(command.getpass, "getpass", lambda *_: PRIVATE)
+    monkeypatch.setattr(command, "Path", MemoryPath)
+    monkeypatch.setattr(command.tempfile, "mkstemp", temporary)
+    monkeypatch.setattr(command, "os", SimpleNamespace(name="posix", fchmod=protection,
+                        fdopen=forbidden, replace=forbidden, close=lambda *_: events.append("close")))
+    monkeypatch.setattr(command, "detect_repo", forbidden)
+    monkeypatch.setattr(command.subprocess, "run", forbidden)
+    monkeypatch.setattr("sys.argv", ["garmin_login", "--local-token-file", "/synthetic-private/token"])
+    with pytest.raises(SystemExit) as failure:
+        command.main()
+    assert type(failure.value.code) is int and failure.value.code == 1
+    assert events == ["mkdir", "temporary", "protection", "close", "unlink"]
+    output = capsys.readouterr()
+    assert output.out == "" and "Pipeline failed: local_access_denied.\n" in output.err
+    diagnostic, = [line.removeprefix("Pipeline diagnostic: ")
+                   for line in output.err.splitlines() if line.startswith("Pipeline diagnostic: ")]
+    detail = json.loads(diagnostic)
+    assert set(detail) == {"category", "component", "operation", "stage", "site"}
+    assert detail["category"] == "local_access_denied" and detail["component"] == "local"
+    assert detail["operation"] == "execute" and detail["stage"] == "cli"
+    assert detail["site"]["module"] == "scripts.garmin_login"
+    assert type(detail["site"]["line"]) is int and 0 < detail["site"]["line"] < 100000
+    for private in [PRIVATE, "synthetic-private", "synthetic@example.invalid", "Traceback",
+                    "Wrote local Garmin token"]:
+        assert private not in output.out + output.err
