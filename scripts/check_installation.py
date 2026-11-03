@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Read-only, resumable installation checks with actionable next steps."""
+
 from __future__ import annotations
 
-import argparse
 import importlib.util
 import json
 import re
@@ -148,8 +148,13 @@ def check(*, online=False, repo=None, worker_url=None, bucket="slipstream-data",
             "ready_for_authenticated_client_test": online and pending is None}
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pipeline.output_privacy import SafeArgumentParser, safe_cli  # noqa: E402 - standalone script import root
+
+
+@safe_cli
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = SafeArgumentParser(description=__doc__)
     parser.add_argument("--online", action="store_true", help="Read cloud metadata and stored objects; never write")
     parser.add_argument("--repo")
     parser.add_argument("--garmin-provider", choices=("legacy", "personal"),

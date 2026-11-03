@@ -227,12 +227,18 @@ def run(
                             result["coach_reused"] = activity_id in plan.get("reused_sources", {})
                     except R2BudgetError:
                         raise
-                    except Exception:
+                    except Exception as _diagnostic_error:
+                        from .failure_diagnostics import log_failure
+
+                        log_failure(_diagnostic_error, stage="manual_activity_refresh")
                         result["coach_status"] = "error"
                         print("On-demand coach input failed: operation_failed")
         except R2BudgetError:
             raise
         except Exception as exc:
+            from .failure_diagnostics import log_failure
+
+            log_failure(exc, stage="manual_activity_refresh")
             if is_job_stopping_error(exc):
                 raise RuntimeError("Garmin service or authentication error") from exc
             result["file_status"] = "error"

@@ -20,6 +20,7 @@ from .activity_backfill_scheduler import run as run_activity_backfill
 from .coach_backfill import run as run_coach_backfill
 from .health_detail_backfill import run as run_health_detail_backfill
 from .hrv_backfill import run as run_hrv_backfill
+from .output_privacy import SafeArgumentParser, safe_cli
 from .r2_store import R2BudgetError, R2Store
 from .sources.garmin import _login
 
@@ -370,8 +371,11 @@ def _parse_phases(value: str) -> tuple[str, ...]:
     return phases
 
 
+
+
+@safe_cli
 def main() -> None:
-    parser = argparse.ArgumentParser(
+    parser = SafeArgumentParser(
         description="Safely accelerate the existing R2 backfills on this computer."
     )
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
@@ -428,7 +432,10 @@ def main() -> None:
         print("\n[local-bootstrap] stopped safely; rerun to resume.")
         return
     except (R2BudgetError, RuntimeError, ValueError) as exc:
-        parser.exit(1, f"Local bootstrap stopped safely: {exc}\n")
+        from .failure_diagnostics import log_failure
+
+        log_failure(exc, stage="local_bootstrap", force=True)
+        parser.exit(1, "Local bootstrap stopped safely; inspect diagnostic.\n")
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 

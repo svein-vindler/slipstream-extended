@@ -284,6 +284,9 @@ def run_stream(
     refreshed_existing = 0
 
     def record_failure(day: str, exc: Exception) -> None:
+        from .failure_diagnostics import log_failure
+
+        log_failure(exc, stage="health_detail_backfill")
         attempts = int(failures.get(day, {}).get("attempts", 0)) + 1
         failure = {
             "attempts": attempts,

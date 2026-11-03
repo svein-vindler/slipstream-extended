@@ -42,6 +42,7 @@ from .backup_source import (
 from .coach import validate_profile
 from .coach_stored_context import HRV_METRICS, SLEEP_METRICS
 from .garmin_sdk import STORED_SDK_VERSIONS
+from .output_privacy import safe_cli
 
 MAGIC = b"SLIPSTREAM-BACKUP-1\n"
 FORMAT = "slipstream-user-backup"
@@ -2292,6 +2293,9 @@ class _Parser(argparse.ArgumentParser):
         self.exit(2, "backup_error: invalid_arguments\n")
 
 
+
+
+@safe_cli
 def main(argv=None) -> int:
     parser = _Parser(description="Private, bounded local backup; interactive password only.")
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
@@ -2331,12 +2335,24 @@ def main(argv=None) -> int:
         print(json.dumps(result, sort_keys=True))
         return 0
     except BackupError as exc:
-        print(f"backup_error: {exc}", file=sys.stderr)
-    except (OSError, EOFError, getpass.GetPassWarning):
+        from .failure_diagnostics import log_failure
+
+        log_failure(exc, stage="private_backup", force=True)
+        print("backup_error: backup_boundary", file=sys.stderr)
+    except (OSError, EOFError, getpass.GetPassWarning) as _diagnostic_error:
+        from .failure_diagnostics import log_failure
+
+        log_failure(_diagnostic_error, stage="private_backup", force=True)
         print("backup_error: local_io_or_private_prompt_failed", file=sys.stderr)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as _diagnostic_error:
+        from .failure_diagnostics import log_failure
+
+        log_failure(_diagnostic_error, stage="private_backup", force=True)
         print("backup_error: interrupted", file=sys.stderr)
-    except Exception:
+    except Exception as _diagnostic_error:
+        from .failure_diagnostics import log_failure
+
+        log_failure(_diagnostic_error, stage="private_backup", force=True)
         print("backup_error: operation_failed", file=sys.stderr)
     return 2
 

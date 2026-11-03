@@ -5,7 +5,6 @@ This module never contacts a provider, scans R2 or uploads its output.
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import math
@@ -13,6 +12,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from .output_privacy import SafeArgumentParser, safe_cli
 
 METHOD = "night-baseline-v1"
 MAX_INPUT_BYTES = 16 * 1024 * 1024
@@ -422,8 +423,11 @@ def baseline(nights: list[dict], args: dict, *, input_bytes: int, input_points: 
     return {"storage_key": storage_key(args), "product": product}
 
 
+
+
+@safe_cli
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = SafeArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
     command = subcommands.add_parser("baseline")
     command.add_argument("--input", action="append", required=True)

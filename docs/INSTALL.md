@@ -493,3 +493,11 @@ External one-off archive publishers created before this version are not changed
 by installation. New local publishers must use the documented source helper;
 older direct writes need explicit, bounded enqueueing from exact stored-source
 proofs. Installation never scans or seeds the whole history automatically.
+
+### Interpreting failed jobs
+
+No extra logging setup is needed. Application failures keep their nonzero status
+and add a fixed privacy-safe diagnostic with category and code site. Consult
+[failure diagnostics](FAILURE_DIAGNOSTICS.md) before the next explicit action.
+These messages do not authorize retries, renew credentials or start Garmin/R2
+work, and cannot reconstruct an older generic failure.

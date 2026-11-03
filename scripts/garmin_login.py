@@ -5,11 +5,10 @@ Handles two-factor: if Garmin prompts, paste the code it sends. On success it
 sets the GARMINTOKENS secret on your GitHub repo (so the scheduled Action can
 fetch your data). The token auto-refreshes (~1 year), so this is the only login.
 
-If you just hit HTTP 429 (rate limited), wait ~30 min OR switch your machine to
-your phone's hotspot (a fresh IP) before retrying.
+A rejected or unknown login remains failed. Check the fixed diagnostic before
+starting any separately authorized later attempt.
 """
 
-import argparse
 import getpass
 import os
 import subprocess
@@ -59,8 +58,13 @@ def _write_local_token(path: Path, blob: str) -> None:
     print(f"✓ Wrote local Garmin token to {path} (gitignored).", file=sys.stderr)
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pipeline.output_privacy import SafeArgumentParser, safe_cli  # noqa: E402 - standalone script import root
+
+
+@safe_cli
 def main():
-    parser = argparse.ArgumentParser(
+    parser = SafeArgumentParser(
         description="Mint a Garmin session token for GitHub and/or local bootstrap."
     )
     parser.add_argument(
@@ -85,12 +89,9 @@ def main():
 
     try:
         g.login()
-    except GarminConnectTooManyRequestsError:
-        sys.exit("\n✗ Garmin rate-limited this IP (429).\n"
-                 "  Fastest fix: connect to your phone's hotspot (a fresh IP) and rerun.\n"
-                 "  Otherwise wait ~30 min and DON'T retry in between.")
-    except GarminConnectAuthenticationError as e:
-        sys.exit(f"\n✗ Garmin auth failed: {e}")
+    except (GarminConnectTooManyRequestsError, GarminConnectAuthenticationError):
+        # The shared boundary classifies the actual SDK type, never its text.
+        raise
 
     blob = g.client.dumps()  # full session as a JSON string
     print(f"\n✓ Logged in. Session token = {len(blob)} chars.", file=sys.stderr)
@@ -107,7 +108,10 @@ def main():
             print(f"✓ Set GARMINTOKENS secret on {repo}. Garmin is done.", file=sys.stderr)
             return
         except Exception as exc:  # noqa: BLE001
-            print(f"(couldn't auto-set the secret: {exc})", file=sys.stderr)
+            from pipeline.failure_diagnostics import log_failure
+
+            log_failure(exc, stage="garmin_login", operation="checkpoint", force=True)
+            print("GitHub secret update was not confirmed.", file=sys.stderr)
 
     if args.local_token_file:
         print(

@@ -223,3 +223,11 @@ GET400/LIST100/PUT100/2MiB and one store inventory. Known capacity defers target
 before intent; unknown writes retain the owner and remote intent. A later explicit
 publication may contact R2 for pending references after all curves are published;
 no Garmin request or provider credential is used by that phase.
+
+Shared failure diagnostics expose only controlled categories/reasons, component,
+stage, operation and a bounded source-module/line site. They do not serialize
+exception text, arbitrary class names, traceback paths, arguments, headers, bodies
+or account/activity/object identifiers. Observed HTTP status is validated; unknown
+remains unknown. Private reports/data responses and platform/import-time logs are
+not scrubbed. Existing native/retry/HOLD policies are unchanged. See
+[diagnostic coverage](docs/FAILURE_DIAGNOSTICS.md).

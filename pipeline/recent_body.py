@@ -1,4 +1,5 @@
 """Recheck recent measured dates without scanning or mutating backfill plans."""
+
 from __future__ import annotations
 
 import csv
@@ -18,11 +19,18 @@ MAX_DAYS = 14
 STREAM = "body_composition"
 
 
-def run(*, max_days: int = 3, health_csv: bytes | None = None, store=None, garmin=None,
-        today: date | None = None) -> dict:
+def run(
+    *,
+    max_days: int = 3,
+    health_csv: bytes | None = None,
+    store=None,
+    garmin=None,
+    today: date | None = None,
+) -> dict:
     if not isinstance(max_days, int) or isinstance(max_days, bool) or not 1 <= max_days <= MAX_DAYS:
         raise ValueError("Choose 1-14 recent measurement dates")
     from .sources.provider_capabilities import unsupported_result
+
     unsupported = unsupported_result(garmin, "body_composition_detail")
     if unsupported is not None:
         return {**unsupported, "kind": "recent-body-sync", "days_checked": 0,
@@ -49,6 +57,9 @@ def run(*, max_days: int = 3, health_csv: bytes | None = None, store=None, garmi
         try:
             raw = garmin.get_daily_weigh_ins(day)
         except Exception as exc:
+            from .failure_diagnostics import log_failure
+
+            log_failure(exc, stage="recent_body")
             if is_job_stopping_error(exc):
                 raise RuntimeError("Garmin service or authentication error") from exc
             failures += 1

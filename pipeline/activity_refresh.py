@@ -182,6 +182,7 @@ def run(
         raise ValueError("force requires an explicit activity_id")
 
     from .sources.provider_capabilities import unsupported_result
+
     unsupported = unsupported_result(garmin, "activity_detail")
     if unsupported is not None:
         log_report("activity_refresh", unsupported)
@@ -223,6 +224,9 @@ def run(
         except R2BudgetError:
             raise
         except Exception as exc:
+            from .failure_diagnostics import log_failure
+
+            log_failure(exc, stage="activity_refresh")
             if is_job_stopping_error(exc):
                 raise RuntimeError(
                     "Garmin service or authentication error; stopping activity "

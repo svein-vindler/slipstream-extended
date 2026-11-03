@@ -156,7 +156,10 @@ for (const name of ["list_activities", "health_status"]) {
     const result = await call(name, {});
     expect(result.message.result.isError).toBe(true);
     expect(result.body + JSON.stringify(logs)).not.toContain("SYNTHETIC_PRIVATE");
-    expect(logs).toHaveLength(1); expect(r2Calls).toEqual(["head"]);
+    expect(logs).toHaveLength(2); expect(r2Calls).toEqual(["head"]);
+    expect(JSON.parse(logs[1][0] as string)).toMatchObject({
+      component: "mcp", operation: name, site: "mcp_tool_callback",
+    });
   });
 }
 it("sanitizes a profile-index failure while retaining the saved profile result", async () => {

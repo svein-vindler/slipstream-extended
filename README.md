@@ -396,3 +396,10 @@ The optional history publisher uses the same conditional dirty-source/reference
 queue as ordinary ingestion. Its offline status separates delivered canonical
 curves from pending references. Repeating explicit R2-only publication can drain
 closed references without fetching Garmin again, within the same budgets.
+
+### Failure diagnostics
+
+Application CLI/job failures include fixed categories, component/stage/operation
+and a bounded code-only site. Observed HTTP status appears only when retained by
+a typed boundary. Existing exit/partial/HOLD and retry policies stay unchanged.
+See [failure diagnostics](docs/FAILURE_DIAGNOSTICS.md) for fields and coverage.

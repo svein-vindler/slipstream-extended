@@ -5,7 +5,6 @@ No provider, R2, upload, health inference, or backfill operation is performed.
 
 from __future__ import annotations
 
-import argparse
 import csv
 import hashlib
 import io
@@ -17,6 +16,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from .output_privacy import SafeArgumentParser, safe_cli
 
 METHOD = "night-training-v1"
 MAX_BYTES = 16 * 1024 * 1024
@@ -817,8 +818,11 @@ def build(
     return {"storage_key": key, "product": product}
 
 
+
+
+@safe_cli
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = SafeArgumentParser(description=__doc__)
     command = parser.add_subparsers(dest="command", required=True).add_parser("build")
     command.add_argument("--input", action="append", required=True)
     command.add_argument("--activities")

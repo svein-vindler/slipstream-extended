@@ -1,5 +1,5 @@
 import { AccessConfigurationError, verifyAccessRequest } from "./access";
-import { errorCategory } from "./output-privacy";
+import { failureDiagnostic } from "./output-privacy";
 
 import { secureResponse } from "./security";
 
@@ -36,12 +36,12 @@ export async function authenticateMcpRequest(
       return { rateLimitKey: `oauth:${identity.subject}`, hostname };
     } catch (error) {
       if (error instanceof AccessConfigurationError) {
-        console.error(JSON.stringify({ message: "OAuth configuration unavailable" }));
+        console.error(JSON.stringify({ message: "OAuth configuration unavailable", ...failureDiagnostic(error, "mcp_auth") }));
         return secureResponse(new Response("OAuth is not configured", { status: 503 }));
       }
       console.warn(JSON.stringify({
         message: "Cloudflare Access authentication failed",
-        error: errorCategory(error),
+        ...failureDiagnostic(error, "mcp_auth"),
       }));
       return secureResponse(new Response("Unauthorized", { status: 401 }));
     }

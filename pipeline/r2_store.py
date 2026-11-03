@@ -27,6 +27,10 @@ def missing_object(error: ClientError) -> bool:
 class R2BudgetError(RuntimeError):
     """Raised before a write would exceed a configured free-tier safety limit."""
 
+    def __init__(self, *args, reason=None):
+        self.reason = reason
+        super().__init__(*args)
+
 
 class R2ReadBoundaryError(ValueError):
     """A bounded object could not be consumed safely; contains no key/body."""
@@ -247,21 +251,27 @@ class R2Store:
 
         if self._writes + 1 > self.max_writes_per_run:
             raise R2BudgetError(
-                f"R2 write limit reached ({self.max_writes_per_run} per run)"
+                f"R2 write limit reached ({self.max_writes_per_run} per run)",
+                reason="write_attempt_limit",
             )
         if self._write_bytes + len(data) > self.max_write_bytes_per_run:
             raise R2BudgetError(
-                "R2 per-run byte limit would be exceeded "
-                f"({self.max_write_bytes_per_run} bytes)"
+                f"R2 per-run byte limit would be exceeded ({self.max_write_bytes_per_run} bytes)",
+                reason="write_byte_limit",
             )
-        if self._initial_inventory["objects"] + self._bucket_budget.writes + 1 > self.max_bucket_objects:
+        if (
+            self._initial_inventory["objects"] + self._bucket_budget.writes + 1
+            > self.max_bucket_objects
+        ):
             raise R2BudgetError(
-                f"R2 object safety limit would be exceeded ({self.max_bucket_objects})"
+                f"R2 object safety limit would be exceeded ({self.max_bucket_objects})",
+                reason="bucket_object_limit",
             )
         projected_bytes = self._initial_inventory["bytes"] + self._bucket_budget.write_bytes + len(data)
         if projected_bytes > self.max_bucket_bytes:
             raise R2BudgetError(
-                f"R2 storage safety limit would be exceeded ({self.max_bucket_bytes} bytes)"
+                f"R2 storage safety limit would be exceeded ({self.max_bucket_bytes} bytes)",
+                reason="bucket_byte_limit",
             )
 
     def get(self, key: str) -> bytes:

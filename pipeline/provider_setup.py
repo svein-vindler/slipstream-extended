@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .output_privacy import SafeArgumentParser, safe_cli
 from .sources.provider_capabilities import capabilities
 from .sources.provider_config import selection
 
@@ -108,11 +109,13 @@ def configure(provider, path, env, *, session=None, new_install=False):
             lock.unlink(missing_ok=True)
 
 
+
+
+@safe_cli
 def main(argv=None):
     import os
     from pathlib import Path
 
-    from .output_privacy import SafeArgumentParser
 
     parser = SafeArgumentParser(
         description="Choose a Garmin connection or verify a later same-account switch."
@@ -139,7 +142,10 @@ def main(argv=None):
         parser.error("Choose --provider legacy or personal, or use --capabilities.")
     try:
         configure(args.provider, args.config, os.environ, new_install=args.new_install)
-    except Exception:
+    except Exception as error:
+        from .failure_diagnostics import log_failure
+
+        log_failure(error, stage="provider_setup", force=True)
         raise SystemExit(
             "Garmin connection setup failed. Check the private connection settings before starting another job."
         ) from None

@@ -1,4 +1,5 @@
 """Explicit projections for hosted logs; private reports and raised errors stay intact."""
+
 import argparse
 import functools
 import json
@@ -41,12 +42,14 @@ _STAGES = frozenset({
 })
 _STREAMS = ("sleep", "hrv", "body-composition", "body_composition", "activities", "health")
 
+
 def _number(value, key):
     if value is None:
         return True
     if type(value) is int:
         return 0 <= value <= 2**53 - 1
     return key.endswith("_ms") and type(value) is float and 0 <= value <= 2**53 - 1 and math.isfinite(value)
+
 
 def _counts(report):
     if not isinstance(report, dict):
@@ -72,6 +75,7 @@ def _counts(report):
         if isinstance(report.get(key), list):
             result[key] = len(report[key])
     return result
+
 
 def log_report(event, report):
     """One event per existing report print; unknown input is dropped, never stringified."""
@@ -108,17 +112,40 @@ def log_report(event, report):
             result["reason"] = report["reason"]
     print(json.dumps(result))
 
+
 class SafeArgumentParser(argparse.ArgumentParser):
     def error(self, message):
+        # An operational failure caught by command code is not an argparse error.
+        active = sys.exception()
+        if isinstance(active, (ValueError, KeyError)) and not isinstance(
+            active, argparse.ArgumentError
+        ):
+            from .failure_diagnostics import log_failure
+
+            log_failure(active, force=True)
         # argparse errors can include raw argv, paths or provider validation text.
         super().error("Invalid arguments; check the command's --help and configured inputs.")
 
+
 class _ProviderLogProjection(logging.Filter):
     """Pinned SDK loggers can log provider errors before returning/raising."""
+
     def filter(self, record):
         category = ("operation_failed" if record.levelno >= logging.ERROR else
                     "provider_warning" if record.levelno >= logging.WARNING else "provider_message")
-        record.msg = json.dumps({"event": "garmin_provider_log", "category": category})
+        detail = {"event": "garmin_provider_log", "category": category}
+        if (
+            isinstance(record.exc_info, tuple)
+            and len(record.exc_info) == 3
+            and isinstance(record.exc_info[1], BaseException)
+        ):
+            from .failure_diagnostics import failure_details
+
+            try:
+                detail.update(failure_details(record.exc_info[1], stage="provider_logger"))
+            except Exception:
+                pass
+        record.msg = json.dumps(detail)
         record.args = ()
         record.exc_info = None
         record.exc_text = None
@@ -146,77 +173,30 @@ def _private_provider_logs():
 
 
 def failure_category(error):
-    """Closed diagnostic labels from typed errors, never exception text or names.
+    from .failure_diagnostics import failure_details
 
-    Categories describe a failed attempt; they never authorize retry, provider
-    fallback, lease release or a claim that data is empty.
-    """
-    from botocore.exceptions import ClientError
-    from garminconnect import (
-        GarminConnectAuthenticationError,
-        GarminConnectConnectionError,
-        GarminConnectTooManyRequestsError,
-    )
-
-    from .sources.garmin_personal import PersonalSourceError
-    from .sources.garmin_policy import GarminReadOnlyViolation
-    from .sources.provider_diagnostic import CATEGORIES, ProviderDiagnosticError
-
-    for _ in range(4):
-        if isinstance(error, ProviderDiagnosticError):
-            return error.category if isinstance(error.category, str) and error.category in CATEGORIES else "operation_failed"
-        if isinstance(error, GarminReadOnlyViolation):
-            return "garmin_policy_rejected"
-        if isinstance(error, GarminConnectAuthenticationError):
-            return "garmin_authentication_required"
-        if isinstance(error, GarminConnectTooManyRequestsError):
-            return "garmin_rate_limited"
-        if isinstance(error, GarminConnectConnectionError):
-            return "garmin_connection_failed"
-        if isinstance(error, PersonalSourceError):
-            if not isinstance(error.status, str):
-                return "operation_failed"
-            return {
-                "auth_required": "garmin_authentication_required",
-                "account_mismatch": "garmin_account_mismatch",
-                "rate_limited": "garmin_rate_limited",
-                "schema_unverified": "garmin_response_unverified",
-                "payload_limit": "garmin_response_limit",
-            }.get(error.status, "operation_failed")
-        if isinstance(error, ClientError):
-            response = error.response if isinstance(error.response, dict) else {}
-            detail = response.get("Error")
-            code = detail.get("Code") if isinstance(detail, dict) else None
-            if isinstance(code, str):
-                return {
-                    "ExpiredToken": "r2_authentication_required",
-                    "InvalidAccessKeyId": "r2_authentication_required",
-                    "SignatureDoesNotMatch": "r2_authentication_required",
-                    "AccessDenied": "r2_access_denied",
-                    "SlowDown": "r2_rate_limited",
-                    "RequestTimeout": "r2_request_timeout",
-                }.get(code, "operation_failed")
-            return "operation_failed"
-        error = error.__cause__
-        if error is None:
-            break
-    return "operation_failed"
+    return failure_details(error)["category"]
 
 
 def safe_cli(main):
     """Sanitize only the CLI boundary; run() and its private consumers keep original errors."""
+
     @functools.wraps(main)
     def wrapped(*args, **kwargs):
-        with _private_provider_logs():
+        from .failure_diagnostics import diagnostic_scope, log_failure
+
+        with _private_provider_logs(), diagnostic_scope():
             try:
                 return main(*args, **kwargs)
             except SystemExit as exc:
                 if exc.code is None or type(exc.code) is int:
                     raise
                 print("Pipeline failed: operation_failed.", file=sys.stderr)
+                log_failure(exc)
                 raise SystemExit(1) from None
             except KeyboardInterrupt:
                 print("Pipeline stopped: interrupted.", file=sys.stderr)
+                log_failure(KeyboardInterrupt())
                 raise SystemExit(130) from None
             except Exception as exc:
                 try:
@@ -224,5 +204,7 @@ def safe_cli(main):
                 except Exception:
                     category = "operation_failed"
                 print(f"Pipeline failed: {category}.", file=sys.stderr)
+                log_failure(exc)
                 raise SystemExit(1) from None
+
     return wrapped

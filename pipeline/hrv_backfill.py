@@ -198,6 +198,7 @@ def run(
             data = gzip_json(payload)
             key = hrv_key(day)
             from .night_baseline_refresh import publish_source
+
             publish_source(store, key, data, "application/json", encoding="gzip")
             existing_keys.add(key)
             failures.pop(day, None)
@@ -210,6 +211,9 @@ def run(
         except R2BudgetError:
             raise
         except Exception as exc:
+            from .failure_diagnostics import log_failure
+
+            log_failure(exc, stage="hrv_backfill")
             if is_job_stopping_error(exc):
                 raise RuntimeError(
                     "Garmin service or authentication error; stopping this HRV batch "
@@ -252,6 +256,7 @@ def run(
         plan["completed_at"] = datetime.now(timezone.utc).isoformat()
     store.put(PLAN_KEY, json_bytes(plan), "application/json")
     from .night_baseline_refresh import refresh_pending
+
     plan["baseline_refresh"] = refresh_pending(store)
     log_report("hrv_backfill", plan)
     return plan

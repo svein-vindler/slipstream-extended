@@ -27,7 +27,7 @@ import type { DispatchOperation, DispatchClaim, DispatchDescriptor } from "./dis
  * ./r2-storage. This file wires those services to MCP tools.
  */
 import { applicationToolResult } from "./application-errors";
-import { errorCategory, PrivacyMcpServer, safeMcpHttpError } from "./output-privacy";
+import { failureDiagnostic, PrivacyMcpServer, safeMcpHttpError } from "./output-privacy";
 
 import { createMcpHandler } from "agents/mcp/server";
 import { McpServer } from "@modelcontextprotocol/server";
@@ -289,10 +289,10 @@ class FitnessService {
       return { ...empty, message: "The job ended. Requested data completeness and freshness could not be verified from this run's report.",
         sync_status: syncStatus({ kind: pipeline?.mode ?? "unknown", run, pipeline }), latency: latency(run, pipeline),
         pipeline_diagnostics: pipeline };
-    } catch {
+    } catch (error) {
       console.error(JSON.stringify({
         message: "Could not verify bounded refresh report",
-        run_id: run.id,
+        ...failureDiagnostic(error, "refresh_report"),
       }));
     }
     return {
@@ -571,7 +571,7 @@ class FitnessService {
       } catch (error) {
         if (owned && operation) return this.text(await this.ownedGeneralStatus(operation, "shared", true));
         await coordinator.release("refresh-today", lease.token);
-        console.error(JSON.stringify({ message: "Could not request Garmin refresh", error: errorCategory(error) }));
+        console.error(JSON.stringify({ message: "Could not request Garmin refresh", ...failureDiagnostic(error, "refresh_dispatch") }));
         const unverifiedDiscovery = error instanceof GitHubWorkflowRunsEnvelopeError || error instanceof GitHubReadError;
         return { ...this.text({ accepted: false,
           message: unverifiedDiscovery
@@ -680,7 +680,7 @@ class FitnessService {
       } catch (error) {
         console.error(JSON.stringify({
           message: "Could not read Garmin refresh status",
-          error: errorCategory(error),
+          ...failureDiagnostic(error, "refresh_status"),
         }));
         const status = syncStatus({ kind: "unknown", reason: "status_error" });
         if (error instanceof GitHubWorkflowRunsEnvelopeError || error instanceof GitHubReadError) {
@@ -748,7 +748,7 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
     onerror(error) {
       console.error(JSON.stringify({
         message: "MCP transport error",
-        error: errorCategory(error),
+        ...failureDiagnostic(error, "mcp_transport"),
       }));
     },
   });
@@ -760,7 +760,8 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     try {
       return await handleRequest(request, env, ctx);
-    } catch {
+    } catch (error) {
+      console.error(JSON.stringify({ message: "MCP request failed", ...failureDiagnostic(error, "mcp_request") }));
       // Keep failure semantics, with a fixed exception for platform-level logging.
       // No cause/stack/provider text from the original exception crosses this boundary.
       throw new Error("MCP request failed.");

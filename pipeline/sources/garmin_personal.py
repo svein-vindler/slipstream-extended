@@ -9,6 +9,7 @@ from datetime import UTC, date
 
 import requests
 
+from ..failure_diagnostics import log_failure
 from .personal_policy import HOST, TOKEN_PATH, validate_request
 
 MAX_JSON_BYTES = 2 * 1024 * 1024
@@ -204,8 +205,9 @@ class PersonalGarmin:
             return bytes(body)
         except PersonalSourceError:
             raise
-        except Exception:
+        except Exception as exc:
             self._failure = ("source_error", None)
+            log_failure(exc, stage="garmin_personal", operation="authenticate" if token else "get")
             raise PersonalSourceError() from None
         finally:
             if response is not None:

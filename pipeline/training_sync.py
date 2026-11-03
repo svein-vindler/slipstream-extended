@@ -1,4 +1,5 @@
 """Optional single-day collection. Shared login is supplied, never initiated here."""
+
 from __future__ import annotations
 
 import os
@@ -28,6 +29,7 @@ def run(*, store=None, garmin=None, config=None, env=None, now=None):
     if config["status"] != "enabled":
         return result
     from .sources.provider_capabilities import unsupported_result
+
     unsupported = unsupported_result(garmin, "training_readiness")
     if unsupported is not None:
         result.update(unsupported)
@@ -42,9 +44,15 @@ def run(*, store=None, garmin=None, config=None, env=None, now=None):
         previous = decode_day(body, config["date"])
     except ClientError as error:
         if not missing_object(error):
+            from .failure_diagnostics import log_failure
+
+            log_failure(error, stage="training_sync", operation="read")
             result["status"] = "source_error"
             return result
     except R2ReadBoundaryError as error:
+        from .failure_diagnostics import log_failure
+
+        log_failure(error, stage="training_sync", operation="read")
         result["status"] = error.status
         return result
     except (ValueError, RecursionError):
@@ -52,7 +60,10 @@ def run(*, store=None, garmin=None, config=None, env=None, now=None):
         return result
     except R2BudgetError:
         raise
-    except Exception:
+    except Exception as error:
+        from .failure_diagnostics import log_failure
+
+        log_failure(error, stage="training_sync")
         result["status"] = "source_error"
         return result
     finally:
@@ -87,7 +98,10 @@ def run(*, store=None, garmin=None, config=None, env=None, now=None):
         result["day_write_bytes"] = len(body) if changed else 0
     except (R2BudgetError, GarminReadOnlyViolation):
         raise
-    except Exception:
+    except Exception as error:
+        from .failure_diagnostics import log_failure
+
+        log_failure(error, stage="training_sync")
         result["status"] = "publication_unknown"
     finally:
         if put_before is not None:
