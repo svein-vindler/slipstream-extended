@@ -199,8 +199,8 @@ def main(argv=None) -> int:
     except BackupError as exc:
         from .failure_diagnostics import log_failure
 
-        log_failure(exc, stage="backup_pilot", force=True)
-        print("backup_error: backup_boundary", file=sys.stderr)
+        detail = log_failure(exc, stage="backup_pilot", force=True)
+        print("backup_error: " + detail.get("reason", "backup_boundary"), file=sys.stderr)
     except (OSError, EOFError, getpass.GetPassWarning) as _diagnostic_error:
         from .failure_diagnostics import log_failure
 

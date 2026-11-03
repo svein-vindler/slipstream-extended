@@ -156,12 +156,29 @@ def test_cli_invalid_password_fails_before_client_creation(tmp_path, monkeypatch
     )
     monkeypatch.setattr(pilot, "_prompt", lambda _label: next(replies))
 
+    calls = []
+
     def forbidden_client(*_args):
+        calls.append("client")
         pytest.fail("Invalid password must not create a network client")
 
     monkeypatch.setattr(pilot, "_client", forbidden_client)
     assert pilot.main(["--private-root", str(tmp_path)]) == 2
-    assert capsys.readouterr().err.strip() == "backup_error: password_length_invalid"
+    assert calls == []
+    output = capsys.readouterr()
+    diagnostic, message = output.err.splitlines()
+    assert output.out == "" and diagnostic.startswith("Pipeline diagnostic: ")
+    detail = json.loads(diagnostic.removeprefix("Pipeline diagnostic: "))
+    assert set(detail) == {"category", "component", "operation", "reason", "site", "stage"}
+    assert detail["category"] == "backup_boundary" and detail["component"] == "backup"
+    assert detail["reason"] == "password_length_invalid" and detail["stage"] == "backup_pilot"
+    assert detail["operation"] == "validate" and set(detail["site"]) == {"module", "line"}
+    assert detail["site"]["module"] == "pipeline.backup_pilot"
+    assert type(detail["site"]["line"]) is int and 0 < detail["site"]["line"] < 100000
+    assert message == "backup_error: password_length_invalid"
+    for private in [password, "900001", "synthetic-bucket", "synthetic-access-key",
+                    "synthetic-secret-key", "a" * 32, str(tmp_path)]:
+        assert private not in output.out + output.err
     assert not list(tmp_path.iterdir())
 
 
