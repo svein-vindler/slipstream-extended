@@ -1,4 +1,5 @@
 """One bounded refresh orchestration for chat dispatch, schedules and local use."""
+
 from __future__ import annotations
 
 import json
@@ -157,7 +158,10 @@ def _publish_diagnostics(report, *, store, run_id, original_failure):
         else:
             store.put(f"refresh/diagnostics/v1/{run_id}.json", json_bytes(report), "application/json")
             publication["status"] = "stored"
-    except Exception:
+    except Exception as error:
+        from .failure_diagnostics import log_failure
+
+        log_failure(error, stage="refresh-diagnostics-publication", operation="checkpoint")
         publication["status"] = "failed"
         report["diagnostics_persistence_failed"] = True
         if original_failure is None:
@@ -170,8 +174,15 @@ def _publish_diagnostics(report, *, store, run_id, original_failure):
         log_report("refresh-diagnostics-publication", publication)
 
 
-def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
-        login=_login, diagnostics_file: Path | None = None, workflow_context=None) -> dict:
+def run(
+    request: RefreshRequest,
+    *,
+    data_dir="data",
+    store_factory=R2Store,
+    login=_login,
+    diagnostics_file: Path | None = None,
+    workflow_context=None,
+) -> dict:
     request.validate()  # Reject incompatible inputs before login or storage access.
     startup = workflow_receipt(request, workflow_context)
     startup_saved = startup is None
@@ -255,7 +266,10 @@ def run(request: RefreshRequest, *, data_dir="data", store_factory=R2Store,
                 if entry["status"] in {"partial", "pending"}:
                     report["status"] = "partial"
             return result
-        except BaseException:
+        except BaseException as error:
+            from .failure_diagnostics import log_failure
+
+            log_failure(error, stage=name)
             entry["status"] = "failed"
             report["status"] = "failed"
             if expects_source:

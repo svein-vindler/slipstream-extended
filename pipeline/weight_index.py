@@ -1,7 +1,7 @@
 """Optional revision-verified monthly indexes of every real weight measurement."""
+
 from __future__ import annotations
 
-import argparse
 import gzip
 import io
 import json
@@ -12,6 +12,7 @@ from datetime import date, timedelta
 from botocore.exceptions import ClientError
 
 from .granular import json_bytes
+from .output_privacy import SafeArgumentParser, safe_cli
 from .r2_store import R2Store, missing_object
 
 ROOT = "health/body-composition/v1"
@@ -107,8 +108,11 @@ def sync_dates(store, dates):
     return result
 
 
+
+
+@safe_cli
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = SafeArgumentParser(description=__doc__)
     parser.add_argument("--start-date", required=True, type=date.fromisoformat)
     parser.add_argument("--end-date", required=True, type=date.fromisoformat)
     args = parser.parse_args()

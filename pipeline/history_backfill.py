@@ -119,10 +119,16 @@ def main(argv=None):
                         writer.writerow([row["date"], row["stream"], row["status"]])
                 print(output.getvalue(), end="")
         return 0
-    except (DurabilityError, OSError):
+    except (DurabilityError, OSError) as error:
+        from .failure_diagnostics import log_failure
+
+        log_failure(error, stage="history_backfill", force=True)
         print("Local history persistence HOLD.", file=__import__("sys").stderr)
         return 3
-    except BaseException:
+    except BaseException as error:
+        from .failure_diagnostics import log_failure
+
+        log_failure(error, stage="history_backfill", force=True)
         print(
             "Local history HOLD; inspect offline status. No automatic retry.",
             file=__import__("sys").stderr,

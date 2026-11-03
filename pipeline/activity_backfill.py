@@ -19,6 +19,7 @@ from .activity_pagination import (
     range_status,
     reset_scan,
 )
+from .failure_diagnostics import log_failure
 from .granular import activity_type, is_endurance_activity
 from .granular_export import activity_artifact_keys, export_activity
 from .output_privacy import SafeArgumentParser, safe_cli
@@ -209,6 +210,7 @@ def run(
                 # reuses successful files, and the failed pending item survives.
                 raise
             except Exception as exc:
+                log_failure(exc, stage="activity_backfill")
                 if is_job_stopping_error(exc) or isinstance(exc, (OSError, ClientError)):
                     stop, stopping_error = "temporary_error", exc
                     return
@@ -231,8 +233,10 @@ def run(
     except R2BudgetError:
         raise
     except PaginationLimitError as exc:
+        log_failure(exc, stage="activity_backfill", operation="get")
         stop, stopping_error = "checkpoint_limit", exc
     except Exception as exc:
+        log_failure(exc, stage="activity_backfill", operation="get")
         stop, stopping_error = "temporary_error", exc
     if not stopping_error:
         if len(attempted_ids) >= max_activities:

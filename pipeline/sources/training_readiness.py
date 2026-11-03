@@ -3,6 +3,7 @@
 No login, token refresh, retries, SDK error translation or logging occurs here.
 Timeouts are cooperative I/O limits, not a hard wall-time guarantee.
 """
+
 from __future__ import annotations
 
 import json
@@ -83,7 +84,10 @@ def bounded_read(send, headers, *, clock=time.monotonic) -> ReadinessRead:
                 return result
     except GarminReadOnlyViolation:
         raise  # PermissionError is an OSError; policy must never become source_error.
-    except (requests.RequestException, HTTPError, OSError):
+    except (requests.RequestException, HTTPError, OSError) as _diagnostic_error:
+        from ..failure_diagnostics import log_failure
+
+        log_failure(_diagnostic_error, stage="training_readiness", operation="read")
         result.status = "source_error"
         return result
     finally:
@@ -93,7 +97,10 @@ def bounded_read(send, headers, *, clock=time.monotonic) -> ReadinessRead:
                 result.metrics["response_closed"] = True
             except GarminReadOnlyViolation:
                 raise
-            except Exception:
+            except Exception as _diagnostic_error:
+                from ..failure_diagnostics import log_failure
+
+                log_failure(_diagnostic_error, stage="training_readiness", operation="read")
                 result.status = "source_error"
             finally:
                 result.metrics["elapsed_ms"] = (clock() - began) * 1000

@@ -116,6 +116,7 @@ def export_activity(
         "files": [],
     }
     from .sources.provider_capabilities import capabilities_for
+
     if not capabilities_for(garmin)["activity_detail"]:
         record.update(status="unsupported", unsupported_features=["full_activity_import"])
         return record
@@ -149,6 +150,9 @@ def export_activity(
                 try:
                     exercise_sets = garmin.get_activity_exercise_sets(activity_id)
                 except Exception as exc:
+                    from .failure_diagnostics import log_failure
+
+                    log_failure(exc, stage="granular_export")
                     exercise_sets = {"error": str(exc)}
         decoded = decode_fit(fit_data, activity=activity, exercise_sets=exercise_sets)
         record["fit_messages"] = decoded["message_counts"]
@@ -257,6 +261,9 @@ def run(
         except R2BudgetError:
             raise
         except Exception as exc:
+            from .failure_diagnostics import log_failure
+
+            log_failure(exc, stage="granular_export")
             manifest["hrv"].append({"date": day, "error": str(exc)})
 
     if store and hasattr(store, "list_object_revisions"):
@@ -280,6 +287,9 @@ def run(
         try:
             record = export_activity(activity, garmin, store, output)
         except Exception as exc:
+            from .failure_diagnostics import log_failure
+
+            log_failure(exc, stage="granular_export")
             record = {
                 "id": str(activity.get("activityId")),
                 "type": activity_type(activity),

@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .backup_source import MIB, BackupError, Limits, R2ReadOnlySource, Scope, safe_file, safe_path
+from .output_privacy import safe_cli
 from .private_backup import (
     _json_bytes,
     _loads,
@@ -146,6 +147,9 @@ def _client(account: str, access_key: str, secret_key: str):
     )
 
 
+
+
+@safe_cli
 def main(argv=None) -> int:
     parser = _Parser(description="Manual read-only R2 pilot: one activity, 20 calls, 1 MiB.")
     parser.add_argument("--private-root", type=Path, required=True)
@@ -193,12 +197,24 @@ def main(argv=None) -> int:
         print(json.dumps(result, sort_keys=True))
         return 0
     except BackupError as exc:
-        print(f"backup_error: {exc}", file=sys.stderr)
-    except (OSError, EOFError, getpass.GetPassWarning):
+        from .failure_diagnostics import log_failure
+
+        log_failure(exc, stage="backup_pilot", force=True)
+        print("backup_error: backup_boundary", file=sys.stderr)
+    except (OSError, EOFError, getpass.GetPassWarning) as _diagnostic_error:
+        from .failure_diagnostics import log_failure
+
+        log_failure(_diagnostic_error, stage="backup_pilot", force=True)
         print("backup_error: local_io_or_private_prompt_failed", file=sys.stderr)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as _diagnostic_error:
+        from .failure_diagnostics import log_failure
+
+        log_failure(_diagnostic_error, stage="backup_pilot", force=True)
         print("backup_error: interrupted", file=sys.stderr)
-    except Exception:
+    except Exception as _diagnostic_error:
+        from .failure_diagnostics import log_failure
+
+        log_failure(_diagnostic_error, stage="backup_pilot", force=True)
         print("backup_error: operation_failed", file=sys.stderr)
     finally:
         if source is not None and any(source.operations.values()):
@@ -211,7 +227,10 @@ def main(argv=None) -> int:
         if client is not None:
             try:
                 client.close()
-            except Exception:
+            except Exception as _diagnostic_error:
+                from .failure_diagnostics import log_failure
+
+                log_failure(_diagnostic_error, stage="backup_pilot", force=True)
                 print("backup_error: source_close_failed", file=sys.stderr)
         logging.disable(previous_logging)
     return 2

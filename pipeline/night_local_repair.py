@@ -6,7 +6,6 @@ shows the exact existing R2 objects that still lack Garmin local timestamps.
 
 from __future__ import annotations
 
-import argparse
 import gzip
 import json
 import time
@@ -20,6 +19,7 @@ from .health_detail import normalize_sleep_detail
 from .health_detail_backfill import STREAMS
 from .health_history_index import sync_dates
 from .hrv_backfill import hrv_key
+from .output_privacy import SafeArgumentParser, safe_cli
 from .r2_store import R2Store
 from .sources.garmin import _login
 
@@ -204,6 +204,7 @@ def apply(
     if not 0 <= request_pause <= 10:
         raise ValueError("request_pause must be between 0 and 10")
     from .sources.provider_capabilities import capabilities_for
+
     if not capabilities_for(garmin)["local_clock_repair"]:
         raise ValueError("Historical local clock repair is unsupported by this provider.")
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -212,6 +213,7 @@ def apply(
     completed: dict[str, list[str]] = {"sleep": [], "hrv": []}
     skipped: list[dict[str, str]] = []
     from .night_baseline_refresh import publish_source, refresh_pending, source_capacity
+
     max_objects = source_capacity(store, max_objects, checkpoint_puts=6)
     try:
         for stream, day in pending[:max_objects]:
@@ -222,6 +224,9 @@ def apply(
                 if not valid_local_window(payload):
                     raise ValueError("Garmin local sleep window is absent or invalid")
             except Exception as exc:
+                from .failure_diagnostics import log_failure
+
+                log_failure(exc, stage="night_local_repair")
                 if is_job_stopping_error(exc):
                     raise RuntimeError("Garmin service or authentication error; batch stopped") from exc
                 skipped.append({"stream": stream, "date": day, "reason": str(exc)})
@@ -250,10 +255,13 @@ def apply(
     return {"completed": completed, "skipped": skipped, "baseline_refresh": refresh_pending(store)}
 
 
+
+
+@safe_cli
 def main() -> None:
     from .local_bootstrap import load_env_file, prepare_environment
 
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = SafeArgumentParser(description=__doc__)
     parser.add_argument("--dates-file", type=Path, required=True)
     parser.add_argument("--env-file", type=Path, default=Path(".env.local-bootstrap"))
     parser.add_argument("--garmin-token-file", type=Path)

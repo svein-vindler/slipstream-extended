@@ -6,7 +6,7 @@ import { activityCalendarYears, resolveActivityClock } from "./activity-clock";
 import { activityContextSchema, expectedGctSides, gctSideInput } from "./gct-sides";
 import { ApplicationToolError, applicationToolResult } from "./application-errors";
 import { McpServer } from "@modelcontextprotocol/server";
-import { errorCategory, TOOL_FAILURE } from "./output-privacy";
+import { failureDiagnostic, TOOL_FAILURE } from "./output-privacy";
 
 import { z } from "zod";
 import {
@@ -538,7 +538,7 @@ export class ActivityCoachTools {
         } catch (error) {
           console.error(JSON.stringify({
             message: "Coach profile was saved but its read index could not be updated",
-            error: errorCategory(error),
+            ...failureDiagnostic(error, "coach_profile_index"),
           }));
         }
       }
@@ -630,10 +630,10 @@ export class ActivityCoachTools {
       try {
         const completed = await coordinator.finishActivityContextWrite(requested, contextToken);
         if (!completed.released) throw new Error("Context completion was not confirmed.");
-      } catch {
+      } catch (error) {
         // The PUT already succeeded. Do not misreport it as an unsaved append
         // or retry acknowledgement; an unresolved durable claim stays closed.
-        console.error(JSON.stringify({ message: "Saved context completion was not confirmed" }));
+        console.error(JSON.stringify({ message: "Saved context completion was not confirmed", ...failureDiagnostic(error, "coach_context_complete") }));
       }
       let coachInput: Record<string, unknown>;
       try { coachInput = await this.readCoachView(activity, requested, "coach"); }

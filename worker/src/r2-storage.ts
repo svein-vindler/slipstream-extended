@@ -1,5 +1,5 @@
 /** Bounded R2 reads and parsed summary reuse; no MCP, dispatch or write logic. */
-import { errorCategory } from "./output-privacy";
+import { failureDiagnostic } from "./output-privacy";
 
 import { Activity, HealthDay, parseCsv, parseHealthCsv } from "./lib";
 import { PayloadTooLargeError, decodePossiblyGzippedText, readStreamLimited } from "./security";
@@ -34,14 +34,17 @@ export class R2Storage {
   get healthStorage(): SummaryStorage { return this.healthSource; }
 
   async getActivities(): Promise<Activity[]> {
+    let stage: "head" | "read" | "missing" | "schema" = "head";
     try {
       const metadata = await this.bucket.head(ACTIVITY_KEY);
       if (activityCache && metadata?.etag === activityCache.etag) {
         this.activitySource = "r2";
         return activityCache.data;
       }
+      stage = "read";
       const stored = await this.getR2Text([ACTIVITY_KEY], SUMMARY_R2_LIMITS);
-      if (!stored) throw new Error(`R2 object ${ACTIVITY_KEY} was not found.`);
+      if (!stored) { stage = "missing"; throw new Error(`R2 object ${ACTIVITY_KEY} was not found.`); }
+      stage = "schema";
       const data = parseCsv(stored.text);
       if (!data.length && !stored.text.startsWith("Activity ID,")) {
         throw new Error("R2 activity summary has an invalid CSV header.");
@@ -52,21 +55,25 @@ export class R2Storage {
     } catch (error) {
       console.error(JSON.stringify({
         message: "R2 activity summary unavailable",
-        error: errorCategory(error),
+        ...failureDiagnostic(error, "r2_activities"), stage,
+        ...(stage === "missing" ? { error: "r2_missing" } : stage === "schema" ? { error: "r2_schema_invalid" } : {}),
       }));
       throw new Error("Activity data is unavailable in private R2.");
     }
   }
 
   async getHealth(): Promise<HealthDay[]> {
+    let stage: "head" | "read" | "missing" | "schema" = "head";
     try {
       const metadata = await this.bucket.head(HEALTH_KEY);
       if (healthCache && metadata?.etag === healthCache.etag) {
         this.healthSource = "r2";
         return healthCache.data;
       }
+      stage = "read";
       const stored = await this.getR2Text([HEALTH_KEY], SUMMARY_R2_LIMITS);
-      if (!stored) throw new Error(`R2 object ${HEALTH_KEY} was not found.`);
+      if (!stored) { stage = "missing"; throw new Error(`R2 object ${HEALTH_KEY} was not found.`); }
+      stage = "schema";
       const data = parseHealthCsv(stored.text);
       if (!data.length && !stored.text.startsWith("Date,")) {
         throw new Error("R2 health summary has an invalid CSV header.");
@@ -77,7 +84,8 @@ export class R2Storage {
     } catch (error) {
       console.error(JSON.stringify({
         message: "R2 health summary unavailable",
-        error: errorCategory(error),
+        ...failureDiagnostic(error, "r2_health"), stage,
+        ...(stage === "missing" ? { error: "r2_missing" } : stage === "schema" ? { error: "r2_schema_invalid" } : {}),
       }));
       throw new Error("Health data is unavailable in private R2.");
     }

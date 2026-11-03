@@ -8,7 +8,6 @@ enforcement.  Re-running the command is the resume mechanism.
 
 from __future__ import annotations
 
-import argparse
 import json
 import time
 from collections.abc import Callable
@@ -26,6 +25,7 @@ from .local_bootstrap import (
     local_process_lock,
     validate_environment,
 )
+from .output_privacy import SafeArgumentParser, safe_cli
 from .r2_store import DEFAULT_MAX_WRITES_PER_RUN, R2BudgetError, R2Store
 
 DEFAULT_STATUS_FILE = Path(".granular/local-import/status.json")
@@ -168,6 +168,7 @@ def import_file(
         day for day in sorted(records, reverse=True) if spec.key(day) not in existing
     ]
     from .night_baseline_refresh import publish_source, source_capacity
+
     selected = missing[:limit if dry_run else source_capacity(store, limit, checkpoint_puts=0)]
     completed = []
     failed = []
@@ -185,6 +186,9 @@ def import_file(
         except R2BudgetError:
             raise
         except Exception as exc:
+            from .failure_diagnostics import log_failure
+
+            log_failure(exc, stage="local_import")
             failed.append({
                 "date": day,
                 "error": str(exc),
@@ -342,13 +346,19 @@ def run_local_import(
         status_payload("interrupted", exc)
         raise
     except Exception as exc:
+        from .failure_diagnostics import log_failure
+
+        log_failure(exc, stage="local_import")
         status_payload("stopped_error", exc)
         raise
     return status_payload(reason)
 
 
+
+
+@safe_cli
 def main() -> None:
-    parser = argparse.ArgumentParser(
+    parser = SafeArgumentParser(
         description="Import raw Garmin HRV/sleep JSON into canonical private R2 objects."
     )
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
@@ -390,7 +400,10 @@ def main() -> None:
         print("\n[local-import] stopped safely; rerun to resume.")
         return
     except (R2BudgetError, RuntimeError, ValueError) as exc:
-        parser.exit(1, f"Local import stopped safely: {exc}\n")
+        from .failure_diagnostics import log_failure
+
+        log_failure(exc, stage="local_import", force=True)
+        parser.exit(1, "Local import stopped safely; inspect diagnostic.\n")
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 

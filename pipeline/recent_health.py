@@ -19,8 +19,9 @@ from .sources.garmin import _login
 MAX_DAYS = 14
 
 
-def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
-        today: date | None = None) -> dict:
+def run(
+    *, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None, today: date | None = None
+) -> dict:
     selected = tuple(dict.fromkeys(streams))
     if (not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= MAX_DAYS
             or not selected or any(stream not in NIGHT_STREAMS for stream in selected)):
@@ -28,9 +29,11 @@ def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
     store = store or R2Store()
     garmin = garmin or _login()
     from .sources.provider_capabilities import capabilities_for
+
     supported = capabilities_for(garmin)
     end = today or date.today()
     from .night_baseline_refresh import RecordedSourceHold, source_capacity
+
     results = {}
     all_records = {}
     validation_rejections = []
@@ -52,6 +55,9 @@ def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
                 raw = (garmin.get_sleep_data(day) if stream == "sleep"
                        else garmin.get_hrv_data(day))
             except Exception as exc:
+                from .failure_diagnostics import log_failure
+
+                log_failure(exc, stage="recent_health")
                 if is_job_stopping_error(exc):
                     raise RuntimeError("Garmin service or authentication error") from exc
                 failures += 1
@@ -83,6 +89,7 @@ def run(*, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None,
               "night_checkpoints_written": publish_completed_nights(store, all_records),
               "streams": results, "health_validation_rejections": validation_rejections}
     from .night_baseline_refresh import refresh_pending
+
     supported_results = [value for value in results.values() if value.get("status") != "unsupported"]
     if not supported_results:
         report["baseline_refresh"] = {"status": "not_run_unsupported"}

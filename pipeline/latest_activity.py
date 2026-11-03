@@ -259,7 +259,10 @@ def run(
                         report["coach_status"] = _coach_status(store, selected, plan)
                     except R2BudgetError:
                         raise
-                    except Exception:
+                    except Exception as _diagnostic_error:
+                        from .failure_diagnostics import log_failure
+
+                        log_failure(_diagnostic_error, stage="latest_activity")
                         report["coach_status"] = "error"
                         print("Latest activity coach input failed: operation_failed")
                     if report["coach_status"] != "ready":
@@ -272,6 +275,9 @@ def run(
         except R2BudgetError:
             raise
         except Exception as exc:
+            from .failure_diagnostics import log_failure
+
+            log_failure(exc, stage="latest_activity")
             if is_job_stopping_error(exc):
                 raise RuntimeError("Garmin service or authentication error") from exc
             report["status"] = "files_unavailable"

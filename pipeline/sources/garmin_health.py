@@ -62,7 +62,11 @@ def _call(label: str, fn: Callable[[], Any], pause: float, diagnostics: dict | N
                 time.sleep(pause)
             return result
         except Exception as exc:  # garminconnect exposes several exception types
+            from ..failure_diagnostics import log_failure
+
+            log_failure(exc, stage="garmin_health", operation="read")
             from .garmin_personal import PersonalSourceError
+
             if isinstance(exc, (PersonalSourceError, GarminReadOnlyViolation)):
                 raise
             rate_limited = "TooManyRequests" in type(exc).__name__ or "429" in str(exc)
@@ -173,14 +177,21 @@ def _weight_rows(raw: Any):
     return normalized
 
 
-def fetch(start: date, end: date, *, request_pause: float = 0.15,
-          client=None, diagnostics: dict | None = None,
-          signal_sink: Callable[[str, str, Any], None] | None = None,
-          collect_stress: bool = False) -> list[dict[str, object]]:
+def fetch(
+    start: date,
+    end: date,
+    *,
+    request_pause: float = 0.15,
+    client=None,
+    diagnostics: dict | None = None,
+    signal_sink: Callable[[str, str, Any], None] | None = None,
+    collect_stress: bool = False,
+) -> list[dict[str, object]]:
     if start > end:
         raise ValueError("health start date cannot be after end date")
     g = client or _login()
     from .provider_capabilities import capabilities_for
+
     supported = capabilities_for(g)
     rows: dict[str, dict[str, object]] = {}
 
@@ -350,7 +361,10 @@ def fetch(start: date, end: date, *, request_pause: float = 0.15,
                     result = method(day)
                 except GarminReadOnlyViolation:
                     raise
-                except Exception:
+                except Exception as _diagnostic_error:
+                    from ..failure_diagnostics import log_failure
+
+                    log_failure(_diagnostic_error, stage="garmin_health", operation="read")
                     stress["source_errors"] += 1
                     signal_sink(day, "stress", None)
                     continue
