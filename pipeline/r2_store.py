@@ -306,17 +306,36 @@ class R2Store:
                     raise R2ReadBoundaryError("schema_unverified")
                 if max_bytes is not None and length is not None and length > max_bytes:
                     raise R2ReadBoundaryError("oversize")
-                data = body.read() if max_bytes is None else body.read(max_bytes + 1)
+                if max_bytes is None:
+                    data = body.read()
+                else:
+                    parts = bytearray()
+                    while True:
+                        chunk = body.read(min(4096, max_bytes + 1 - len(parts)))
+                        if not isinstance(chunk, bytes):
+                            raise R2ReadBoundaryError("schema_unverified")
+                        self.bounded_read_bytes += len(chunk)
+                        if not chunk:
+                            break
+                        parts.extend(chunk)
+                        if len(parts) > max_bytes:
+                            raise R2ReadBoundaryError("oversize")
+                    data = bytes(parts)
                 if not isinstance(data, bytes):
                     raise R2ReadBoundaryError("schema_unverified")
-                if max_bytes is not None and len(data) > max_bytes:
-                    raise R2ReadBoundaryError("oversize")
                 if length is not None and len(data) != length:
                     raise R2ReadBoundaryError("schema_unverified")
-                return R2ObjectSnapshot(data, _opaque_revision(response.get("ETag")),
-                                        response.get("ContentType"), response.get("ContentEncoding"))
-            finally:
+                snapshot = R2ObjectSnapshot(data, _opaque_revision(response.get("ETag")),
+                                            response.get("ContentType"), response.get("ContentEncoding"))
+            except BaseException:
+                try:
+                    body.close()
+                except BaseException:
+                    pass  # Preserve only this read's failure, not an unrelated caller context.
+                raise
+            else:
                 body.close()
+                return snapshot
 
     def get_bounded(self, key: str, max_bytes: int) -> bytes:
         """One counted GET; identity bytes only, limit before parsing, always close.
@@ -341,6 +360,8 @@ class R2Store:
                 data = bytearray()
                 while True:
                     chunk = body.read(min(4096, max_bytes + 1 - len(data)))
+                    if not isinstance(chunk, bytes):
+                        raise R2ReadBoundaryError("schema_unverified")
                     self.bounded_read_bytes += len(chunk)
                     if not chunk:
                         break
@@ -349,9 +370,16 @@ class R2Store:
                         raise R2ReadBoundaryError("oversize")
                 if length is not None and len(data) != length:
                     raise R2ReadBoundaryError("schema_unverified")
-                return bytes(data)
-            finally:
+                data = bytes(data)
+            except BaseException:
+                try:
+                    body.close()
+                except BaseException:
+                    pass  # Preserve only this read's failure, not an unrelated caller context.
+                raise
+            else:
                 body.close()
+                return data
 
     def matches_object(self, key: str, data: bytes, content_type: str, *, encoding: str | None = None) -> bool:
         """Read-only identity/serving-metadata check used by incremental writers."""

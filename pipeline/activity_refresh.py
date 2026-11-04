@@ -87,6 +87,14 @@ def refresh_activity(
     output: Path,
     force: bool = False,
 ) -> dict[str, Any]:
+    # The single-activity SDK endpoint returns source clocks in summaryDTO;
+    # list responses expose them at the top level. Preserve explicit values.
+    activity = dict(activity)
+    source_summary = activity.get("summaryDTO")
+    if isinstance(source_summary, dict):
+        for field in ("startTimeLocal", "startTimeGMT"):
+            if not activity.get(field) and source_summary.get(field):
+                activity[field] = source_summary[field]
     activity_id = str(activity.get("activityId") or "")
     if not activity_id:
         raise ValueError("Activity has no Garmin activityId")
@@ -197,6 +205,8 @@ def run(
         activity = garmin.get_activity(activity_id)
         if not isinstance(activity, dict):
             raise ValueError(f"Garmin activity was not found: {activity_id}")
+        if str(activity.get("activityId") or "") != str(activity_id):
+            raise ValueError("Garmin activity details do not match the requested ID")
         activities = [activity]
     else:
         end = date.today()

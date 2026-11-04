@@ -30,14 +30,18 @@ class Clock:
 
 
 mode, state, run, day = sys.argv[1:]
+stream_reads = {}
 
 
 def send(adapter, request, **kwargs):
     path = urlsplit(request.url).path
+    stream_reads[path] = stream_reads.get(path, 0) + 1
     response = requests.Response()
     response.status_code = (
         429 if mode == "quota" and day.endswith("28") and "dailyHeartRate" in path else 200
     )
+    if mode == "sibling_denial_close" and "hrv-service" in path:
+        response.status_code = 403
     value = (
         {"displayName": "synthetic", "profileId": 123}
         if path.endswith("socialProfile")
@@ -69,7 +73,19 @@ def send(adapter, request, **kwargs):
         }
     if mode == "empty" and "dailyHeartRate" in path:
         value["heartRateValues"] = []
-    response._content = json.dumps(value).encode()
+    if mode == "reload_sibling":
+        if "dailyHeartRate" in path and stream_reads[path] == 1:
+            value["heartRateValues"] = []
+        if "hrv-service" in path:
+            if stream_reads[path] == 1:
+                value["hrvReadings"] = []
+            else:
+                response.status_code = 403
+        if request.method == "POST":
+            response.status_code = 204
+    response._content = b"" if response.status_code == 204 else json.dumps(value).encode()
+    if mode == "unknown_after_hr" and "hrv-service" in path:
+        response._content = b"{"
     response._content_consumed = True
     response.headers.update(
         {
@@ -82,6 +98,12 @@ def send(adapter, request, **kwargs):
 
 
 requests.adapters.HTTPAdapter.send = send
+if mode in {"sibling_denial_close", "source_cleanup_ambient"}:
+
+    def close_failure(self):
+        raise OSError("synthetic session close")
+
+    requests.Session.close = close_failure
 chosen = ProviderSelection("legacy", "synthetic", '{"di_token":"synthetic"}')
 
 
@@ -99,7 +121,14 @@ if mode == "io3":
 
     os.fsync = fail
 try:
-    native = date_phase(Job(state), run, day, sys.stdin.buffer.read(1025), source_factory=source)
+    handoff = sys.stdin.buffer.read(1025)
+    if mode == "source_cleanup_ambient":
+        try:
+            raise ValueError("unrelated caller exception")
+        except ValueError:
+            native = date_phase(Job(state), run, day, handoff, source_factory=source)
+    else:
+        native = date_phase(Job(state), run, day, handoff, source_factory=source)
 except BaseException as error:
     from pipeline.history_state import DurabilityError
 
