@@ -107,22 +107,28 @@ def test_collect_counts_old_and_manual_actual_journals_across_midnight_before_cr
     assert not job.status()["locked"]
 
 
-def test_daily_cli_completes_bounded_native_collect_publish_and_second_run_is_offline(
+def test_daily_cli_completes_native_collect_and_checks_stored_reference_queue_on_repeat(
     monkeypatch, tmp_path, capsys
 ):
+    monkeypatch.setenv("HEALTH_TIMEZONE", "Europe/Oslo")
     import subprocess
     from pathlib import Path
 
     import boto3
     from history_storage_fixture import ACCOUNT, BUCKET, Server
-    from test_history_backfill_review import storage
 
     from pipeline.history_backfill import main
 
     job = Job.create(tmp_path / "job", "2026-04-29", "2026-04-29", ["hr"], "legacy", "synthetic")
     server = Server()
-    client = storage(server).client
-    monkeypatch.setattr(boto3, "client", lambda *a, **kw: client)
+    native_client = boto3.client
+
+    def client_factory(*args, **kwargs):
+        client = native_client(*args, **kwargs)
+        client._endpoint.http_session.send = server.send
+        return client
+
+    monkeypatch.setattr(boto3, "client", client_factory)
     for name, value in {
         "CLOUDFLARE_ACCOUNT_ID": ACCOUNT,
         "R2_BUCKET": BUCKET,
@@ -134,6 +140,8 @@ def test_daily_cli_completes_bounded_native_collect_publish_and_second_run_is_of
     children = []
 
     def process(args, **kwargs):
+        if not isinstance(args, list) or "--run" not in args:
+            return native_run(args, **kwargs)
         children.append(args)
         return native_run(
             [
@@ -166,7 +174,8 @@ def test_daily_cli_completes_bounded_native_collect_publish_and_second_run_is_of
     before = list(server.calls)
     assert main(argv) == 0
     assert json.loads(capsys.readouterr().out)["counts"] == {"published": 1}
-    assert len(children) == 1 and server.calls == before
+    assert len(children) == 1 and len(server.calls) == len(before) + 1
+    assert server.calls[-1][0] == "GET"
 
 
 def test_unknown_old_reservation_stops_collection_without_expiry_refund(tmp_path):

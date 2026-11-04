@@ -14,7 +14,7 @@ from .output_privacy import SafeArgumentParser
 
 
 def daily(job, args):
-    """A bounded explicit run, preserving the independent source/storage gates."""
+    """A bounded serial source/publication run, including closed references."""
     from .history_collect import collect
     from .history_publish import publish
 
@@ -25,11 +25,29 @@ def daily(job, args):
         or not 1 <= args.max_http <= 240
     ):
         raise Stop("explicit_bounded_run_required")
-    state = job.admission(args.plan_sha, args.resume)
+    initial = job.snapshot()
     dates = list(
-        dict.fromkeys(row["date"] for row in state["rows"] if row["status"] in {"pending", "ready"})
+        dict.fromkeys(row["date"] for row in initial["rows"] if row["status"] in {"pending", "ready"})
     )[: args.max_dates]
-    http = 0
+    source_needed = any(
+        row["status"] == "pending" and row["date"] in dates for row in initial["rows"]
+    )
+    state = job.admission(args.plan_sha, args.resume, source=source_needed)
+    http = phases = 0
+    execution_context = {}
+    reports = []
+    raw_deferred = False
+
+    def publish_phase(target_dates=None):
+        nonlocal phases
+        result = publish(
+            job, args.plan_sha, confirm=True, target_dates=target_dates,
+            execution_context=execution_context, finalize_dates=dates or None,
+        )
+        phases += 1
+        reports.append(result["baseline_refresh"])
+        return result
+
     for offset in range(0, len(dates), 7):
         chunk = dates[offset : offset + 7]
         pending = any(
@@ -37,6 +55,7 @@ def daily(job, args):
         )
         if pending:
             if http >= args.max_http:
+                raw_deferred = True
                 break
             before = len(job.events()[0])
             result = collect(
@@ -56,17 +75,59 @@ def daily(job, args):
                 if frame["event"]["type"] == "date_closed"
             )
             if result["last_run_status"] != "bounded_complete":
-                return {**result, "daily_status": "source_stopped", "daily_HTTP": http}
+                return {
+                    **result, "daily_status": "source_stopped", "daily_HTTP": http,
+                    "daily_publication_phases": phases, "daily_baseline_reports": reports,
+                }
         elif state["last_run_status"] not in {None, "bounded_complete", "published", "user_stop"}:
-            return {**job.status(), "daily_status": "source_stopped", "daily_HTTP": http}
+            return {
+                **job.status(), "daily_status": "source_stopped", "daily_HTTP": http,
+                "daily_publication_phases": phases, "daily_baseline_reports": reports,
+            }
         if any(row["status"] == "ready" and row["date"] in chunk for row in job.snapshot()["rows"]):
-            publish(job, args.plan_sha, confirm=True, target_dates=chunk)
+            publish_phase(chunk)
         if any(
             row["status"] in {"ready", "pending"} and row["date"] in chunk
             for row in job.snapshot()["rows"]
         ):
-            break  # Bounded storage/source capacity never triggers another chunk.
-    return {**job.status(), "daily_status": "bounded_complete", "daily_HTTP": http}
+            raw_deferred = True
+            break
+
+    # A previous report cannot prove today's queue/period closure. This ordinary
+    # R2-only phase needs no Garmin credential and respects a source-only pause.
+    if not dates:
+        publish_phase([])
+    if not raw_deferred:
+        while phases < 5 and reports:
+            reference = reports[-1]
+            if (
+                reference.get("status") != "bounded_pending"
+                or not reference.get("closed_pending")
+                or reference.get("held_periods")
+                or reference.get("blocked")
+            ):
+                break
+            result = publish_phase([])
+            current = result["baseline_refresh"]
+            if not (current.get("periods_completed") or current.get("products_written")):
+                break  # A known capacity/no-progress result is not a retry loop.
+
+    result = job.status()
+    reference = result["baseline_refresh"]
+    references_complete = (
+        reference.get("status") in {"complete", "waiting_until_close"}
+        and reference.get("closed_pending") == 0
+        and not reference.get("held_periods")
+        and not reference.get("blocked")
+    )
+    return {
+        **result,
+        "daily_status": "raw_pending" if raw_deferred else
+        "bounded_complete" if references_complete else "baselines_pending",
+        "daily_HTTP": http,
+        "daily_publication_phases": phases,
+        "daily_baseline_reports": reports,
+    }
 
 
 def main(argv=None):

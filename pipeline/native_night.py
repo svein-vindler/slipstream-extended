@@ -424,8 +424,10 @@ def finish(channel, start, end, hr):
 
 
 class NativeNightReader:
-    def __init__(self, store, *, timezone=None):
+    def __init__(self, store, *, timezone=None, snapshot_cache=None):
         self.store, self.configured = store, zone(timezone)
+        self.snapshot_cache = snapshot_cache if snapshot_cache is not None else {}
+        self.local_snapshot_hits = 0
         self.cache, self.proof, self.lists, self.dependencies = {}, {}, {}, {}
         self.cache_sizes = {}
         self.active_keys, self.active_prefixes = set(), set()
@@ -442,7 +444,11 @@ class NativeNightReader:
                 )
             return self.cache[key]
         try:
-            snapshot = self.store.get_snapshot(key, max_bytes=stored)
+            if key in self.snapshot_cache:
+                snapshot = self.snapshot_cache[key]
+                self.local_snapshot_hits += 1
+            else:
+                snapshot = self.store.get_snapshot(key, max_bytes=stored)
         except ClientError as error:
             if not missing_object(error):
                 raise

@@ -54,8 +54,11 @@ def _inventory_projection(body):
 
 
 class StorageGuard:
-    def __init__(self, store, keys, folder):
+    def __init__(self, store, keys, folder, execution_context=None):
         self.store, self.keys, self.folder = store, keys, folder
+        self.execution_context = execution_context if execution_context is not None else {}
+        self.execution_context.setdefault("counts", {"get": 0, "list": 0, "put": 0})
+        self.execution_context.setdefault("body_bytes", 0)
         self.counts = {"get": 0, "list": 0, "put": 0}
         self.expected = {}
         self.failed = False
@@ -198,6 +201,13 @@ class StorageGuard:
                 raise Stop("storage_list_route")
             if query.get("prefix", [""])[0] not in self.prefixes | {""}:
                 raise Stop("storage_list_prefix")
+        totals = self.execution_context["counts"]
+        if (
+            totals["get"] + (kind == "get") > 2256
+            or totals["list"] + totals["put"] + (kind in {"list", "put"}) > 1000
+        ):
+            self.failed = True
+            raise Stop("storage_execution_budget")
         if self.counts[kind] >= {"get": 400, "list": 100, "put": 100}[kind]:
             self.failed = True
             raise Stop("storage_budget")
@@ -224,10 +234,16 @@ class StorageGuard:
                 body.seek(position)
             else:
                 length = int(headers.get("content-length", "-1"))
-            if length < 0 or self.body_bytes + length > 2097152:
+            if (
+                length < 0
+                or self.body_bytes + length > 2097152
+                or self.execution_context["body_bytes"] + length > 10485760
+            ):
                 raise Stop("storage_bytes")
             self.body_bytes += length
+            self.execution_context["body_bytes"] += length
         self.counts[kind] += 1
+        totals[kind] += 1
         write(
             self.folder / f"wire-{sum(self.counts.values()):04d}.json",
             {"kind": kind, "key_sha256": digest(object_key.encode()), "counts": self.counts},
@@ -356,6 +372,9 @@ class _ReferenceStore:
 
     def __getattr__(self, name):
         return getattr(self.store, name)
+
+    def physical_counts(self):
+        return dict(self.guard.counts)
 
     def _read_key(self, name):
         from .night_baseline_refresh import QUEUE_KEY
@@ -500,7 +519,10 @@ def _snapshot(store, object_key):
     return snapshot
 
 
-def publish(job, plan_sha, *, confirm=False, store=None, target_dates=None):
+def publish(
+    job, plan_sha, *, confirm=False, store=None, target_dates=None, execution_context=None,
+    finalize_dates=None,
+):
     if not confirm:
         raise Stop("explicit_storage_phase_required")
     state = job.admission(plan_sha, source=False)
@@ -572,6 +594,7 @@ def publish(job, plan_sha, *, confirm=False, store=None, target_dates=None):
         store = R2Store(client=client)
     run = uuid.uuid4().hex
     folder = job.folder / "runs" / run
+    (job.folder / "runs").mkdir(exist_ok=True)
     folder.mkdir()
     owner = {"run": run, "plan": plan_sha, "phase": "publish"}
     write(job.folder / "OWNER.lock", owner)
@@ -598,17 +621,21 @@ def publish(job, plan_sha, *, confirm=False, store=None, target_dates=None):
             key("hrv", month + f"-{day:02d}")
             for day in range(1, calendar.monthrange(int(month[:4]), int(month[5:]))[1] + 1)
         )
-    guard = StorageGuard(store, keys, folder)
+    guard = StorageGuard(store, keys, folder, execution_context)
     guard.prefixes = {f"health/hrv/{m[:4]}/{m[5:]}/" for m in months}
     staged, done, changed_months = [], [], set()
+    snapshot_cache = guard.execution_context.setdefault("snapshot_cache", {})
     reference_store = _ReferenceStore(store, guard)
     primary = False
     try:
-        from .night_baseline_refresh import ComponentBudgetDeferred, publish_source, refresh_pending
+        from .night_baseline_refresh import (
+            ComponentBudgetDeferred,
+            affected_periods,
+            publish_source,
+            refresh_pending,
+        )
 
-        # Drain BEFORE source/index reads. A full month needs most of GET400;
-        # it must not inherit a hidden extra allowance after source publication.
-        baseline_report = refresh_pending(reference_store)
+        # Finalize only AFTER this phase's canonical source/index ACKs and readbacks.
         reference_store.draining = False
         index_reads = sum(calendar.monthrange(int(m[:4]), int(m[5:]))[1] + 2 for m in months)
         # Known not-attempted source targets stay ready; a later explicit publish
@@ -633,6 +660,7 @@ def publish(job, plan_sha, *, confirm=False, store=None, target_dates=None):
                     folder / ("before-" + row["stream"] + "-" + row["date"] + ".bin"), before.data
                 )
                 if has_curve(row["stream"], row["date"], previous):
+                    snapshot_cache[object_key] = before
                     done.append((row, object_key, before.revision, digest(before.data)))
                     continue
                 if row["stream"] == "hr":
@@ -732,6 +760,7 @@ def publish(job, plan_sha, *, confirm=False, store=None, target_dates=None):
             after = _snapshot(store, object_key)
             if after is None or after.data != data:
                 raise Stop("canonical_source_readback_changed")
+            snapshot_cache[object_key] = after
             write(folder / f"source-postimage-{len(done):03d}.bin", after.data)
             done.append((row, object_key, after.revision, digest(data)))
             if row["stream"] == "hrv":
@@ -773,11 +802,49 @@ def publish(job, plan_sha, *, confirm=False, store=None, target_dates=None):
             put_verify(
                 f"health/indexes/hrv/v1/{month[:4]}/{month[5:]}.json", gzip_json(index), before
             )
+        reference_store.draining = True
+        reference_store.index_reserve = reference_store.index_bytes = 0
+        period_names = None
+        if finalize_dates is not None and snapshot_cache:
+            period_names = set()
+            for name in snapshot_cache:
+                stream = "signals" if name.startswith("health/signals/") else "hrv"
+                period_names.update(affected_periods(stream, name.rsplit("/", 1)[-1][:-5]))
+            delivered = {(row["stream"], row["date"]) for row, *_ in done}
+            for row in state["rows"]:
+                if (
+                    row["date"] in finalize_dates
+                    and row["status"] in {"ready", "pending"}
+                    and (row["stream"], row["date"]) not in delivered
+                ):
+                    period_names.difference_update(affected_periods(
+                        "signals" if row["stream"] == "hr" else "hrv", row["date"]
+                    ))
+        raw_destinations = [
+            {"date": r["date"], "stream": r["stream"], "key": k, "revision": rev, "sha256": sha}
+            for r, k, rev, sha in done
+        ]
+        # A later baseline denial/unknown must not erase known raw delivery.
+        # This receipt does not release the owner or declare phase completion.
+        write(folder / "RAW-DESTINATIONS-VERIFIED.json", {
+            "status": "raw_verified_baselines_pending",
+            "destinations": raw_destinations,
+            "counts": dict(guard.counts),
+            "body_bytes": guard.body_bytes,
+        })
+        baseline_report = refresh_pending(
+            reference_store, snapshot_cache=snapshot_cache, period_names=period_names
+        )
         evidence = {
             "status": "remote_verified_cleanup_pending",
             "baseline_refresh": {
                 **baseline_report,
-                "status": "bounded_pending" if queued else baseline_report["status"],
+                "publication_counts": dict(guard.counts),
+                "publication_body_bytes": guard.body_bytes,
+                "execution_totals": {
+                    "counts": dict(guard.execution_context["counts"]),
+                    "body_bytes": guard.execution_context["body_bytes"],
+                },
                 "sources_queued": queued,
                 "source_targets_deferred": selected_count - len(done),
             },
@@ -786,10 +853,7 @@ def publish(job, plan_sha, *, confirm=False, store=None, target_dates=None):
             "counts": guard.counts,
             "body_bytes": guard.body_bytes,
             "acknowledged_writes": len(guard.acks),
-            "destinations": [
-                {"date": r["date"], "stream": r["stream"], "key": k, "revision": rev, "sha256": sha}
-                for r, k, rev, sha in done
-            ],
+            "destinations": raw_destinations,
         }
         # Genuine remote acknowledgements/readbacks remain durable even when
         # mandatory outer cleanup subsequently fails. This is not completion.

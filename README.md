@@ -390,7 +390,11 @@ For a new installation or later historical repair, the portable
 provide an offline dated plan, progress and missing-date CSV, bounded local
 collection, persistent quota pause, explicit resume and separate verified R2
 publication. The `daily` command runs one bounded serial collection/publication
-batch, reusing durable date progress and rolling usage from old/manual journals.
+batch and completes eligible closed weekly/monthly references after exact raw
+readback, reusing verified local canonical snapshots. It reports remaining raw
+work, closed references and open periods separately, with at most five total
+publication phases and a shared budget. Durable date progress and rolling usage
+from old/manual journals remain bound.
 Setup does not start this opt-in job. Personal archive reload is
 unsupported; the legacy dated reload requires its own explicit operator choice.
 

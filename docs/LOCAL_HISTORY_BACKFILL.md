@@ -94,7 +94,7 @@ Personal ordinary supported HR/HRV reads keep using the existing adapter.
 ## One ordinary bounded local run
 
 After the offline plan and your normal provider/R2 setup, use one command to
-collect a bounded batch and publish its verified dates:
+collect a bounded batch, publish its verified dates, and finish eligible closed references:
 
 ```bash
 python -m pipeline.history_backfill daily --plan-sha PLAN_SHA256 --confirm-cloud-jobs-paused --confirm-r2-write --archive-reload
@@ -115,6 +115,23 @@ When continuing an installation that used earlier dated controllers, include
 ```bash
 python -m pipeline.history_backfill daily --plan-sha PLAN_SHA256 --confirm-cloud-jobs-paused --confirm-r2-write --archive-reload --ledger PRIVATE_OLD_LEDGER.jsonl --ledger PRIVATE_MANUAL_LEDGER.jsonl
 ```
+
+After each source/publication chunk, the same run drains up to two eligible
+closed ISO weeks (Monday–Sunday) or calendar months. It reuses exact verified
+canonical source snapshots from this run for initial calculation, fetching only
+missing native inputs/context. It waits to finalize a period while another selected
+source date can still change it. Both source/context fences remain fresh R2 reads;
+no current reference is published from an unuploaded or stale source. Remaining
+publication slots can finish closed references without another source request.
+At most five publication phases run in total, including source publication.
+
+`daily_status=bounded_complete` means the selected raw work and closed reference
+queue completed. `raw_pending` or `baselines_pending` returns exit 2, preserving
+known progress and explicit deferred/held/blocked counts. Open periods appear in
+`baseline_refresh.deferred_open`; they wait for local calendar closure and do not
+force a partial reference. Each actual phase report remains in
+`daily_baseline_reports`. A repeated all-published daily run can contact R2 to
+check closure; it does not collect Garmin again.
 
 These private paths become bound to the job. Later commands may omit the flags
 and reuse the bound list; an explicit replacement list must match it. Keep the
@@ -211,12 +228,15 @@ python -m pipeline.history_backfill publish --plan-sha PLAN_SHA256 --confirm-r2-
 python -m pipeline.history_backfill status
 ```
 
-Each publication handles at most seven verified ready dates. It first drains
-at most two already-queued closed reference periods through the merged stored
-reference helper, before new canonical/index reads. Canonical HR/HRV then uses
+Each publication handles at most seven verified ready dates. Canonical HR/HRV uses
 `night_baseline_refresh.publish_source`: dirty intent, conditional source write
 with exact ACK/readback, and ready checkpoint. A changed captured canonical
 preimage holds before source intent; an old unknown intent is never adopted.
+After exact canonical/index ACK/readback, the same phase drains at most two
+closed reference periods through the existing stored-only helper. A private
+`RAW-DESTINATIONS-VERIFIED.json` receipt preserves exact raw delivery even if later
+reference work fails; it never releases a retained owner or declares completion. A full queue
+can defer new raw targets safely and still make bounded reference progress.
 
 Reference control/history/current, sources and indexes share the invocation's
 budgets. No new stage or allowance is created. A full month can consume most of
@@ -225,8 +245,11 @@ GET400; source targets that cannot fit remain `ready`, with
 budget also defers before source intent. Aggregate staged bytes may admit only a
 fitting newest-first prefix, with its affected indexes reserved; the untouched
 suffix remains ready. Lower configured byte caps are respected as well.
-Repeat the explicit `publish` command
-to continue safe work without new Garmin calls. Even when all source targets are
+The existing `publish` command is also the stored-only completion command:
+repeat it only within the existing authorized phase/resource envelope to continue
+safe work without new Garmin calls. It remains R2-only even when the plan still
+has pending Garmin dates or an active Garmin quota pause. Check `status` after
+each bounded call; stop on denial, unknown outcome, HOLD, or no safe progress. Even when all source targets are
 published, `publish` still needs R2 admission to drain queued references.
 
 New sources can leave references `bounded_pending` for the next explicit publish
@@ -255,10 +278,12 @@ with the existing 5 GiB / 100,000 object bucket ceiling (or lower configured lim
 Responses remain bounded (64 KiB error/PUT,512 KiB GET,1 MiB LIST), with 16 MiB
 raw / 32 MiB decoded totals, 1 MiB decoded objects and a 900 second job deadline.
 One R2Store shares its cached inventory throughout each publication phase.
-A default seven-date `daily` run opens at most one such phase. An explicit
-30-date run opens at most five, so its conservative total ceiling is
-GET2000/LIST500/PUT500 and 10 MiB, while every individual phase keeps the original
-limits and freshly inventories the bucket. The source's rolling 30/240 ceiling
+A `daily` run opens at most five phases in total, including reference-only
+completion. All phases share one physical execution counter with at most
+1000 class A operations (LIST+PUT), 2256 class B operations (GET/HEAD), and
+10 MiB attempted write bytes. Every phase keeps the original limits and freshly
+inventories the bucket. Earlier live/controller consumption still belongs to the
+operator's standing budget; starting this command does not reset that journal. The source's rolling 30/240 ceiling
 is shared across all chunks; a new publication phase never resets it.
 Valid S3 URL-encoded LIST keys and prefixes are compared with the SDK's
 once-decoded representation only when the SDK selected that encoding automatically.

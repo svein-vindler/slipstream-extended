@@ -390,7 +390,7 @@ def test_seven_date_publication_keeps_two_month_indexes_and_defers_eighth_date(m
     )
 
 
-def test_full_month_drain_uses_same_400_get_cap_then_retains_safe_source_work(monkeypatch):
+def test_full_month_and_new_source_share_postpublication_400_get_cap(monkeypatch):
     from test_night_baseline_corrections import calendar_store, queued_period
 
     monkeypatch.setenv("HEALTH_TIMEZONE", "UTC")
@@ -409,21 +409,20 @@ def test_full_month_drain_uses_same_400_get_cap_then_retains_safe_source_work(mo
             server.metadata[key]["content-encoding"] = snap.encoding
     job, files = memory_job(monkeypatch, [{"date": "2026-04-29", "stream": "hrv"}])
     result = history_publish.publish(job, job.plan_sha, confirm=True, store=sdk_store(server))
-    assert result["baseline_refresh"]["status"] == "complete"
-    assert result["baseline_refresh"]["products_written"] == 2
-    assert result["counts"] == {"ready": 1} and not result["locked"]
+    assert result["baseline_refresh"]["status"] == "bounded_pending"
+    assert result["counts"] == {"published": 1} and not result["locked"]
     first = next(
         json.loads(body) for name, body in files.items() if name.endswith("REMOTE-VERIFIED.json")
     )
-    assert first["counts"]["get"] == 386 and first["counts"]["list"] == 34
-    assert first["counts"]["put"] == 8
-    assert "health/hrv/2026/04/2026-04-29.json" not in server.objects
+    assert first["counts"]["get"] <= 400 and first["counts"]["list"] <= 100
+    assert first["counts"]["put"] <= 100
+    assert "health/hrv/2026/04/2026-04-29.json" in server.objects
     result = history_publish.publish(job, job.plan_sha, confirm=True, store=sdk_store(server))
     assert result["counts"] == {"published": 1}
     print(
         json.dumps(
             {
-                "integration_ledger": "full_month_before_sources",
+                "integration_ledger": "full_month_after_sources",
                 "physical": first["counts"],
                 "deferred_source_targets": first["baseline_refresh"]["source_targets_deferred"],
             }

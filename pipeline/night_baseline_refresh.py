@@ -496,7 +496,14 @@ class _IO:
 
     def counts(self):
         if self.observer is not None:
-            return dict(self.observer.state["counts"])
+            observed = dict(self.observer.state["counts"])
+            physical_counts = getattr(self.store, "physical_counts", None)
+            if callable(physical_counts):
+                physical = physical_counts()
+                # The enclosing publisher also performs source/index I/O while
+                # this observer is detached. Both counters cover the same sends.
+                return {kind: max(observed[kind], physical[kind]) for kind in self.LIMITS}
+            return observed
         operations = getattr(self.store, "operations", {})
         delta = {
             name: operations.get(name, 0) - self.started.get(name, 0)
@@ -1094,8 +1101,15 @@ def _prior_input_unavailable(old, values, channel):
     return False
 
 
-def refresh_pending(store, *, today=None, timezone=None, max_periods=MAX_PERIODS, reserve_writes=0):
-    """Bounded stored-only drain; call even after an unchanged ordinary ingestion."""
+def refresh_pending(
+    store, *, today=None, timezone=None, max_periods=MAX_PERIODS, reserve_writes=0,
+    snapshot_cache=None, period_names=None,
+):
+    """Bounded stored-only drain with optional verified local calculation inputs.
+
+    Local snapshots never satisfy the physical pre/post publication fences.
+    A period filter limits work; pending/open counts still describe the full queue.
+    """
     require(
         type(max_periods) is int and 1 <= max_periods <= MAX_PERIODS,
         "Choose one or two pending periods",
@@ -1109,6 +1123,7 @@ def refresh_pending(store, *, today=None, timezone=None, max_periods=MAX_PERIODS
     io = _IO(store)
     report = {
         "periods_completed": 0,
+        "local_snapshot_hits": 0,
         "products_written": 0,
         "products_unchanged": 0,
         "blocked": [],
@@ -1140,12 +1155,13 @@ def refresh_pending(store, *, today=None, timezone=None, max_periods=MAX_PERIODS
                 }
             day = _today(timezone)
         require(date.fromisoformat(day).isoformat() == day, "Exact closure day required")
-        reader = NativeNightReader(io, timezone=timezone)
+        reader = NativeNightReader(io, timezone=timezone, snapshot_cache=snapshot_cache)
         nights = {}
         selected = [
             name
             for name, row in sorted(queue["pending"].items())
-            if is_closed((row["start_date"], row["end_date"]), day)
+            if (period_names is None or name in period_names)
+            and is_closed((row["start_date"], row["end_date"]), day)
             and not row.get("blocked")
             and not _held(row)
         ][:max_periods]
@@ -1361,6 +1377,7 @@ def refresh_pending(store, *, today=None, timezone=None, max_periods=MAX_PERIODS
             del queue["pending"][name]
             revision = _save_queue(io, queue, revision)
             report["periods_completed"] += 1
+        report["local_snapshot_hits"] = reader.local_snapshot_hits
         report["pending"] = len(queue["pending"])
         report["deferred_open"] = sum(
             not is_closed((row["start_date"], row["end_date"]), day)

@@ -218,11 +218,14 @@ write; ordinary R2 clients use one total attempt with explicit connect/read I/O
 timeouts. No new schedule, credential or provider write route is introduced.
 
 The opt-in local history publisher uses the same dirty-source hook. Its bounded
-reference drain, canonical intent/source/ready checkpoints and HRV indexes share
+post-publication reference drain, canonical intent/source/ready checkpoints and HRV indexes share
 GET400/LIST100/PUT100/2MiB and one store inventory. Known capacity defers targets
 before intent; unknown writes retain the owner and remote intent. A later explicit
 publication may contact R2 for pending references after all curves are published;
-no Garmin request or provider credential is used by that phase.
+no Garmin request or provider credential is used by that phase. Local canonical
+cache reuse affects only initial reference assembly; both publication fences
+re-read current source/context revisions. Daily publication phases share their
+existing total class A/B and byte limits.
 
 Shared failure diagnostics expose only controlled categories/reasons, component,
 stage, operation and a bounded source-module/line site. They do not serialize
