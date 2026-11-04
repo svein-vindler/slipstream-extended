@@ -261,7 +261,7 @@ def test_public_history_publisher_drains_month_through_its_existing_storage_guar
         confirm=True,
         store=sdk_store(server, max_writes_per_run=100, max_write_bytes_per_run=2097152),
     )
-    assert result["baseline_refresh"]["products_written"] == 2
+    assert result["baseline_refresh"]["products_written"] == 4
     assert result["counts"] == {"published": 1}
 
 

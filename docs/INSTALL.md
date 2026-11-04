@@ -454,7 +454,9 @@ files, `.dev.vars`, generated CSV files or Garmin sessions. Read
 Finish the normal connection and recent-data checks first. Full local history is
 opt-in and does not run during setup. Follow [Local HR/HRV history](LOCAL_HISTORY_BACKFILL.md)
 for offline planning/status/CSV and the ordinary bounded `daily` command, which
-collects and then conditionally publishes verified dates. Separate `collect`,
+collects, conditionally publishes verified dates and then completes eligible
+closed weekly/monthly references from verified stored sources. Raw publication
+and reference completion have separate status; open periods wait for closure. Separate `collect`,
 `resume` and R2-only `publish` commands are also available. Include every earlier
 old/manual source journal on first use so rolling usage survives midnight and
 process restarts. Publication uses the normal dirty-source
