@@ -5,7 +5,6 @@ from __future__ import annotations
 import calendar
 import json
 import re
-import sys
 import time
 import uuid
 from datetime import date
@@ -16,9 +15,8 @@ from .history_canonical import decode, has_curve, key, prepare
 from .history_state import Stop, digest, read, write
 
 
-def _cleanup(*closers):
+def _cleanup(*closers, primary=False):
     """Attempt every close; preserve an active primary or the first close error."""
-    primary = sys.exception()
     first = None
     for close in closers:
         try:
@@ -26,7 +24,7 @@ def _cleanup(*closers):
         except BaseException as error:
             if first is None:
                 first = error
-    if primary is None and first is not None:
+    if not primary and first is not None:
         raise first
 
 
@@ -66,6 +64,7 @@ class StorageGuard:
         self.raw_bytes = 0
         self.decoded_bytes = 0
         self.started = time.monotonic()
+        self.network_seconds = 0.0
         self.prefixes = set()
         self.host = urlsplit(store.client.meta.endpoint_url).netloc
         self.original_send = store.client._endpoint.http_session.send
@@ -75,11 +74,14 @@ class StorageGuard:
 
             from botocore.awsrequest import AWSResponse
 
+            network_started = time.monotonic()
             try:
                 response = self.original_send(request)
             except BaseException:
                 self.failed = True
                 raise Stop("unknown_storage_transport") from None
+            finally:
+                self.network_seconds += time.monotonic() - network_started
             started = time.monotonic()
             body = bytearray()
             query = parse_qs(urlsplit(request.url).query)
@@ -91,6 +93,7 @@ class StorageGuard:
                 if kind == "list"
                 else 524288
             )
+            primary = False
             try:
                 for part in response.raw.stream(8192, decode_content=False):
                     body.extend(part)
@@ -144,10 +147,12 @@ class StorageGuard:
 
                 return AWSResponse(response.url, response.status_code, response.headers, Raw())
             except BaseException:
+                primary = True
                 self.failed = True
                 raise
             finally:
-                _cleanup(response.raw.close)
+                self.network_seconds += time.monotonic() - started
+                _cleanup(response.raw.close, primary=primary)
 
         store.client._endpoint.http_session.send = bounded_send
         store.client.meta.events.register_first("before-send.s3", self.before)
@@ -404,7 +409,8 @@ class _ReferenceStore:
         daily = re.fullmatch(r"health/night-context/v1/[0-9]{4}/[0-9]{2}/[0-9-]{10}/", prefix)
         monthly = (
             re.fullmatch(r"health/night-context/v1/[0-9]{4}/[0-9]{2}/", prefix)
-            and type(kwargs.get("max_keys")) is int and kwargs["max_keys"] == 3101
+            and type(kwargs.get("max_keys")) is int
+            and kwargs["max_keys"] == 3101
         )
         if not (daily or monthly):
             raise Stop("reference_prefix_outside_contract")
@@ -494,11 +500,15 @@ def _snapshot(store, object_key):
     return snapshot
 
 
-def publish(job, plan_sha, *, confirm=False, store=None):
+def publish(job, plan_sha, *, confirm=False, store=None, target_dates=None):
     if not confirm:
         raise Stop("explicit_storage_phase_required")
     state = job.admission(plan_sha, source=False)
-    ready = [r for r in state["rows"] if r["status"] == "ready"]
+    ready = [
+        r
+        for r in state["rows"]
+        if r["status"] == "ready" and (target_dates is None or r["date"] in target_dates)
+    ]
     days = list(dict.fromkeys(r["date"] for r in ready))[:7]
     ready = [r for r in ready if r["date"] in days]
     selected_count = len(ready)
@@ -510,13 +520,24 @@ def publish(job, plan_sha, *, confirm=False, store=None):
         result = json.loads(read(folder / "RESULT.json"))
         receipt_bytes = read(folder / "RECEIPT.json")
         receipt = json.loads(receipt_bytes)
+        complete = result.get("native") == 0 and receipt.get("status") == "complete"
+        target_proof = any(
+            target.get("status") == "ready"
+            and target.get("source_verified") is True
+            and all(
+                row.get(field) == target.get(field)
+                for field in ("date", "stream", "wire", "view", "wire_sha256", "view_sha256")
+            )
+            for target in receipt.get("targets", [])
+        )
+        stopped = result.get("native") == 2 and receipt.get("status") == "stopped" and target_proof
         if (
             type(result["native"]) is not int
-            or result["native"] != 0
-            or row["native"] != 0
-            or receipt["status"] != "complete"
+            or row["native"] != result["native"]
+            or not (complete or stopped)
             or result["receipt_sha256"] != digest(receipt_bytes)
             or row["receipt_sha256"] != digest(receipt_bytes)
+            or receipt["intent_sha256"] != digest(read(folder / "INTENT.json"))
         ):
             raise Stop("native_source_unverified")
         for field in ("wire", "view"):
@@ -581,6 +602,7 @@ def publish(job, plan_sha, *, confirm=False, store=None):
     guard.prefixes = {f"health/hrv/{m[:4]}/{m[5:]}/" for m in months}
     staged, done, changed_months = [], [], set()
     reference_store = _ReferenceStore(store, guard)
+    primary = False
     try:
         from .night_baseline_refresh import ComponentBudgetDeferred, publish_source, refresh_pending
 
@@ -772,8 +794,11 @@ def publish(job, plan_sha, *, confirm=False, store=None):
         # Genuine remote acknowledgements/readbacks remain durable even when
         # mandatory outer cleanup subsequently fails. This is not completion.
         write(folder / "REMOTE-VERIFIED.json", evidence)
+    except BaseException:
+        primary = True
+        raise
     finally:
-        _cleanup(guard.close, *([store.client.close] if owned else []))
+        _cleanup(guard.close, *([store.client.close] if owned else []), primary=primary)
     # Only after each closer succeeded may this run publish its terminal state.
     if json.loads(read(job.folder / "OWNER.lock")) != owner:
         raise Stop("owner_binding_changed")
@@ -791,6 +816,21 @@ def publish(job, plan_sha, *, confirm=False, store=None):
             }
         )
     job.append({"type": "reference_refresh", "report": evidence["baseline_refresh"]})
-    job.append({"type": "end", "run": run, "status": "published"})
+    job.append(
+        {
+            "type": "end",
+            "run": run,
+            "status": "published",
+            "timings": {
+                "source_wait_seconds": None,
+                "network_seconds": None,
+                "local_compute_seconds": max(
+                    0.0, time.monotonic() - guard.started - guard.network_seconds
+                ),
+                "r2_seconds": guard.network_seconds,
+                "control_seconds": None,
+            },
+        }
+    )
     (job.folder / "OWNER.lock").unlink()
     return job.status()

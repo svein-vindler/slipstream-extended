@@ -135,6 +135,7 @@ class Job:
         }
         hold, not_before, active, last_status = None, None, None, None
         baseline_refresh = {"status": "not_run"}
+        last_run_timings = None
         for f in self.events()[0]:
             e = f["event"]
             if e["type"] == "begin":
@@ -146,6 +147,7 @@ class Job:
                     raise Stop("run_binding_changed")
                 active = None
                 last_status = e["status"]
+                last_run_timings = e.get("timings")
             elif e["type"] == "target":
                 key = e["date"] + ":" + e["stream"]
                 if key not in rows:
@@ -164,6 +166,7 @@ class Job:
             "not_before": not_before,
             "active_run": active,
             "last_run_status": last_status,
+            "last_run_timings": last_run_timings,
             "locked": (self.folder / "OWNER.lock").exists(),
         }
 
@@ -209,3 +212,117 @@ class Job:
             "counts": dict(counts),
             **state,
         }
+
+
+def rolling_usage(job, ledger_paths=(), now=None):
+    """Read bound old/manual journals plus this job; unknown reservations never refund."""
+    instant = now or datetime.now(timezone.utc)
+    if instant.tzinfo is None:
+        raise Stop("timezone_required")
+    paths = [str(Path(path).absolute()) for path in ledger_paths]
+    if len(paths) > 32 or len(set(paths)) != len(paths):
+        raise Stop("quota_journals_bound")
+    binding = job.folder / "quota-journals.json"
+    if binding.exists():
+        bound = json.loads(read(binding))
+        if paths and paths != bound["paths"]:
+            raise Stop("quota_journals_changed")
+        paths = bound["paths"]
+    elif paths:
+        write(binding, {"schema": 1, "paths": paths})
+    reservations, provenance = {}, []
+    observed = {}
+    for frame in job.events()[0]:
+        event = frame["event"]
+        if event["type"] == "quota_journal":
+            observed[event["index"]] = event
+    for index, path in enumerate(paths):
+        data = read(path)
+        prior = observed.get(index)
+        if prior and (
+            len(data) < prior["bytes"] or digest(data[: prior["bytes"]]) != prior["sha256"]
+        ):
+            raise Stop("quota_journal_changed")
+        if data and not data.endswith(b"\n"):
+            raise Stop("quota_journal_torn")
+        previous = None
+        events = []
+        for number, line in enumerate(data.splitlines(keepends=True)):
+            frame = json.loads(line)
+            if (
+                type(frame.get("sequence")) is not int
+                or frame["sequence"] != number
+                or frame.get("previous") != previous
+                or not isinstance(frame.get("event"), dict)
+            ):
+                raise Stop("quota_journal_changed")
+            previous = digest(line)
+            events.append(frame["event"])
+        provenance.append({"sha256": digest(data), "bytes": len(data)})
+        _quota_events(events, reservations)
+        if prior is None or len(data) != prior["bytes"]:
+            job.append(
+                {
+                    "type": "quota_journal",
+                    "index": index,
+                    "bytes": len(data),
+                    "sha256": digest(data),
+                }
+            )
+    _quota_events([frame["event"] for frame in job.events()[0]], reservations)
+    cutoff = instant - timedelta(hours=24)
+    http = reloads = unknown = 0
+    for entry in reservations.values():
+        closed = entry.get("closed")
+        at = utc(closed["UTC"] if closed else entry["UTC"])
+        if at > instant:
+            raise Stop("quota_clock_reversed")
+        if closed is None or at >= cutoff:
+            http += closed["physicalHTTP"] if closed else entry["HTTP_reserved"]
+            reloads += closed["reload_intent"] if closed else entry.get("reload_reserved", 1)
+            unknown += closed is None
+    return {
+        "HTTP": http,
+        "reloads": reloads,
+        "unknown_reservations": unknown,
+        "journals": provenance,
+        "window_hours": 24,
+    }
+
+
+def _quota_events(events, reservations):
+    for event in events:
+        kind = event.get("type")
+        if kind not in {"date_reserved", "date_closed"}:
+            continue  # Parent completion is never inferred from dated evidence.
+        identifier = event.get("id")
+        if not isinstance(identifier, str) or not 1 <= len(identifier) <= 200:
+            raise Stop("quota_entry_unverified")
+        utc(event["UTC"])
+        if kind == "date_reserved":
+            if (
+                identifier in reservations
+                or type(event.get("HTTP_reserved")) is not int
+                or not 1 <= event["HTTP_reserved"] <= 8
+                or type(event.get("reload_reserved", 1)) is not int
+                or event.get("reload_reserved", 1) not in (0, 1)
+            ):
+                raise Stop("quota_entry_unverified")
+            reservations[identifier] = dict(event)
+        else:
+            before = reservations.get(identifier)
+            if (
+                before is None
+                or "closed" in before
+                or type(event.get("physicalHTTP")) is not int
+                or not 0 <= event["physicalHTTP"] <= before["HTTP_reserved"]
+                or any(
+                    type(event.get(field)) is not int or event[field] not in (0, 1)
+                    for field in ("reload_ACK", "reload_intent")
+                )
+                or event["reload_ACK"] > event["reload_intent"]
+                or event["reload_intent"] > before.get("reload_reserved", 1)
+                or utc(event["UTC"]) < utc(before["UTC"])
+            ):
+                raise Stop("quota_entry_unverified")
+            before["closed"] = event

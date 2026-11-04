@@ -13,6 +13,62 @@ from .history_state import DurabilityError, Job, Stop, write
 from .output_privacy import SafeArgumentParser
 
 
+def daily(job, args):
+    """A bounded explicit run, preserving the independent source/storage gates."""
+    from .history_collect import collect
+    from .history_publish import publish
+
+    if (
+        not args.confirm_cloud_jobs_paused
+        or not args.confirm_r2_write
+        or not 1 <= args.max_dates <= 30
+        or not 1 <= args.max_http <= 240
+    ):
+        raise Stop("explicit_bounded_run_required")
+    state = job.admission(args.plan_sha, args.resume)
+    dates = list(
+        dict.fromkeys(row["date"] for row in state["rows"] if row["status"] in {"pending", "ready"})
+    )[: args.max_dates]
+    http = 0
+    for offset in range(0, len(dates), 7):
+        chunk = dates[offset : offset + 7]
+        pending = any(
+            row["status"] == "pending" and row["date"] in chunk for row in job.snapshot()["rows"]
+        )
+        if pending:
+            if http >= args.max_http:
+                break
+            before = len(job.events()[0])
+            result = collect(
+                job,
+                args.plan_sha,
+                resume=args.resume,
+                confirm=True,
+                reload=args.archive_reload,
+                max_dates=len(chunk),
+                max_http=min(56, args.max_http - http),
+                ledger_paths=args.ledger,
+                target_dates=chunk,
+            )
+            http += sum(
+                frame["event"]["physicalHTTP"]
+                for frame in job.events()[0][before:]
+                if frame["event"]["type"] == "date_closed"
+            )
+            if result["last_run_status"] != "bounded_complete":
+                return {**result, "daily_status": "source_stopped", "daily_HTTP": http}
+        elif state["last_run_status"] not in {None, "bounded_complete", "published", "user_stop"}:
+            return {**job.status(), "daily_status": "source_stopped", "daily_HTTP": http}
+        if any(row["status"] == "ready" and row["date"] in chunk for row in job.snapshot()["rows"]):
+            publish(job, args.plan_sha, confirm=True, target_dates=chunk)
+        if any(
+            row["status"] in {"ready", "pending"} and row["date"] in chunk
+            for row in job.snapshot()["rows"]
+        ):
+            break  # Bounded storage/source capacity never triggers another chunk.
+    return {**job.status(), "daily_status": "bounded_complete", "daily_HTTP": http}
+
+
 def main(argv=None):
     parser = SafeArgumentParser(description=__doc__)
     parser.add_argument("--state", type=Path, default=Path(".granular/history-backfill"))
@@ -35,13 +91,28 @@ def main(argv=None):
     pause.add_argument("--until", required=True)
     pause.add_argument("--reason", choices=["operator_quota", "no_more_observed"], required=True)
     commands.add_parser("stop", help="Finish the current date then stop this bounded run.")
-    for command in ("collect", "resume"):
-        run = commands.add_parser(command, help="Explicit bounded source phase; zero R2.")
+    for command in ("collect", "resume", "daily"):
+        run = commands.add_parser(
+            command,
+            help="Bounded serial collection and R2 publication."
+            if command == "daily"
+            else "Explicit bounded source phase; zero R2.",
+        )
         run.add_argument("--plan-sha", required=True)
         run.add_argument("--confirm-cloud-jobs-paused", action="store_true")
         run.add_argument("--archive-reload", action="store_true")
         run.add_argument("--max-dates", type=int, default=7)
         run.add_argument("--max-http", type=int, default=56)
+        run.add_argument(
+            "--ledger",
+            action="append",
+            type=Path,
+            default=[],
+            help="Bind an old/manual hash-chained source journal; repeat for each.",
+        )
+        if command == "daily":
+            run.add_argument("--confirm-r2-write", action="store_true")
+            run.add_argument("--resume", action="store_true")
     publish = commands.add_parser(
         "publish", help="Separate verified R2-only phase; zero Garmin calls."
     )
@@ -78,6 +149,11 @@ def main(argv=None):
                 if not flag.exists():
                     write(flag, {"stop": True})
                 print("Stop requested after current date.")
+            elif args.command == "daily":
+                result = daily(job, args)
+                print(json.dumps(result))
+                if result["daily_status"] != "bounded_complete":
+                    return 2
             elif args.command in ("collect", "resume"):
                 from .history_collect import collect
 
@@ -89,6 +165,7 @@ def main(argv=None):
                     reload=args.archive_reload,
                     max_dates=args.max_dates,
                     max_http=args.max_http,
+                    ledger_paths=args.ledger,
                 )
                 print(json.dumps(result))
                 if result["last_run_status"] not in {

@@ -47,7 +47,8 @@ account must match the selected connection. There is no provider fallback.
 python -m pipeline.history_backfill collect --plan-sha PLAN_SHA256 --confirm-cloud-jobs-paused
 ```
 
-Default and maximum per invocation: seven dates, 56 physical HTTP requests,
+For `collect` and `resume`, default and maximum per invocation: seven dates,
+56 physical HTTP requests,
 eight requests and 5 MiB received per date, one physical request at a time,
 at least 1.5 seconds between sends, less than 900 seconds per date and 2400
 seconds per batch. Authentication and identity sends count too. `--max-dates`
@@ -90,6 +91,56 @@ Personal API archive reload is unverified and unsupported; requesting it records
 `unsupported` without credentials or HTTP, and never switches to legacy.
 Personal ordinary supported HR/HRV reads keep using the existing adapter.
 
+## One ordinary bounded local run
+
+After the offline plan and your normal provider/R2 setup, use one command to
+collect a bounded batch and publish its verified dates:
+
+```bash
+python -m pipeline.history_backfill daily --plan-sha PLAN_SHA256 --confirm-cloud-jobs-paused --confirm-r2-write --archive-reload
+```
+
+The default remains seven dates and 56 source HTTP requests, in serial order.
+Omit `--archive-reload` when you intend ordinary reads only. An explicitly ordered
+larger daily batch may use `--max-dates 30 --max-http 240`; it still runs bounded
+source/publication chunks of at most seven dates. It never walks an unbounded
+queue, starts a schedule or increases the source limits. Collection and
+publication remain separate phases: source reads only the selected Garmin
+credential, and publication reads only R2 credentials. Existing `collect`,
+`resume` and `publish` commands remain available.
+
+When continuing an installation that used earlier dated controllers, include
+**every** old and manual source journal on first use, for example:
+
+```bash
+python -m pipeline.history_backfill daily --plan-sha PLAN_SHA256 --confirm-cloud-jobs-paused --confirm-r2-write --archive-reload --ledger PRIVATE_OLD_LEDGER.jsonl --ledger PRIVATE_MANUAL_LEDGER.jsonl
+```
+
+These private paths become bound to the job. Later commands may omit the flags
+and reuse the bound list; an explicit replacement list must match it. Keep the
+original journals. The tool verifies their complete physical-line hash chains
+and counts old, manual and new source usage together over a rolling 24 hours.
+Midnight does not reset the 30 reload/240 HTTP ceiling. Unknown reservations stay
+charged and cannot age into permission. This is an application ceiling, not a
+claim about Garmin's available quota or permission to start source work.
+
+Already ready or published source targets are skipped without another Garmin
+read. A failed date retains the verified targets it completed before the stop,
+its original native failure and cleanup result; it does not become a successful
+date or parent job. A later explicit R2-only publication may use only the exact
+validated per-target receipt and raw proof. An unknown native/write result,
+changed proof or retained owner still requires HOLD. The daily command stops at
+its first failed phase and does not retry or take over a lock.
+
+Offline status includes `last_run_timings`, separating source pacing/archive
+wait, network, local compute, R2 and local control time. Network/R2 measurements
+include bounded response-body reading and validation; R2 also includes its guard's
+decoding work. They are not pure network latency. A phase that did not measure a
+category reports `null`; it does not claim zero work or a completed external
+check. Local control time covers this command's orchestration, not independent
+cloud-job qualification. Known source denials keep their primary category even
+when cleanup also fails; cleanup is recorded separately.
+
 ## Stop, pause and explicitly resume
 
 In another terminal, use the same state folder:
@@ -114,8 +165,9 @@ python -m pipeline.history_backfill pause --reason operator_quota --until 2026-1
 python -m pipeline.history_backfill resume --plan-sha PLAN_SHA256 --confirm-cloud-jobs-paused
 ```
 
-An early resume sends zero HTTP and does not load credentials, including after a
-process restart. There is no hot polling, automatic next-day wake-up or automatic
+Use `daily --resume` with the same explicit confirmations if you intend the
+combined bounded source/publication command after a known pause. An early resume
+sends zero HTTP and does not load credentials, including after a process restart. There is no hot polling, automatic next-day wake-up or automatic
 retry. Two fully empty bounded batches record `no_more_observed`; this is an
 observation pause, not proof of429 or permanent absence. Explicit resume can
 continue safe pending targets after that pause. Previously empty, failed,
@@ -185,7 +237,7 @@ Without it reference work reports `calendar_timezone_required`. Open periods wai
 until closure. Missing native input is not zero-filled into a curve; replacing a
 reference preserves immutable history and freshly checks source/context revisions.
 
-Each source publication It binds the first
+Each source publication binds the first
 configured R2 endpoint/bucket digest for this job and rejects a later target
 change. Existing good curves are preserved. Missing HR objects use create-only
 writes; existing empty/invalid HR objects HOLD rather than being overwritten.
@@ -198,11 +250,16 @@ New writes require a genuine parsed HTTP acknowledgement and revision, then exac
 byte/revision/type/encoding readback. A conflict, denial, missing acknowledgement,
 changed readback or unknown outcome stops without a second attempt. Published
 means verified destination evidence, not merely a local curve or an accepted
-reload. R2 limits remain GET400/LIST100/PUT100 and 2 MiB written per job invocation,
+reload. R2 limits remain GET400/LIST100/PUT100 and 2 MiB written per publication phase,
 with the existing 5 GiB / 100,000 object bucket ceiling (or lower configured limits).
 Responses remain bounded (64 KiB error/PUT,512 KiB GET,1 MiB LIST), with 16 MiB
 raw / 32 MiB decoded totals, 1 MiB decoded objects and a 900 second job deadline.
-One R2Store shares its cached inventory throughout the invocation.
+One R2Store shares its cached inventory throughout each publication phase.
+A default seven-date `daily` run opens at most one such phase. An explicit
+30-date run opens at most five, so its conservative total ceiling is
+GET2000/LIST500/PUT500 and 10 MiB, while every individual phase keeps the original
+limits and freshly inventories the bucket. The source's rolling 30/240 ceiling
+is shared across all chunks; a new publication phase never resets it.
 Valid S3 URL-encoded LIST keys and prefixes are compared with the SDK's
 once-decoded representation only when the SDK selected that encoding automatically.
 Explicitly requested URL encoding keeps the SDK's encoded response representation;

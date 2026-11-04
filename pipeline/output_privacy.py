@@ -33,7 +33,7 @@ _COUNTS = (
 _OPERATIONS = ("get", "head", "put", "list_pages", "listed_objects", "downloaded_bytes", "uploaded_bytes")
 _STATUSES = frozenset({
     "active", "complete", "complete_with_blocked", "partial", "pending", "idle", "failed",
-    "error", "waiting_for_profile", "stored", "skipped", "unchanged", "refreshed", "blocked", "checked", "ready",
+    "error", "waiting_for_profile", "stored", "skipped", "unchanged", "refreshed", "blocked", "checked", "ready", "unsupported",
 })
 _STAGES = frozenset({
     "restore_summaries", "latest_activity", "latest_night", "activity_baseline", "historical_health",
@@ -85,6 +85,20 @@ def log_report(event, report):
              "refresh_summaries": "summary-window-refresh", "health_index_reconcile": "health-index-maintenance"}
     result = {"kind": kinds.get(event, event), **_counts(report)}
     if isinstance(report, dict):
+        if event == "activity_refresh" and isinstance(report.get("by_status"), dict):
+            allowed = {"refreshed", "unchanged", "baseline", "unsupported", "error", "unknown"}
+            result["by_status"] = {
+                name: count for name, count in report["by_status"].items()
+                if isinstance(name, str) and name in allowed
+                and type(count) is int and 0 <= count <= 2**53 - 1
+            }
+        if event == "activity_refresh":
+            provider = report.get("garmin_provider")
+            if isinstance(provider, str) and provider in {"legacy", "personal"}:
+                result["garmin_provider"] = provider
+            features = report.get("unsupported_features")
+            if isinstance(features, list):
+                result["unsupported_features"] = ["activity_detail"] if "activity_detail" in features else []
         baseline = report.get("baseline_refresh")
         if isinstance(baseline, dict):
             status = baseline.get("status")

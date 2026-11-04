@@ -54,6 +54,23 @@ a safe category plus site. Private callers keep original exception values/args.
   typed application guidance are unchanged. Existing fixed-only
   context claim/completion and invalid-history messages remain fixed safe sites.
 
+Activity refresh also emits a bounded `by_status` aggregate in its hosted report.
+An unsupported activity or provider capability is explicit; checked activity
+counts alone do not prove that files or Coach inputs were delivered. The legacy
+single-activity endpoint nests native local/UTC start times in `summaryDTO`;
+refresh uses those source fields when the corresponding top-level time is
+missing, preserving native local dates and existing top-level precedence.
+Explicit activity-ID mismatches stop before importing another activity's files.
+These checks and outcomes can diagnose new failures. They do not establish the
+cause of an older missing activity, and a capped blocked-activity list cannot
+prove that an omitted activity was unblocked.
+
+Bounded R2 snapshots consume fragmented SDK bodies through actual EOF, retain
+object encoding metadata and preserve the primary read rejection when closing
+the body also fails. A cleanup failure after a successful read remains a failure.
+This does not relax per-object encoding, body, resource or conditional-write
+checks.
+
 Normal authorized fitness responses and intentional local product/report output
 remain private data; this is not a scrubber for those payloads. Test/build tools,
 import-time/dependency/interpreter failures and third-party/platform-generated

@@ -389,7 +389,9 @@ For a new installation or later historical repair, the portable
 [`python -m pipeline.history_backfill`](docs/LOCAL_HISTORY_BACKFILL.md) commands
 provide an offline dated plan, progress and missing-date CSV, bounded local
 collection, persistent quota pause, explicit resume and separate verified R2
-publication. Setup does not start this opt-in job. Personal archive reload is
+publication. The `daily` command runs one bounded serial collection/publication
+batch, reusing durable date progress and rolling usage from old/manual journals.
+Setup does not start this opt-in job. Personal archive reload is
 unsupported; the legacy dated reload requires its own explicit operator choice.
 
 The optional history publisher uses the same conditional dirty-source/reference

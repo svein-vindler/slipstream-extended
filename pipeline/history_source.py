@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import time
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -42,6 +41,8 @@ class HistorySource:
             raise Stop("account_binding")
         if intent["archive_reload"] and self.chosen.provider != "legacy":
             raise Stop("unsupported")
+        self.source_wait_seconds = 0.0
+        self.network_seconds = 0.0
         self.http_count = 0
         self.body_bytes = 0
         self.last = None
@@ -52,11 +53,34 @@ class HistorySource:
         self.captured = {}
         self.reload_open = False
         self.reload_used = False
+        self.reload_ack = False
         self.reads = {}
         self.identity = None
         self.failed = False
         self.failure = None
         self.seen_identity = set()
+
+    def _sleep(self, seconds):
+        started = self.clock.monotonic()
+        try:
+            self.clock.sleep(seconds)
+        finally:
+            self.source_wait_seconds += self.clock.monotonic() - started
+
+    def timings(self):
+        return {
+            "source_wait_seconds": self.source_wait_seconds,
+            "network_seconds": self.network_seconds,
+            "local_compute_seconds": max(
+                0.0,
+                self.clock.monotonic()
+                - self.started
+                - self.source_wait_seconds
+                - self.network_seconds,
+            ),
+            "r2_seconds": None,
+            "control_seconds": None,
+        }
 
     def checkpoint(self):
         if (
@@ -220,7 +244,7 @@ class HistorySource:
             if self.http_count >= self.intent["max_http"]:
                 raise Stop("http_budget")
             if self.last is not None:
-                self.clock.sleep(max(0, 1.5 - (self.clock.monotonic() - self.last)))
+                self._sleep(max(0, 1.5 - (self.clock.monotonic() - self.last)))
             self.checkpoint()
             if self.clock.monotonic() - self.started + 30 >= self.intent.get("max_seconds", 899):
                 raise Stop("date_deadline")
@@ -238,6 +262,7 @@ class HistorySource:
             # Session.send has no allow_redirects parameter handling of its own;
             # false prevents its redirect recursion and the next boundary is guarded.
             request.headers["Accept-Encoding"] = "identity"
+            network_started = self.clock.monotonic()
             try:
                 response = original(request, **kwargs)
             except Exception as error:
@@ -251,6 +276,9 @@ class HistorySource:
                     },
                 )
                 raise Stop("transport_failed") from None
+            finally:
+                self.network_seconds += self.clock.monotonic() - network_started
+            primary = False
             try:
                 status = response.status_code
                 if type(status) is not int or not 100 <= status <= 599:
@@ -295,6 +323,7 @@ class HistorySource:
                     if isinstance(response, requests.Response)
                     else response.iter_content()
                 )
+                body_started = self.clock.monotonic()
                 try:
                     for part in parts:
                         if not isinstance(part, bytes):
@@ -317,6 +346,8 @@ class HistorySource:
                         },
                     )
                     raise Stop("transport_failed") from None
+                finally:
+                    self.network_seconds += self.clock.monotonic() - body_started
                 if length is not None and len(body) != int(length):
                     raise Stop("body_length")
                 if status == 204 and body:
@@ -382,8 +413,10 @@ class HistorySource:
                 bounded_response._content = bytes(body)
                 bounded_response._content_consumed = True
                 return bounded_response
+            except BaseException:
+                primary = True
+                raise
             finally:
-                primary = sys.exception() is not None
                 try:
                     response.close()
                 except Exception:
@@ -474,7 +507,7 @@ class HistorySource:
         try:
             self.client.request_reload(self.intent["date"])
         except ReloadAck:
-            pass
+            self.reload_ack = True
         else:
             raise Stop("reload_ack_unknown")
         finally:
@@ -485,8 +518,15 @@ class HistorySource:
     def wait_archive(self):
         while self.clock.monotonic() - self.reload_at < 120:
             self.checkpoint()
-            self.clock.sleep(min(1, 120 - (self.clock.monotonic() - self.reload_at)))
+            self._sleep(min(1, 120 - (self.clock.monotonic() - self.reload_at)))
 
     def close(self):
+        first = None
         for session in self.sessions:
-            session.close()
+            try:
+                session.close()
+            except BaseException as error:
+                if first is None:
+                    first = error
+        if first is not None:
+            raise first

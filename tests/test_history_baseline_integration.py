@@ -119,7 +119,22 @@ def memory_job(monkeypatch, targets):
         wire = encoded(raw)
         write(folder / "wire.json", wire)
         write(folder / "view.json", wire)
-        receipt_sha = write(folder / "RECEIPT.json", {"status": "complete"})
+        intent_sha = write(
+            folder / "INTENT.json",
+            {
+                "run": digest((day + stream).encode())[:32],
+                "plan": job.plan_sha,
+                "date": day,
+                "streams": [stream],
+                "max_http": 8,
+                "max_seconds": 899,
+                "archive_reload": False,
+                "nonce": digest(b"synthetic-nonce"),
+            },
+        )
+        receipt_sha = write(
+            folder / "RECEIPT.json", {"status": "complete", "intent_sha256": intent_sha}
+        )
         write(folder / "RESULT.json", {"native": 0, "receipt_sha256": receipt_sha})
         job.append(
             {
