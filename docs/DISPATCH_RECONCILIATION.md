@@ -50,7 +50,7 @@ it does not establish a particular complete, fresh activity/night package.
   claims allow at most two run GETs; after the original two-hour expiry only an
   explicit status request can spend a remaining ticket, with at most one run GET.
   No automatic polling window starts after expiry. A new explicit sync request
-  has the separate, single-use overlap lane described below.
+  has the separate bounded overlap lane described below.
 - After all three tickets are spent, a later expressly requested
   `refresh_status(request_id=..., terminal_inspection=true)` can admit at most
   one additional inspection for that same modern targeted operation. Omitted
@@ -67,9 +67,9 @@ it does not establish a particular complete, fresh activity/night package.
   reconcile at most one old blocker before ordinary admission, including an old
   active job for the same scope. This is not a background poll or an automatic
   `terminal_inspection`. The old job must be modern, targeted, still active,
-  past its original two-hour expiry and have used one, two or three ordinary
+  and have used one, two or three ordinary
   polls (an integer count). A client may have stopped checking before its third
-  ticket; this does not remove the same single-use overlap opportunity. Zero,
+  ticket; this does not prevent a bounded overlap observation. Zero,
   negative, fractional or over-budget counts remain ineligible. Its exact
   startup receipt, already verified active run/source/descriptor and owner must
   all still match. The persisted job scope/owner must match the original request.
@@ -85,17 +85,28 @@ it does not establish a particular complete, fresh activity/night package.
   minus its original300s (normal) or60s (repair) equal to job expiry minus2hours.
   Missing/replaced/mismatched lease evidence stays held; no skew tolerance, lease
   reconstruction, migration, data rewrite or age-only release is permitted.
-  `overlap_reconcile_used: true` and an `overlap_reconcile` read claim are saved
-  together under the coordinator's transaction/revision CAS before I/O. The lane
+  There is no two-hour minimum for this explicit-request observation. The
+  original admission instant must still be proven, and future admission times
+  remain ineligible. `overlap_reconcile_used: true` remains a readable historical
+  marker; it no longer permanently consumes this lane. An `overlap_reconcile`
+  read claim and its allowance are saved under the coordinator's transaction/
+  revision CAS before I/O. The lane
   reserves the operation and actor/operation/run25second gates, allows one
   bounded startup-receipt GET and one exact GitHub run GET, and permits no report,
   diagnostics, run-list or dispatch calls. Each control object remains bounded
   at64KiB. `polls`, `terminal_inspection_used` and the old daily debit stay intact.
-  An active run, missing/failed/mismatched read or interruption spends the one
-  opportunity and keeps the guard; age alone never releases an active or unknown
-  job. The existing ordinary poll count is not changed or refunded, and remaining
-  ordinary tickets retain their normal status-request rules. Changing date, actor or alias cannot refill
-  it. An old timestamp only admits this check and never proves job termination.
+  A separate shared allowance admits at most 12 such observations per UTC day
+  across operations, actors and aliases. It uses the existing durable budget
+  mechanism; the 12-job dispatch allowance is unchanged and separately charged.
+  An active run, missing/failed/mismatched read or interruption consumes its
+  admitted observation and keeps the guard. No failed read is automatically
+  retried. A later separate explicit sync request can check the same still
+  verified job again after the 25-second gates, within the daily allowance; a
+  prior active observation is not a permanent dead end. Exhaustion returns
+  controlled guidance until the next UTC day. Changing date, actor or alias
+  cannot bypass the operation gate or shared daily limit. The ordinary poll
+  count is not changed or refunded, and remaining ordinary tickets retain their
+  normal status-request rules. Age alone never proves job termination.
 - Only in that already-verified overlap lane, matching authoritative GitHub
   terminal metadata settles job ownership even if the final data report is
   missing, or the run failed/cancelled. Startup, repository, workflow, event,
@@ -106,6 +117,14 @@ it does not establish a particular complete, fresh activity/night package.
   `beginFresh` atomically checks active jobs and blockers again; any new dispatch
   still needs its ordinary cooldown and daily allowance. A second blocker is
   returned without another reconciliation read in the same request.
+  If that exact job remains active, the same-scope request returns the observed
+  held state without starting a second status window or waiting for another
+  read. Retry guidance describes a later explicit sync request; unknown or
+  conflicted evidence still requires inspection. No client automatically sets
+  `terminal_inspection` to obtain this behavior.
+  Only a same-scope held response returns the old `request_id`; another target
+  retains the blocker correlation in `dispatch_status.operation_id` without
+  attaching that job to the newly requested activity/date.
 - Each claim can reserve one fixed request receipt and one fixed report and
   diagnostics object, each under the existing 64 KiB control-object limit.
   Metadata reads do not create an additional run-GET allowance.

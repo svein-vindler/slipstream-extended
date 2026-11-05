@@ -10,7 +10,7 @@ type Json = Record<string, unknown>;
 type Read = (keys: string[]) => Promise<Json | null>;
 export type DispatchObservation = { operation: DispatchOperation; run: RefreshRun | null;
   report: Json; pipeline: PipelineDiagnostics | null; fresh: boolean; awaiting_receipt: boolean;
-  retryAfterMs?: number };
+  retryAfterMs?: number; admissionReason?: "cooldown" | "daily_limit" };
 
 /** One admitted claim owns every control read; callbacks never issue I/O. */
 export class DispatchReader {
@@ -25,6 +25,7 @@ export class DispatchReader {
     const claimed = await coordinator.claimDispatchRead(identity, intent, actorKey, this.now());
     const result: DispatchObservation = { operation: claimed.operation ?? operation, run: null,
       report: {}, pipeline: null, fresh: false, awaiting_receipt: false,
+      ...(!claimed.acquired && claimed.reason ? { admissionReason: claimed.reason } : {}),
       ...(!claimed.acquired && claimed.retryAfterMs ? { retryAfterMs: claimed.retryAfterMs } : {}) };
     if (!claimed.acquired || !claimed.claim || !claimed.operation) return result;
     let current = claimed.operation;

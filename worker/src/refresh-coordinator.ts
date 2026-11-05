@@ -80,7 +80,9 @@ export class RefreshCoordinator extends DurableObject<Env> {
   }
   claimDispatchRead(identity: DispatchIdentity, intent: DispatchClaim["intent"], actorKey: string, nowMs: number) {
     return this.ctx.storage.transactionSync(() => this.dispatch.claim(identity, intent, actorKey, nowMs,
-      (key, now, ttl) => this.reserve(key, now, ttl).acquired));
+      (key, now, ttl) => this.reserve(key, now, ttl).acquired,
+      (operationId, now) => this.reserveBudgeted("targeted-reconcile:" + operationId,
+        "targeted-reconcile", now, 25_000, 12)));
   }
   recordDispatchReceipt(identity: DispatchIdentity, claim: DispatchClaim, expectedRevision: number, receipt: unknown, nowMs: number) {
     return this.ctx.storage.transactionSync(() => this.dispatch.receipt(identity, claim, expectedRevision, receipt, nowMs,

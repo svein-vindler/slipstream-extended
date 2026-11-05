@@ -1,4 +1,4 @@
-import { DispatchReader } from "./dispatch-reader";
+import { DispatchReader, type DispatchObservation } from "./dispatch-reader";
 import { dispatchStatus, dispatchStatusSchema } from "./dispatch-status";
 import type { DispatchClaim, DispatchDescriptor, DispatchOperation } from "./dispatch-operations";
 import { readCurrentCoachInput } from "./coach-selection";
@@ -467,18 +467,34 @@ export class FreshDataService {
       latency: latency(run, pipeline, request.requestedAt, status.data_state === "ready", this.now()) };
   }
 
-  private overlap(snapshot: Snapshot, operation: DispatchOperation): Json {
+  private overlap(snapshot: Snapshot, operation: DispatchOperation, observation?: DispatchObservation): Json {
     const status = syncStatus({ kind: snapshot.scope.startsWith("night/") ? "night" : "activity", snapshot });
     status.job_state = "unknown"; status.job_start_confirmed = null;
     status.polling_state = "stopped"; status.next_action = "none";
-    return this.response(snapshot, "An existing operation may overlap this request. Keep its correlation for maintainer inspection; no new job was started.",
-      { accepted: false, terminal: false, data_ready: false, should_continue_polling: false, reason: "dispatch_overlap",
-        sync_status: status, dispatch_status: dispatchStatus(operation) });
+    const laterRequest = operation.dispatch_state === "verified_active" && !operation.evidence_conflict
+      && (observation?.fresh === true || observation?.admissionReason !== undefined);
+    if (observation?.fresh && observation.run) {
+      status.job_state = observation.run.status === "queued" ? "queued" : "running";
+      status.job_start_confirmed = true;
+    }
+    const message = observation?.admissionReason === "daily_limit"
+      ? "The daily limit for checking an overlapping job has been reached. Keep the existing request and retry after the stated delay; no new job was started."
+      : observation?.admissionReason === "cooldown"
+        ? "The overlapping job was checked recently. Keep the existing request and retry after the stated delay; no new job was started."
+        : observation?.fresh && operation.dispatch_state === "verified_active"
+          ? "The existing job is still queued or running. A later explicit sync request can check it again; no new job was started."
+          : "The overlapping operation could not be verified. Its duplicate guard remains held; preserve the request for inspection. No new job was started.";
+    return this.response(snapshot, message,
+      { accepted: false, ...(operation.owner_key === "targeted:" + snapshot.scope ? { request_id: operation.operation_id } : {}),
+        terminal: false, data_ready: false, should_continue_polling: false, reason: "dispatch_overlap",
+        ...(laterRequest ? { retry_after_seconds: Math.max(1, Math.ceil((observation?.retryAfterMs ?? 25_000) / 1000)) } : {}),
+        sync_status: status, dispatch_status: { ...dispatchStatus(operation),
+          ...(laterRequest ? { action_required: false, next_action: "none" as const } : {}) } });
   }
 
-  private async reconcileBlocker(operation: DispatchOperation): Promise<DispatchOperation> {
+  private async reconcileBlocker(operation: DispatchOperation): Promise<DispatchObservation> {
     const reader = new DispatchReader(this.env, this.config, keys => this.jsonNullable(keys, true), this.now, this.fetcher);
-    return (await reader.observe(operation, "overlap_reconcile", this.actorKey)).operation;
+    return reader.observe(operation, "overlap_reconcile", this.actorKey);
   }
 
   async request(request: FreshRequest): Promise<Json> {
@@ -494,13 +510,20 @@ export class FreshDataService {
     const active = await coordinator.activeFreshJob(snapshot.scope, this.now());
     if (active) {
       const operation = await coordinator.dispatchOperation(active.request_id);
-      if (!operation || (await this.reconcileBlocker(operation)).owner_released_at === null)
+      if (!operation) return this.status(active, false, "shared");
+      const reconciled = await this.reconcileBlocker(operation);
+      if (reconciled.operation.owner_released_at === null) {
+        // A verified blocker gets one lifecycle check per explicit request.
+        // Do not wait/re-read it through a second ordinary status window here.
+        if (operation.dispatch_state === "verified_active") return this.overlap(snapshot, reconciled.operation, reconciled);
         return this.status(active, false, "shared");
+      }
     }
     const blocked = await coordinator.blockingDispatch(request.kind, "targeted:" + snapshot.scope);
     if (blocked) {
-      const reconciled = active ? blocked : await this.reconcileBlocker(blocked);
-      if (reconciled.owner_released_at === null) return this.overlap(snapshot, reconciled);
+      if (active) return this.overlap(snapshot, blocked);
+      const reconciled = await this.reconcileBlocker(blocked);
+      if (reconciled.operation.owner_released_at === null) return this.overlap(snapshot, reconciled.operation, reconciled);
     }
     // beginFresh below atomically rechecks both same-scope jobs and blockers;
     // the old read cannot authorize a duplicate POST or bypass a second owner.

@@ -281,8 +281,11 @@ export class DispatchOperations {
   }
 
   claim(identity: DispatchIdentity, intent: DispatchClaim["intent"], actorKey: string, nowMs: number,
-    reserveStatus: (key: string, now: number, ttl: number) => boolean):
-    { acquired: boolean; operation: DispatchOperation | null; claim?: DispatchClaim; retryAfterMs?: number } {
+    reserveStatus: (key: string, now: number, ttl: number) => boolean,
+    reserveReconcile: (operationId: string, now: number) =>
+      { acquired: boolean; retryAfterMs?: number; reason?: "cooldown" | "daily_limit" }):
+    { acquired: boolean; operation: DispatchOperation | null; claim?: DispatchClaim; retryAfterMs?: number;
+      reason?: "cooldown" | "daily_limit" } {
     if (!Number.isFinite(nowMs) || !["initial", "shared", "status", "terminal_inspection", "overlap_reconcile"].includes(intent)) throw new Error("Invalid dispatch claim.");
     const op = this.current(identity);
     if (!op || !this.owns(op) || op.read_claim || op.evidence_conflict || !("startup_receipt" in op)) return { acquired: false, operation: op };
@@ -314,8 +317,8 @@ export class DispatchOperations {
         "SELECT polls, expires_at, state, scope, kind, run_id, request FROM fresh_jobs WHERE request_id = ?", op.operation_id).toArray()[0];
       if (!job || job.state !== "active") return { acquired: false, operation: op };
       if (intent === "overlap_reconcile") {
-        // A new explicit sync request gets one separate, durable chance to
-        // reconcile an old already-verified job. Time admits a read, not release.
+        // A new explicit sync request may recheck one already-verified job.
+        // Spacing and a shared daily budget admit reads, never release by age.
         let request: { requestedAt?: unknown; kind?: unknown; date?: unknown; activityId?: unknown; newExpected?: unknown } | undefined;
         try { request = JSON.parse(job.request); } catch { /* Unknown request stays held. */ }
         const requestedAt = request?.requestedAt;
@@ -353,10 +356,10 @@ export class DispatchOperations {
             && Number.isSafeInteger(lease.expires_at)
             && lease.expires_at - (repair ? 60_000 : 5 * 60_000) === admittedAt);
         }
-        if (!Number.isInteger(job.polls) || job.polls < 1 || job.polls > 3 || op.overlap_reconcile_used || !actorKey || actorKey.length > 128
+        if (!Number.isInteger(job.polls) || job.polls < 1 || job.polls > 3 || !actorKey || actorKey.length > 128
           || op.dispatch_state !== "verified_active" || !op.startup_receipt || !op.verified_binding
           || typeof requestedAt !== "number" || !Number.isSafeInteger(requestedAt) || requestedAt < 0
-          || !Number.isSafeInteger(job.expires_at) || !originalTimeProven || nowMs < job.expires_at
+          || !Number.isSafeInteger(job.expires_at) || !originalTimeProven || nowMs < admittedAt
           || !validRequest || job.scope !== originalScope || !descriptorMatches
           || op.owner_key !== "targeted:" + job.scope || job.run_id !== op.candidate_run_id
           || op.verified_binding.run_id !== op.candidate_run_id
@@ -364,12 +367,19 @@ export class DispatchOperations {
           return { acquired: false, operation: op };
         const keys = ["targeted-poll:" + op.operation_id, "refresh-status-op:" + actorKey + ":" + op.operation_id,
           "refresh-status:" + actorKey + ":" + op.candidate_run_id];
-        if (keys.some(key => {
+        const retryAfterMs = Math.max(0, ...keys.map(key => {
           const row = this.storage.sql.exec<{ expires_at: number }>(
             "SELECT expires_at FROM refresh_leases WHERE lease_key = ?", key).toArray()[0];
-          return row && row.expires_at > nowMs;
-        })) return { acquired: false, operation: op };
+          return row ? row.expires_at - nowMs : 0;
+        }));
+        if (retryAfterMs > 0) return { acquired: false, operation: op, retryAfterMs, reason: "cooldown" };
+        // Charge before I/O, including failed/unknown observations. Reusing the
+        // normal budget mechanism keeps this finite across actors and aliases.
+        const budget = reserveReconcile(op.operation_id, nowMs);
+        if (!budget.acquired) return { acquired: false, operation: op,
+          retryAfterMs: budget.retryAfterMs, reason: budget.reason };
         for (const key of keys) if (!reserveStatus(key, nowMs, 25_000)) throw new Error("Overlap admission changed.");
+        // Backward-compatible historical marker, not a permanent one-shot gate.
         op.overlap_reconcile_used = true;
       } else if (intent === "terminal_inspection") {
         if (job.polls !== 3 || op.terminal_inspection_used || !actorKey || actorKey.length > 128
@@ -399,7 +409,7 @@ export class DispatchOperations {
         }
         this.storage.sql.exec("UPDATE fresh_jobs SET polls = polls + 1 WHERE request_id = ? AND polls < 3", op.operation_id);
       }
-      limit = nowMs >= job.expires_at ? 1 : 2;
+      limit = intent === "overlap_reconcile" || nowMs >= job.expires_at ? 1 : 2;
     }
     const previous = op.revision++;
     op.read_claim = { claim_id: crypto.randomUUID(), claim_revision: op.revision, intent,
