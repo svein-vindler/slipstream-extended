@@ -54,6 +54,13 @@ a safe category plus site. Private callers keep original exception values/args.
   typed application guidance are unchanged. Existing fixed-only
   context claim/completion and invalid-history messages remain fixed safe sites.
 
+Sanitized MCP tool failures retain the SDK's recognized `resultType: "complete"`
+wire discriminator when present, so protocol `2026-07-28` clients can decode
+the same safe guidance and generic failures. Other supplied result fields remain
+projected away; legacy protocol responses retain their existing shape. The
+runtime privacy regression uses the installed v2 client against the actual
+handler with synthetic auth and storage boundaries.
+
 Activity refresh also emits a bounded `by_status` aggregate in its hosted report.
 An unsupported activity or provider capability is explicit; checked activity
 counts alone do not prove that files or Coach inputs were delivered. The legacy
