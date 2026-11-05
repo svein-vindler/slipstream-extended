@@ -35,6 +35,10 @@ def collect(
     ):
         raise Stop("explicit_bounded_run_required")
     state = job.admission(plan_sha, resume, now)
+    limits = job.source_limits()
+    experiment = job.plan.get("quota_experiment") is not None
+    if experiment and (max_dates != 1 or max_http > 8 or not reload):
+        raise Stop("experiment_requires_single_date_collect")
     pending = [
         r
         for r in state["rows"]
@@ -48,7 +52,7 @@ def collect(
     usage = rolling_usage(job, ledger_paths, now)
     if usage["unknown_reservations"]:
         raise Stop("unknown_source_reservation_hold")
-    if usage["HTTP"] >= 240 or (reload and usage["reloads"] >= 30):
+    if usage["HTTP"] >= limits["HTTP"] or (reload and usage["reloads"] >= limits["reloads"]):
         raise Stop("rolling_source_budget")
     run = uuid.uuid4().hex
     nonce = uuid.uuid4().hex
@@ -114,7 +118,7 @@ def collect(
             usage = rolling_usage(job, ledger_paths, now)
             if usage["unknown_reservations"]:
                 raise Stop("unknown_source_reservation_hold")
-            if usage["HTTP"] >= 240 or (reload and usage["reloads"] >= 30):
+            if usage["HTTP"] >= limits["HTTP"] or (reload and usage["reloads"] >= limits["reloads"]):
                 terminal = "rolling_source_budget"
                 break
             target_streams = [r["stream"] for r in pending if r["date"] == day]
@@ -125,7 +129,7 @@ def collect(
                 "date": day,
                 "streams": target_streams,
                 "plan": job.plan_sha,
-                "max_http": min(8, max_http - http, 240 - usage["HTTP"]),
+                "max_http": min(8, max_http - http, limits["HTTP"] - usage["HTTP"]),
                 "max_seconds": min(899, remaining_seconds - 30),
                 "archive_reload": reload,
                 "nonce": digest(nonce.encode()),
@@ -219,9 +223,21 @@ def collect(
                     "physicalHTTP": receipt["HTTP"],
                     "reload_ACK": receipt.get("reload_ACK", 0),
                     "reload_intent": receipt.get("reload_intent", int(reload)),
+                    **({"calendar_counts": receipt["calendar_counts"]}
+                       if "calendar_counts" in receipt else {}),
                 }
             )
+            if experiment:
+                observed = rolling_usage(job, ledger_paths, now)
+                job.append({"type": "quota_experiment_observation",
+                            "rolling24h": {key: observed[key] for key in ("HTTP", "reloads")},
+                            "UTC": (now or datetime.now(timezone.utc)).isoformat()})
             empty_dates = 0 if positive else empty_dates + 1
+            if experiment and (outcome.returncode != 0 or any(
+                    row["status"] == "empty_unresolved" for row in receipt["targets"])):
+                job.append({"type": "quota_experiment_stop",
+                            "reason": receipt.get("category", "empty_unresolved"),
+                            "UTC": (now or datetime.now(timezone.utc)).isoformat()})
             if outcome.returncode == 2:
                 terminal = receipt["category"]
                 if terminal == "rate_limited":
@@ -348,6 +364,10 @@ def date_phase(job, run, day, handoff, *, source_factory=None):
             receipt["HTTP"] = source.http_count
             receipt["reload_intent"] = int(source.reload_used)
             receipt["reload_ACK"] = int(getattr(source, "reload_ack", False))
+            if hasattr(source, "calendar_counts"):
+                receipt["calendar_counts"] = source.calendar_counts
+                receipt["reload_intent_UTC"] = source.reload_intent_UTC
+                receipt["reload_ACK_UTC"] = source.reload_ACK_UTC
             primary = unhandled or receipt.get("status") == "stopped"
             try:
                 source.close()

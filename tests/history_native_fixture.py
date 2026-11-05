@@ -24,8 +24,12 @@ class Clock:
         self.value += seconds
 
     def now(self):
-        from datetime import datetime, timezone
+        from datetime import datetime, timedelta, timezone
 
+        if mode == "calendar_boundary":
+            return datetime(2026, 4, 29, 21, 59, 59, tzinfo=timezone.utc) + timedelta(seconds=self.value - 100)
+        if mode == "calendar_utc":
+            return datetime(2026, 4, 29, 23, 59, 59, tzinfo=timezone.utc) + timedelta(seconds=self.value - 100)
         return datetime(2026, 4, 30, tzinfo=timezone.utc)
 
 
