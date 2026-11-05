@@ -384,19 +384,34 @@ def test_outer_sdk_cleanup_keeps_publication_primary_and_attempts_both_closes(
     observed = []
     primaries = []
     original_unregister = client.meta.events.unregister
+    original_first = client.meta.events.register_first
+    original_register = client.meta.events.register
+    registered = []
+
+    def register_first(event_name, handler, *args, **kwargs):
+        if not kwargs.get("unique_id", "").startswith("night-baseline-"):
+            registered.append((event_name, handler))
+        return original_first(event_name, handler, *args, **kwargs)
+
+    def register(event_name, handler, *args, **kwargs):
+        if not kwargs.get("unique_id", "").startswith("night-baseline-"):
+            registered.append((event_name, handler))
+        return original_register(event_name, handler, *args, **kwargs)
 
     def unregister(*args, **kwargs):
         if kwargs.get("unique_id", "").startswith("night-baseline-"):
             return original_unregister(*args, **kwargs)
-        observed.append("guard")
+        observed.append((args[0], args[1]))
         primaries.append(sys.exception())
         raise OSError("secondary guard cleanup")
 
     def close():
-        observed.append("client")
+        observed.append(("client", None))
         primaries.append(sys.exception())
         raise OSError("secondary client cleanup")
 
+    monkeypatch.setattr(client.meta.events, "register_first", register_first)
+    monkeypatch.setattr(client.meta.events, "register", register)
     monkeypatch.setattr(client.meta.events, "unregister", unregister)
     monkeypatch.setattr(client, "close", close)
     monkeypatch.setattr(boto3, "client", lambda *args, **kwargs: client)
@@ -412,9 +427,25 @@ def test_outer_sdk_cleanup_keeps_publication_primary_and_attempts_both_closes(
     assert type(error.value) is BaselineRefreshStop
     assert str(error.value) == "Night baseline storage denied or unknown"
     assert all(primary is error.value for primary in primaries)
-    assert observed == ["guard", "client"]
+    assert [name for name, _ in registered] == ["before-send.s3", "after-call.s3"]
+    assert [name for name, _ in observed] == ["before-send.s3", "after-call.s3", "client"]
+    for (registered_name, registered_handler), (removed_name, removed_handler) in zip(
+        registered, observed[:2], strict=True
+    ):
+        assert removed_name == registered_name
+        assert removed_handler.__self__ is registered_handler.__self__
+        assert removed_handler.__func__ is registered_handler.__func__
+    assert registered[0][1].__self__ is registered[1][1].__self__
     assert len(server.puts) == 1
-    assert job.status()["counts"] == {"ready": 1}
+    assert job.status()["counts"] == {"ready": 1} and job.status()["locked"]
+    calls = len(server.calls)
+    monkeypatch.setattr(
+        boto3, "client", lambda *args, **kwargs: pytest.fail("credential construction after HOLD")
+    )
+    with pytest.raises(Stop, match="unknown_owner_hold_no_takeover"):
+        publish(job, job.plan_sha, confirm=True)
+    assert len(server.calls) == calls
+    assert [name for name, _ in observed] == ["before-send.s3", "after-call.s3", "client"]
 
 
 def test_valid_list_continuation_preserves_single_cached_inventory(tmp_path):
