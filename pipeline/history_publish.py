@@ -59,6 +59,9 @@ class StorageGuard:
         self.execution_context = execution_context if execution_context is not None else {}
         self.execution_context.setdefault("counts", {"get": 0, "list": 0, "put": 0})
         self.execution_context.setdefault("body_bytes", 0)
+        limit = self.execution_context.setdefault("publication_get_limit", 2256)
+        if type(limit) is not int or not 0 <= limit <= 2256:
+            raise Stop("storage_execution_budget")
         self.counts = {"get": 0, "list": 0, "put": 0}
         self.expected = {}
         self.failed = False
@@ -158,8 +161,12 @@ class StorageGuard:
                 _cleanup(response.raw.close, primary=primary)
 
         store.client._endpoint.http_session.send = bounded_send
-        store.client.meta.events.register_first("before-send.s3", self.before)
-        store.client.meta.events.register("after-call.s3", self.after)
+        try:
+            store.client.meta.events.register_first("before-send.s3", self.before)
+            store.client.meta.events.register("after-call.s3", self.after)
+        except BaseException:
+            _cleanup(self.close, primary=True)
+            raise
 
     def before(self, request, **kwargs):
         if self.failed or time.monotonic() - self.started > 900:
@@ -203,7 +210,7 @@ class StorageGuard:
                 raise Stop("storage_list_prefix")
         totals = self.execution_context["counts"]
         if (
-            totals["get"] + (kind == "get") > 2256
+            totals["get"] + (kind == "get") > self.execution_context["publication_get_limit"]
             or totals["list"] + totals["put"] + (kind in {"list", "put"}) > 1000
         ):
             self.failed = True
@@ -347,8 +354,10 @@ class StorageGuard:
 
     def close(self):
         self.store.client._endpoint.http_session.send = self.original_send
-        self.store.client.meta.events.unregister("before-send.s3", self.before)
-        self.store.client.meta.events.unregister("after-call.s3", self.after)
+        _cleanup(
+            lambda: self.store.client.meta.events.unregister("before-send.s3", self.before),
+            lambda: self.store.client.meta.events.unregister("after-call.s3", self.after),
+        )
 
 
 class _ReferenceStore:
@@ -368,6 +377,7 @@ class _ReferenceStore:
         self.draining = True
         self.current_source = None
         self.queue_pending = set()
+        self.queue_rows = None
         self.queue_bytes = 0
 
     def __getattr__(self, name):
@@ -394,6 +404,7 @@ class _ReferenceStore:
         self._read_key(name)
         from botocore.exceptions import ClientError
 
+        from .night_baseline_refresh import QUEUE_KEY
         from .r2_store import missing_object
 
         expected = (
@@ -404,6 +415,8 @@ class _ReferenceStore:
         try:
             snapshot = self.store.get_snapshot(name, **kwargs)
         except ClientError as error:
+            if name == QUEUE_KEY and missing_object(error):
+                self.queue_rows = {}
             if expected and expected[0] == "if-match" and missing_object(error):
                 raise Stop("source_preimage_changed") from None
             raise
@@ -412,7 +425,8 @@ class _ReferenceStore:
         from .night_baseline_refresh import QUEUE_KEY
 
         if name == QUEUE_KEY:
-            self.queue_pending = set(decode(snapshot.data).get("pending", {}))
+            self.queue_rows = decode(snapshot.data).get("pending", {})
+            self.queue_pending = set(self.queue_rows)
             self.queue_bytes = len(snapshot.data)
         return snapshot
 
@@ -519,9 +533,166 @@ def _snapshot(store, object_key):
     return snapshot
 
 
+def _reference_complete(reference):
+    if "cohort_complete" in reference:
+        return reference["cohort_complete"] is True
+    return (
+        reference.get("status") in {"complete", "waiting_until_close"}
+        and reference.get("closed_pending") == 0
+        and not reference.get("held_periods") and not reference.get("blocked")
+    )
+
+
+def _completed_context(job, state, target_sha, execution_context, finalize_dates):
+    """Reuse only this journal's terminal publications, never an unknown parent.
+
+    Local bytes accelerate initial assembly; the reference publisher still reads
+    both source/context fences directly from storage. Receipt totals are carried
+    only while the preceding round has unfinished closed reference work.
+    """
+    from .r2_store import R2ObjectSnapshot
+
+    cache = execution_context.setdefault("snapshot_cache", {})
+    published = {
+        (row["date"], row["stream"]): row for row in state["rows"]
+        if row["status"] == "published"
+    }
+    active, targets, references, latest = None, [], [], None
+    local_snapshots = {}
+    cohort = set(finalize_dates) if finalize_dates is not None else None
+    frames, journal_tip = job.events()
+    for frame in frames:
+        event = frame["event"]
+        if event["type"] == "begin":
+            active, targets, references = event["run"], [], []
+        elif event["type"] == "target" and active is not None:
+            targets.append(event)
+        elif event["type"] == "reference_refresh" and active is not None:
+            references.append(event.get("report"))
+        elif event["type"] == "end":
+            run, active = active, None
+            if event["status"] != "published":
+                continue
+            if not isinstance(run, str) or not re.fullmatch(r"[a-f0-9]{32}", run):
+                raise Stop("publication_checkpoint_unverified")
+            folder = job.folder / "runs" / run
+            try:
+                receipt = json.loads(read(folder / "RECEIPT.json"))
+                remote = json.loads(read(folder / "REMOTE-VERIFIED.json"))
+            except (FileNotFoundError, KeyError, ValueError):
+                raise Stop("publication_checkpoint_unverified") from None
+            if not isinstance(receipt, dict) or not isinstance(remote, dict):
+                raise Stop("publication_checkpoint_unverified")
+            if (
+                receipt.get("status") != "complete"
+                or remote.get("status") != "remote_verified_cleanup_pending"
+                or {k: v for k, v in receipt.items() if k != "status"}
+                != {k: v for k, v in remote.items() if k != "status"}
+                or len(references) != 1
+                or receipt.get("baseline_refresh") != references[0]
+                or receipt.get("run", run) != run
+                or receipt.get("plan_sha256", job.plan_sha) != job.plan_sha
+                or receipt.get("target_sha256", target_sha) != target_sha
+                or not isinstance(receipt.get("destinations"), list)
+                or not all(isinstance(row, dict) for row in receipt["destinations"])
+            ):
+                raise Stop("publication_checkpoint_unverified")
+            destinations = receipt["destinations"]
+            if len(destinations) != len(targets) or any(
+                target.get("status") != "published" or any(
+                    target.get(field) != destination.get(other)
+                    for field, other in (
+                        ("date", "date"), ("stream", "stream"),
+                        ("destination_key", "key"), ("revision", "revision"), ("sha256", "sha256"),
+                    )
+                ) for target, destination in zip(targets, destinations, strict=True)
+            ):
+                raise Stop("publication_checkpoint_unverified")
+            latest = receipt
+            reference = receipt.get("baseline_refresh", {})
+            if not isinstance(reference, dict):
+                raise Stop("publication_checkpoint_unverified")
+            complete = _reference_complete(reference)
+            same_cohort = cohort is not None and reference.get("finalize_dates") == sorted(cohort)
+            if complete and not same_cohort:
+                local_snapshots.clear()
+                continue
+            for ordinal, destination in enumerate(destinations):
+                day, stream = destination.get("date"), destination.get("stream")
+                row = published.get((day, stream))
+                if (
+                    row is None or stream not in {"hr", "hrv"}
+                    or (cohort is not None and day not in cohort)
+                    or destination.get("key") != key(stream, day)
+                    or any(row.get(field) != destination.get(other) for field, other in (
+                        ("destination_key", "key"), ("revision", "revision"), ("sha256", "sha256"),
+                    ))
+                    or not isinstance(destination.get("revision"), str)
+                    or not re.fullmatch(r'"[^"\r\n]+"', destination["revision"])
+                ):
+                    continue
+                # Older complete receipts used _snapshot's fixed JSON/gzip
+                # metadata invariant and these two bounded filenames.
+                names = (f"source-postimage-{ordinal:03d}.bin", f"before-{stream}-{day}.bin")
+                metadata = destination.get("snapshot")
+                if metadata is not None:
+                    if (
+                        not isinstance(metadata, dict) or metadata.get("file") not in names
+                        or metadata.get("content_type") != "application/json"
+                        or metadata.get("encoding") != "gzip"
+                    ):
+                        continue
+                    names = (metadata["file"],)
+                for name in names:
+                    try:
+                        body = read(folder / name, 262144)
+                    except (FileNotFoundError, KeyError):
+                        continue
+                    if digest(body) != destination.get("sha256") or (
+                        metadata is not None and metadata.get("bytes") != len(body)
+                    ):
+                        continue
+                    decode(body)
+                    local_snapshots[destination["key"]] = R2ObjectSnapshot(
+                        data=body, revision=destination["revision"],
+                        content_type="application/json", encoding="gzip",
+                    )
+                    break
+    cache.update(local_snapshots)
+    if latest is not None:
+        reference = latest.get("baseline_refresh", {})
+        if not (
+            _reference_complete(reference) and not any(
+                row["status"] in {"ready", "pending"}
+                and row["date"] in reference.get("finalize_dates", [])
+                for row in state["rows"]
+            )
+        ):
+            totals = reference.get("execution_totals", {})
+            counts = totals.get("counts", {})
+            if all(type(counts.get(kind)) is int and counts[kind] >= 0 for kind in ("get", "list", "put")) and (
+                type(totals.get("body_bytes")) is int and totals["body_bytes"] >= 0
+            ):
+                limit = totals.get("publication_get_limit", 2256)
+                if type(limit) is not int or not 0 <= limit <= 2256:
+                    raise Stop("publication_checkpoint_unverified")
+                execution_context["publication_get_limit"] = min(
+                    execution_context.get("publication_get_limit", 2256), limit
+                )
+                current = execution_context.setdefault("counts", {"get": 0, "list": 0, "put": 0})
+                for kind in ("get", "list", "put"):
+                    current[kind] = max(current[kind], counts[kind])
+                execution_context["body_bytes"] = max(
+                    execution_context.get("body_bytes", 0), totals["body_bytes"]
+                )
+            else:
+                raise Stop("publication_checkpoint_unverified")
+    return journal_tip
+
+
 def publish(
     job, plan_sha, *, confirm=False, store=None, target_dates=None, execution_context=None,
-    finalize_dates=None,
+    finalize_dates=None, defer_references=False,
 ):
     if not confirm:
         raise Stop("explicit_storage_phase_required")
@@ -533,7 +704,6 @@ def publish(
     ]
     days = list(dict.fromkeys(r["date"] for r in ready))[:7]
     ready = [r for r in ready if r["date"] in days]
-    selected_count = len(ready)
     # Validate every native source/result/raw proof before importing storage or credentials.
     for row in ready:
         folder = Path(row["folder"])
@@ -565,50 +735,72 @@ def publish(
         for field in ("wire", "view"):
             if digest(read(folder / row[field], 5 * 1024 * 1024)) != row[field + "_sha256"]:
                 raise Stop("source_bytes_changed")
-    owned = store is None
-    if store is None:
-        import os
+    close_owned = None
+    primary = False
+    try:
+        if store is None:
+            import os
 
-        import boto3
-        from botocore.config import Config
+            import boto3
+            from botocore.config import Config
 
-        from .r2_store import R2Store
+            from .r2_store import R2Store
 
-        account = os.environ["CLOUDFLARE_ACCOUNT_ID"]
-        if not re.fullmatch(r"[0-9a-f]{32}", account):
-            raise Stop("storage_account")
-        client = boto3.client(
-            "s3",
-            endpoint_url="https://" + account + ".r2.cloudflarestorage.com",
-            aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
-            aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
-            region_name="auto",
-            config=Config(
-                request_checksum_calculation="when_required",
-                connect_timeout=5,
-                read_timeout=20,
-                retries={"total_max_attempts": 1},
-                s3={"addressing_style": "path"},
-            ),
+            account = os.environ["CLOUDFLARE_ACCOUNT_ID"]
+            if not re.fullmatch(r"[0-9a-f]{32}", account):
+                raise Stop("storage_account")
+            client = boto3.client(
+                "s3",
+                endpoint_url="https://" + account + ".r2.cloudflarestorage.com",
+                aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+                aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+                region_name="auto",
+                config=Config(
+                    request_checksum_calculation="when_required",
+                    connect_timeout=5,
+                    read_timeout=20,
+                    retries={"total_max_attempts": 1},
+                    s3={"addressing_style": "path"},
+                ),
+            )
+            closed = False
+
+            def close_owned():
+                # Close before terminal proof; never retry a failed close.
+                nonlocal closed
+                if not closed:
+                    closed = True
+                    client.close()
+
+            store = R2Store(client=client)
+        return _publish_store(
+            job, plan_sha, state, ready, store=store,
+            execution_context=execution_context, finalize_dates=finalize_dates,
+            defer_references=defer_references, close_owned=close_owned,
         )
-        store = R2Store(client=client)
-    run = uuid.uuid4().hex
-    folder = job.folder / "runs" / run
-    (job.folder / "runs").mkdir(exist_ok=True)
-    folder.mkdir()
-    owner = {"run": run, "plan": plan_sha, "phase": "publish"}
-    write(job.folder / "OWNER.lock", owner)
-    current = job.admission(plan_sha, source=False, owner=owner)
-    if current["rows"] != state["rows"]:
-        raise Stop("source_progress_changed_before_owner")
-    job.append({"type": "begin", "run": run})
+    except BaseException:
+        primary = True
+        raise
+    finally:
+        if close_owned is not None:
+            _cleanup(close_owned, primary=primary)
+
+
+def _publish_store(
+    job, plan_sha, state, ready, *, store, execution_context,
+    finalize_dates, defer_references, close_owned,
+):
+    selected_count = len(ready)
     target_sha = digest((store.client.meta.endpoint_url + "\0" + store.bucket).encode())
     target_file = job.folder / "storage-target.json"
-    if target_file.exists():
-        if json.loads(read(target_file)) != {"target_sha256": target_sha}:
-            raise Stop("storage_target_changed")
-    else:
-        write(target_file, {"target_sha256": target_sha})
+    if target_file.exists() and json.loads(read(target_file)) != {"target_sha256": target_sha}:
+        raise Stop("storage_target_changed")
+    if execution_context is None:
+        execution_context = {}
+    context_tip = _completed_context(job, state, target_sha, execution_context, finalize_dates)
+    run = uuid.uuid4().hex
+    folder = job.folder / "runs" / run
+    owner = {"run": run, "plan": plan_sha, "phase": "publish"}
     store.max_bucket_bytes = min(store.max_bucket_bytes, 5368709120)
     store.max_bucket_objects = min(store.max_bucket_objects, 100000)
     store.max_writes_per_run = min(store.max_writes_per_run, 100)
@@ -624,13 +816,30 @@ def publish(
     guard = StorageGuard(store, keys, folder, execution_context)
     guard.prefixes = {f"health/hrv/{m[:4]}/{m[5:]}/" for m in months}
     staged, done, changed_months = [], [], set()
+    snapshot_files = {}
     snapshot_cache = guard.execution_context.setdefault("snapshot_cache", {})
     reference_store = _ReferenceStore(store, guard)
     primary = False
+    owner_created = begin_attempted = False
     try:
+        (job.folder / "runs").mkdir(exist_ok=True)
+        folder.mkdir()
+        if not target_file.exists():
+            write(target_file, {"target_sha256": target_sha})
+        write(job.folder / "OWNER.lock", owner)
+        owner_created = True
+        current = job.admission(plan_sha, source=False, owner=owner)
+        if current["rows"] != state["rows"]:
+            raise Stop("source_progress_changed_before_owner")
+        if job.events()[1] != context_tip:
+            raise Stop("publication_progress_changed_before_owner")
+        begin_attempted = True
+        job.append({"type": "begin", "run": run})
         from .night_baseline_refresh import (
             ComponentBudgetDeferred,
+            _held,
             affected_periods,
+            is_closed,
             publish_source,
             refresh_pending,
         )
@@ -661,6 +870,7 @@ def publish(
                 )
                 if has_curve(row["stream"], row["date"], previous):
                     snapshot_cache[object_key] = before
+                    snapshot_files[object_key] = "before-" + row["stream"] + "-" + row["date"] + ".bin"
                     done.append((row, object_key, before.revision, digest(before.data)))
                     continue
                 if row["stream"] == "hr":
@@ -761,7 +971,8 @@ def publish(
             if after is None or after.data != data:
                 raise Stop("canonical_source_readback_changed")
             snapshot_cache[object_key] = after
-            write(folder / f"source-postimage-{len(done):03d}.bin", after.data)
+            snapshot_files[object_key] = f"source-postimage-{len(done):03d}.bin"
+            write(folder / snapshot_files[object_key], after.data)
             done.append((row, object_key, after.revision, digest(data)))
             if row["stream"] == "hrv":
                 actual_months.add(row["date"][:7])
@@ -805,12 +1016,16 @@ def publish(
         reference_store.draining = True
         reference_store.index_reserve = reference_store.index_bytes = 0
         period_names = None
-        if finalize_dates is not None and snapshot_cache:
+        if finalize_dates is not None:
             period_names = set()
-            for name in snapshot_cache:
-                stream = "signals" if name.startswith("health/signals/") else "hrv"
-                period_names.update(affected_periods(stream, name.rsplit("/", 1)[-1][:-5]))
             delivered = {(row["stream"], row["date"]) for row, *_ in done}
+            for row in state["rows"]:
+                if row["date"] in finalize_dates and (
+                    row["status"] == "published" or (row["stream"], row["date"]) in delivered
+                ):
+                    period_names.update(affected_periods(
+                        "signals" if row["stream"] == "hr" else "hrv", row["date"]
+                    ))
             for row in state["rows"]:
                 if (
                     row["date"] in finalize_dates
@@ -821,7 +1036,13 @@ def publish(
                         "signals" if row["stream"] == "hr" else "hrv", row["date"]
                     ))
         raw_destinations = [
-            {"date": r["date"], "stream": r["stream"], "key": k, "revision": rev, "sha256": sha}
+            {
+                "date": r["date"], "stream": r["stream"], "key": k, "revision": rev, "sha256": sha,
+                "snapshot": {
+                    "file": snapshot_files[k], "bytes": len(snapshot_cache[k].data),
+                    "content_type": snapshot_cache[k].content_type, "encoding": snapshot_cache[k].encoding,
+                },
+            }
             for r, k, rev, sha in done
         ]
         # A later baseline denial/unknown must not erase known raw delivery.
@@ -833,10 +1054,44 @@ def publish(
             "body_bytes": guard.body_bytes,
         })
         baseline_report = refresh_pending(
-            reference_store, snapshot_cache=snapshot_cache, period_names=period_names
+            reference_store, snapshot_cache=snapshot_cache,
+            period_names=set() if defer_references else period_names,
         )
+        if defer_references:
+            baseline_report["reference_work_deferred"] = True
+        if finalize_dates is not None:
+            baseline_report["finalize_dates"] = sorted(set(finalize_dates))
+            cohort_names = set()
+            raw_pending = False
+            for row in state["rows"]:
+                if row["date"] in finalize_dates:
+                    cohort_names.update(affected_periods(
+                        "signals" if row["stream"] == "hr" else "hrv", row["date"]
+                    ))
+                    raw_pending |= row["status"] in {"ready", "pending"} and (
+                        row["stream"], row["date"]
+                    ) not in delivered
+            rows = reference_store.queue_rows
+            closure_day = baseline_report.get("closure_day")
+            known = rows is not None and type(baseline_report.get("pending")) is int
+            pending = {name: row for name, row in (rows or {}).items() if name in cohort_names}
+            known = known and (not pending or closure_day is not None)
+            closed = sum(
+                is_closed((row["start_date"], row["end_date"]), closure_day)
+                for row in pending.values()
+            ) if known and pending else 0 if known else None
+            held = sum(_held(row) for row in pending.values()) if known else None
+            blocked = [name for name, row in pending.items() if row.get("blocked")] if known else None
+            baseline_report.update(
+                cohort_closed_pending=closed,
+                cohort_deferred_open=len(pending) - closed if known else None,
+                cohort_held_periods=held,
+                cohort_blocked=blocked,
+                cohort_complete=bool(known and not raw_pending and closed == 0 and not held and not blocked),
+            )
         evidence = {
             "status": "remote_verified_cleanup_pending",
+            "run": run, "plan_sha256": plan_sha, "target_sha256": target_sha,
             "baseline_refresh": {
                 **baseline_report,
                 "publication_counts": dict(guard.counts),
@@ -844,6 +1099,7 @@ def publish(
                 "execution_totals": {
                     "counts": dict(guard.execution_context["counts"]),
                     "body_bytes": guard.execution_context["body_bytes"],
+                    "publication_get_limit": guard.execution_context["publication_get_limit"],
                 },
                 "sources_queued": queued,
                 "source_targets_deferred": selected_count - len(done),
@@ -860,9 +1116,18 @@ def publish(
         write(folder / "REMOTE-VERIFIED.json", evidence)
     except BaseException:
         primary = True
+        if owner_created and not begin_attempted:
+            def release_not_started():
+                if (
+                    json.loads(read(job.folder / "OWNER.lock")) == owner
+                    and job.snapshot()["active_run"] is None
+                ):
+                    (job.folder / "OWNER.lock").unlink()
+
+            _cleanup(release_not_started, primary=True)
         raise
     finally:
-        _cleanup(guard.close, *([store.client.close] if owned else []), primary=primary)
+        _cleanup(guard.close, *([close_owned] if close_owned is not None else []), primary=primary)
     # Only after each closer succeeded may this run publish its terminal state.
     if json.loads(read(job.folder / "OWNER.lock")) != owner:
         raise Stop("owner_binding_changed")

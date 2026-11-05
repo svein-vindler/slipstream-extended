@@ -172,17 +172,28 @@ When continuing an installation that used earlier dated controllers, include
 python -m pipeline.history_backfill daily --plan-sha PLAN_SHA256 --confirm-cloud-jobs-paused --confirm-r2-write --archive-reload --ledger PRIVATE_OLD_LEDGER.jsonl --ledger PRIVATE_MANUAL_LEDGER.jsonl
 ```
 
-After each source/publication chunk, the same run drains up to two eligible
-closed ISO weeks (Monday–Sunday) or calendar months. It reuses exact verified
-canonical source snapshots from this run for initial calculation, fetching only
-missing native inputs/context. It waits to finalize a period while another selected
-source date can still change it. Both source/context fences remain fresh R2 reads;
-no current reference is published from an unuploaded or stale source. Remaining
-publication slots can finish closed references without another source request.
-At most five publication phases run in total, including source publication.
+Source/publication chunks checkpoint the raw curves and indexes first. Reference
+assembly waits until all selected raw chunks have checkpointed, then the same run drains up to
+two eligible closed ISO weeks (Monday–Sunday) or calendar months per phase.
+The finite phase allowance is derived from the selected raw chunks and affected
+periods, with at most fourteen phases for 30 dates. It reserves bounded reference
+completion while the serial source chunks remain unchanged; the shared request
+and byte budgets still stop work earlier when needed.
+It reuses exact verified canonical source snapshots for initial calculation,
+fetching missing native inputs/context. A later ordinary R2-only continuation
+can reuse exact local postimages from complete publication receipts for this
+same job and storage target. Hashes alone are never treated as source bodies.
+Both source/context fences remain fresh R2 reads; no current reference is
+published from an unuploaded or stale source. Capacity, held work or a phase
+without progress stays pending rather than starting a retry loop.
 
-`daily_status=bounded_complete` means the selected raw work and closed reference
-queue completed. `raw_pending` or `baselines_pending` returns exit 2, preserving
+`daily_status=bounded_complete` means the selected raw work and its affected
+closed references completed. A stored-only continuation finishes the same bound
+cohort before selecting another source batch from a larger plan. Global queue
+counts remain visible; unrelated older pending periods are not recalculated or
+claimed complete by this round. An older journal without a bound cohort keeps
+closed references pending; the explicit `publish` command remains available
+within the operator's existing authorized resource envelope. `raw_pending` or `baselines_pending` returns exit 2, preserving
 known progress and explicit deferred/held/blocked counts. Open periods appear in
 `baseline_refresh.deferred_open`; they wait for local calendar closure and do not
 force a partial reference. Each actual phase report remains in
@@ -334,10 +345,12 @@ with the existing 5 GiB / 100,000 object bucket ceiling (or lower configured lim
 Responses remain bounded (64 KiB error/PUT,512 KiB GET,1 MiB LIST), with 16 MiB
 raw / 32 MiB decoded totals, 1 MiB decoded objects and a 900 second job deadline.
 One R2Store shares its cached inventory throughout each publication phase.
-A `daily` run opens at most five phases in total, including reference-only
-completion. All phases share one physical execution counter with at most
+A `daily` run derives its finite phase allowance from raw chunks plus affected
+periods (at most fourteen phases for 30 dates), including reference-only completion. All phases share one physical execution counter with at most
 1000 class A operations (LIST+PUT), 2256 class B operations (GET/HEAD), and
-10 MiB attempted write bytes. Every phase keeps the original limits and freshly
+10 MiB attempted write bytes. Daily publication itself remains capped at 2000 GET/HEAD,
+leaving 256 of the total for independent destination checks; these checks still
+belong to the same operator budget. Every phase keeps the original limits and freshly
 inventories the bucket. Earlier live/controller consumption still belongs to the
 operator's standing budget; starting this command does not reset that journal. The source's rolling 30/240 ceiling
 is shared across all chunks; a new publication phase never resets it.

@@ -1155,6 +1155,7 @@ def refresh_pending(
                 }
             day = _today(timezone)
         require(date.fromisoformat(day).isoformat() == day, "Exact closure day required")
+        report["closure_day"] = day
         reader = NativeNightReader(io, timezone=timezone, snapshot_cache=snapshot_cache)
         nights = {}
         selected = [
