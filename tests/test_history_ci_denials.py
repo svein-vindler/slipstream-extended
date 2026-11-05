@@ -57,17 +57,32 @@ def test_denied_primary_is_identical_through_both_outer_cleanup_failures(monkeyp
     client = sdk_store(server).client
     unregister = client.meta.events.unregister
     observed = []
+    original_first = client.meta.events.register_first
+    original_register = client.meta.events.register
+    registered = []
+
+    def register_first(event_name, handler, *args, **kwargs):
+        if not kwargs.get("unique_id", "").startswith("night-baseline-"):
+            registered.append((event_name, handler))
+        return original_first(event_name, handler, *args, **kwargs)
+
+    def register(event_name, handler, *args, **kwargs):
+        if not kwargs.get("unique_id", "").startswith("night-baseline-"):
+            registered.append((event_name, handler))
+        return original_register(event_name, handler, *args, **kwargs)
 
     def fail_outer_unregister(*args, **kwargs):
         if kwargs.get("unique_id", "").startswith("night-baseline-"):
             return unregister(*args, **kwargs)
-        observed.append(("guard", sys.exception()))
+        observed.append((args[0], args[1], sys.exception()))
         raise OSError("synthetic secondary guard cleanup")
 
     def fail_client_close():
-        observed.append(("client", sys.exception()))
+        observed.append(("client", None, sys.exception()))
         raise OSError("synthetic secondary client cleanup")
 
+    monkeypatch.setattr(client.meta.events, "register_first", register_first)
+    monkeypatch.setattr(client.meta.events, "register", register)
     monkeypatch.setattr(client.meta.events, "unregister", fail_outer_unregister)
     monkeypatch.setattr(client, "close", fail_client_close)
     configure_owned_client(monkeypatch, client)
@@ -75,8 +90,16 @@ def test_denied_primary_is_identical_through_both_outer_cleanup_failures(monkeyp
         history_publish.publish(job, job.plan_sha, confirm=True)
     assert type(error.value) is BaselineRefreshStop
     assert str(error.value) == "Night baseline storage denied or unknown"
-    assert [name for name, _ in observed] == ["guard", "client"]
-    assert all(primary is error.value for _, primary in observed)
+    assert [name for name, _ in registered] == ["before-send.s3", "after-call.s3"]
+    assert [name for name, _, _ in observed] == ["before-send.s3", "after-call.s3", "client"]
+    for (registered_name, registered_handler), (removed_name, removed_handler, _) in zip(
+        registered, observed[:2], strict=True
+    ):
+        assert removed_name == registered_name
+        assert removed_handler.__self__ is registered_handler.__self__
+        assert removed_handler.__func__ is registered_handler.__func__
+    assert registered[0][1].__self__ is registered[1][1].__self__
+    assert all(primary is error.value for _, _, primary in observed)
     assert len(server.puts) == 1 and job.status()["locked"]
     assert job.status()["counts"] == {"ready": 1}
     calls = len(server.calls)
@@ -86,6 +109,7 @@ def test_denied_primary_is_identical_through_both_outer_cleanup_failures(monkeyp
     with pytest.raises(Stop, match="unknown_owner_hold_no_takeover"):
         history_publish.publish(job, job.plan_sha, confirm=True)
     assert len(server.calls) == calls
+    assert [name for name, _, _ in observed] == ["before-send.s3", "after-call.s3", "client"]
 
 
 def test_actual_cli_classifies_denied_first_write_as_native2_and_reentry_is_offline(

@@ -63,7 +63,8 @@ def daily(job, args):
             ))
     # One bounded slot per affected period also covers a known split product
     # checkpoint. Requests/bytes still share the unchanged execution budget.
-    phase_limit = min(14, max(1, (len(dates) + 6) // 7 + len(periods)))
+    phase_cap = 5 if args.max_dates <= 7 else 14
+    phase_limit = min(phase_cap, max(1, (len(dates) + 6) // 7 + len(periods)))
     http = phases = 0
     # Keep the existing 256-GET allowance for independent destination checks.
     execution_context = {"publication_get_limit": 2000}

@@ -175,8 +175,9 @@ python -m pipeline.history_backfill daily --plan-sha PLAN_SHA256 --confirm-cloud
 Source/publication chunks checkpoint the raw curves and indexes first. Reference
 assembly waits until all selected raw chunks have checkpointed, then the same run drains up to
 two eligible closed ISO weeks (Monday–Sunday) or calendar months per phase.
-The finite phase allowance is derived from the selected raw chunks and affected
-periods, with at most fourteen phases for 30 dates. It reserves bounded reference
+Default calls retain at most five publication phases. For an explicit selection
+larger than seven dates, the finite phase allowance is derived from raw chunks
+and affected periods, with at most fourteen phases for 30 dates. It reserves bounded reference
 completion while the serial source chunks remain unchanged; the shared request
 and byte budgets still stop work earlier when needed.
 It reuses exact verified canonical source snapshots for initial calculation,
@@ -345,8 +346,10 @@ with the existing 5 GiB / 100,000 object bucket ceiling (or lower configured lim
 Responses remain bounded (64 KiB error/PUT,512 KiB GET,1 MiB LIST), with 16 MiB
 raw / 32 MiB decoded totals, 1 MiB decoded objects and a 900 second job deadline.
 One R2Store shares its cached inventory throughout each publication phase.
-A `daily` run derives its finite phase allowance from raw chunks plus affected
-periods (at most fourteen phases for 30 dates), including reference-only completion. All phases share one physical execution counter with at most
+A default `daily` call keeps its five-phase ceiling, including reference-only
+completion. An explicit selection larger than seven dates derives its finite
+allowance from raw chunks plus affected periods (at most fourteen phases for
+30 dates). All phases share one physical execution counter with at most
 1000 class A operations (LIST+PUT), 2256 class B operations (GET/HEAD), and
 10 MiB attempted write bytes. Daily publication itself remains capped at 2000 GET/HEAD,
 leaving 256 of the total for independent destination checks; these checks still
