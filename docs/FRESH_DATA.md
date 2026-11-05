@@ -173,7 +173,7 @@ This is not a retry of a failed control read and does not confirm startup by its
 Legacy requests and the separate general-refresh contract are unchanged. Stop when
 `should_continue_polling=false`, even if `terminal=false`, and report the
 retry guidance. Default calls, including `terminal_inspection=false`, do not add
-another window. After all three tickets are spent, only a later expressly
+another ordinary window. After all three tickets are spent, a later expressly
 requested `refresh_status(request_id=..., terminal_inspection=true)` can use one
 additional inspection of that same modern targeted job. Never set this field
 automatically or use it to continue polling. The original request ID is required;
@@ -198,6 +198,28 @@ duplicate guards. Only existing fully correlated receipt/run/report evidence
 can release a guard normally. Job completion alone establishes neither a
 successful source check nor TCX/Coach completeness/freshness; read `sync_status`
 and stored data separately. There is no automatic cleanup after exhaustion.
+
+A new explicit `sync_latest_activity` or `sync_latest_night` request separately
+checks at most one fully correlated, already verified targeted blocker before
+refusing overlap. This bounded lifecycle check can run before two hours and
+after ordinary polling has stopped. It reads one bounded startup receipt and
+one exact GitHub run; it does not read a final data report or infer readiness.
+Confirmed terminal success, failure or cancellation settles the old guard
+atomically, then normal readiness, negative cooldown, dispatch cooldown and
+daily admission still apply to the requested target. A completed job for
+another date/activity never proves this target is complete.
+
+When the job remains queued/running, keep its request ID and follow the returned
+retry delay. A later separate explicit sync request can observe its later
+completion; this does not spend or refill an ordinary poll window. The existing
+25-second operation/actor/run gates apply, with a separate shared ceiling of 12
+reconciliation observations per UTC day. Failed/unknown observations consume
+that allowance and never release the guard. Exhaustion returns the next UTC-day
+delay. Same-scope requests do not wait and issue a second status read in the same
+call. Missing or mismatched receipt/source/owner evidence, open claims, conflicts
+and unverifiable legacy operations stay protected and retain inspection
+guidance. There is no background polling, lock reset or automatic
+`terminal_inspection`; that explicit manual reserve remains separate.
 
 The boolean `terminal_inspection=true` expresses the caller's request; it is not
 server-verifiable proof that a person approved it. The client must obtain the

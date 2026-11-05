@@ -866,19 +866,22 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
 async function expiredActiveActivity(protocol: string, kind: "activity" | "night" = "activity",
   polls: 1 | 2 | 3 = 3, expiredAt = NOW + 3 * 86_400_000) {
   const state = { terminal: false, outcome: "success", sha: "a".repeat(40), status: 200, posts: 0,
+    transportFailure: false, runPatch: {} as Record<string, unknown>,
     beforeRun: undefined as (() => Promise<void>) | undefined };
   provider = async (input, init) => {
     if (init?.method === "POST") return Response.json({ workflow_run_id: ++state.posts === 1 ? 55 : 66 });
     const runId = Number(String(input).split("/").at(-1));
     expect([55, 66]).toContain(runId);
     if (runId === 55 && state.beforeRun) await state.beforeRun();
+    if (runId === 55 && state.transportFailure) throw new Error("SYNTHETIC_PROVIDER_TEXT");
     if (state.status !== 200) return new Response("SYNTHETIC_PROVIDER_TEXT", { status: state.status });
     return Response.json({ id: runId, status: runId === 55 && state.terminal ? "completed" : "in_progress",
       conclusion: runId === 55 && state.terminal ? state.outcome : null, event: "workflow_dispatch",
       path: ".github/workflows/refresh.yml", repository: { full_name: "synthetic/slipstream" },
       head_repository: { full_name: "synthetic/slipstream" }, head_branch: "main", head_sha: state.sha,
       created_at: new Date(NOW).toISOString(), updated_at: new Date(Date.now()).toISOString(),
-      html_url: `https://github.com/synthetic/slipstream/actions/runs/${runId}` });
+      html_url: `https://github.com/synthetic/slipstream/actions/runs/${runId}`,
+      ...(runId === 55 ? state.runPatch : {}) });
   };
   const first = await call(kind === "night" ? "sync_latest_night" : "sync_latest_activity",
     kind === "night" ? { wake_date: DAY } : { expected_date: DAY, new_activity_expected: true }, protocol);
@@ -887,6 +890,203 @@ async function expiredActiveActivity(protocol: string, kind: "activity" | "night
   expect(await coordinator.dispatchOperation(first.request_id)).toMatchObject({ dispatch_state: "verified_active" });
   vi.mocked(Date.now).mockReturnValue(expiredAt);
   return { state, id: first.request_id as string };
+}
+
+// A new explicit user request gets a bounded lifecycle check; status polling
+// and the separate manual terminal_inspection contract are not extended.
+for (const protocol of ["2025-03-26", "2026-07-28"]) {
+  it.each([
+    ["activity", 1, "success", DAY, "73"],
+    ["activity", 2, "failure", "2026-10-13", "74"],
+    ["activity", 3, "cancelled", DAY, "73"],
+    ["night", 3, "success", "2026-10-13", ""],
+  ] as const)(`new-request reconcile: settles %s after %i polls (%s) before two hours through ${protocol}`,
+    async (kind, polls, outcome, day, activityId) => {
+      const { state, id } = await expiredActiveActivity(protocol, kind, polls, NOW + 5 * 60_000);
+      state.terminal = true; state.outcome = outcome;
+      const before = { ...counts };
+      const next = await call(kind === "night" ? "sync_latest_night" : "sync_latest_activity",
+        kind === "night" ? { wake_date: day }
+          : { expected_date: day, activity_id: activityId, new_activity_expected: false }, protocol);
+      const old = (await coordinator.dispatchOperation(id))!;
+      expect(old).toMatchObject({ dispatch_state: "verified_terminal", owner_released_at: expect.any(Number),
+        last_observation: { conclusion: outcome } });
+      expect(old.terminal_inspection_used).toBeUndefined();
+      expect(await coordinator.freshJob(id)).toMatchObject({ state: outcome === "success" ? "completed" : "failed", polls });
+      expect(next).toMatchObject({ accepted: true, data_ready: false });
+      expect(next.request_id).not.toBe(id);
+      expect((await coordinator.dispatchOperation(next.request_id))!.descriptor).toMatchObject({
+        mode: kind, date: day, activity_id: kind === "night" ? null : activityId });
+      expect(counts.github_get - before.github_get).toBe(2); // exact old + new initial observation
+      expect(counts.r2_control_get - before.r2_control_get).toBe(2); // exact receipts, no reports
+      expect(counts.github_post - before.github_post).toBe(1);
+      expect(counts.r2_put).toBe(0);
+    });
+
+  it.each([5 * 60_000, 2 * 60 * 60_000 + 1])(`new-request reconcile: can see terminal after an earlier explicit active check at %i ms through ${protocol}`, async start => {
+    const { state, id } = await expiredActiveActivity(protocol, "activity", 3, NOW + start);
+    const firstCounts = { ...counts };
+    const active = await call("sync_latest_activity", { expected_date: "2026-10-13", activity_id: "73" }, protocol);
+    expect(active).toMatchObject({ accepted: false, reason: "dispatch_overlap", data_ready: false,
+      dispatch_status: { state: "verified_active", duplicate_guard_held: true } });
+    expect(counts.github_get - firstCounts.github_get).toBe(1);
+    const activeCounts = { ...counts };
+    state.terminal = true;
+    vi.mocked(Date.now).mockReturnValue(NOW + start + 25_000);
+    const later = await call("sync_latest_activity", { expected_date: "2026-10-13", activity_id: "73" }, protocol);
+    expect(later).toMatchObject({ accepted: true, data_ready: false });
+    expect(await coordinator.dispatchOperation(id)).toMatchObject({ dispatch_state: "verified_terminal",
+      owner_released_at: expect.any(Number) });
+    expect(await coordinator.freshJob(id)).toMatchObject({ state: "completed", polls: 3 });
+    expect(counts.github_get - activeCounts.github_get).toBe(2);
+    expect(counts.r2_control_get - activeCounts.r2_control_get).toBe(2);
+    expect(counts.github_post - activeCounts.github_post).toBe(1);
+  });
+
+  it(`new-request reconcile: settles ownership before the normal dispatch cooldown through ${protocol}`, async () => {
+    const { state, id } = await expiredActiveActivity(protocol, "activity", 3, NOW + 75_000);
+    state.terminal = true;
+    const before = { ...counts };
+    const next = await call("sync_latest_activity", { expected_date: DAY, new_activity_expected: true }, protocol);
+    expect(next).toMatchObject({ accepted: false, reason: "cooldown", data_ready: false,
+      should_continue_polling: false });
+    expect(await coordinator.dispatchOperation(id)).toMatchObject({ dispatch_state: "verified_terminal",
+      owner_released_at: expect.any(Number) });
+    expect(await coordinator.freshJob(id)).toMatchObject({ state: "completed", polls: 3 });
+    expect(counts.github_get - before.github_get).toBe(1);
+    expect(counts.r2_control_get - before.r2_control_get).toBe(1);
+    expect(counts.github_post - before.github_post).toBe(0);
+  });
+
+  it(`new-request reconcile: spaces same-scope active checks without waiting or spending ordinary polls through ${protocol}`, async () => {
+    const { state, id } = await expiredActiveActivity(protocol, "activity", 1, NOW + 5 * 60_000);
+    const before = { ...counts };
+    const first = await call("sync_latest_activity", { expected_date: DAY, new_activity_expected: true }, protocol);
+    expect(first).toMatchObject({ accepted: false, request_id: id, reason: "dispatch_overlap", retry_after_seconds: 25,
+      should_continue_polling: false, dispatch_status: { action_required: false, next_action: "none" },
+      sync_status: { job_state: "running" } });
+    expect(first.message).toContain("later explicit sync request");
+    expect(await coordinator.freshJob(id)).toMatchObject({ polls: 1, state: "active" });
+    expect(counts.github_get - before.github_get).toBe(1);
+    const after = { ...counts }; state.terminal = true;
+    vi.mocked(Date.now).mockReturnValue(NOW + 5 * 60_000 + 1);
+    actor = crypto.randomUUID();
+    const cached = await call("sync_latest_activity", { expected_date: DAY, new_activity_expected: true }, protocol);
+    expect(cached).toMatchObject({ accepted: false, request_id: id, retry_after_seconds: 25,
+      dispatch_status: { action_required: false, duplicate_guard_held: true } });
+    expect(Date.now()).toBe(NOW + 5 * 60_000 + 25_001); // helper delay only, no server wait
+    expect(counts.github_get).toBe(after.github_get);
+    expect(counts.r2_control_get).toBe(after.r2_control_get);
+    expect(counts.github_post).toBe(after.github_post);
+  });
+
+  it(`new-request reconcile: enforces one shared daily read budget across actors, targets and eviction through ${protocol}`, async () => {
+    const { state, id } = await expiredActiveActivity(protocol, "activity", 3, NOW + 5 * 60_000);
+    const before = { ...counts };
+    for (let used = 0; used < 12; used++) {
+      vi.mocked(Date.now).mockReturnValue(NOW + 5 * 60_000 + used * 25_000);
+      actor = crypto.randomUUID();
+      const held = await call("sync_latest_activity", { expected_date: DAY, activity_id: String(73 + used) }, protocol);
+      expect(held).toMatchObject({ accepted: false, should_continue_polling: false,
+        dispatch_status: { state: "verified_active", duplicate_guard_held: true, action_required: false } });
+    }
+    expect(counts.github_get - before.github_get).toBe(12);
+    expect(counts.r2_control_get - before.r2_control_get).toBe(12);
+    expect(counts.github_post).toBe(before.github_post);
+    await evictDurableObject(coordinator);
+    vi.mocked(Date.now).mockReturnValue(NOW + 10 * 60_000);
+    state.terminal = true; actor = crypto.randomUUID();
+    const spent = { ...counts };
+    const blocked = await call("sync_latest_activity", { expected_date: "2026-10-13", activity_id: "99" }, protocol);
+    expect(blocked).toMatchObject({ accepted: false, reason: "dispatch_overlap", retry_after_seconds: 42_600,
+      should_continue_polling: false, dispatch_status: { duplicate_guard_held: true, action_required: false, next_action: "none" } });
+    expect(blocked.message).toContain("daily limit");
+    expect(counts.github_get).toBe(spent.github_get);
+    expect(counts.r2_control_get).toBe(spent.r2_control_get);
+    expect(counts.github_post).toBe(spent.github_post);
+    expect(await coordinator.freshJob(id)).toMatchObject({ state: "active", polls: 3 });
+    const budget = await runInDurableObject(coordinator, (_instance, storage) => storage.storage.sql.exec<{ budget_key: string; used: number }>(
+      "SELECT budget_key, used FROM daily_budgets ORDER BY budget_key").toArray());
+    expect(budget).toEqual([{ budget_key: "sync-latest-activity", used: 1 }, { budget_key: "targeted-reconcile", used: 12 }]);
+    vi.mocked(Date.now).mockReturnValue(NOW + 86_400_000);
+    const next = await call("sync_latest_activity", { expected_date: DAY, activity_id: "99" }, protocol);
+    expect(next).toMatchObject({ accepted: true, data_ready: false });
+    expect(await coordinator.dispatchOperation(id)).toMatchObject({ dispatch_state: "verified_terminal",
+      owner_released_at: expect.any(Number) });
+  });
+
+  it.each(["active", "queued", "403", "429", "transport", "wrong_id", "wrong_workflow", "wrong_repository",
+    "wrong_ref", "wrong_head", "wrong_sha", "missing_receipt", "changed_receipt", "wrong_job_scope", "wrong_owner", "open_claim"])(
+    `new-request reconcile: keeps %s protected without a second read through ${protocol}`, async variant => {
+      const { state, id } = await expiredActiveActivity(protocol, "activity", 3, NOW + 5 * 60_000);
+      state.terminal = !["active", "queued"].includes(variant);
+      if (variant === "queued") state.runPatch.status = "queued";
+      if (variant === "403" || variant === "429") state.status = Number(variant);
+      if (variant === "transport") state.transportFailure = true;
+      if (variant === "wrong_id") state.runPatch.id = 66;
+      if (variant === "wrong_workflow") state.runPatch.path = ".github/workflows/other.yml";
+      if (variant === "wrong_repository") state.runPatch.repository = { full_name: "synthetic/other" };
+      if (variant === "wrong_ref") state.runPatch.head_branch = "other";
+      if (variant === "wrong_head") state.runPatch.head_repository = { full_name: "synthetic/other" };
+      if (variant === "wrong_sha") state.sha = "b".repeat(40);
+      if (variant === "missing_receipt") await env.SLIPSTREAM_DATA.delete(`refresh/requests/${id}.json`);
+      if (variant === "changed_receipt") {
+        const receipt = syntheticStartupReceipt((await coordinator.dispatchOperation(id))!, 55);
+        receipt.source.source_sha = "b".repeat(40);
+        await env.SLIPSTREAM_DATA.put(`refresh/requests/${id}.json`, JSON.stringify(receipt));
+      }
+      if (variant === "wrong_job_scope") await runInDurableObject(coordinator, (_instance, storage) => storage.storage.sql.exec(
+        "UPDATE fresh_jobs SET scope = 'activity/2026-10-13/99/known' WHERE request_id = ?", id).toArray());
+      if (variant === "wrong_owner") await runInDurableObject(coordinator, (_instance, storage) => {
+        const row = storage.storage.sql.exec<{ payload: string }>(
+          "SELECT payload FROM dispatch_operations_v1 WHERE operation_id = ?", id).toArray()[0];
+        const operation = JSON.parse(row.payload);
+        operation.owner_key = "targeted:activity/2026-10-13/99/known";
+        storage.storage.sql.exec("UPDATE dispatch_operations_v1 SET owner_key = ?, payload = ? WHERE operation_id = ?",
+          operation.owner_key, JSON.stringify(operation), id).toArray();
+      });
+      if (variant === "open_claim") {
+        const claim = await coordinator.claimDispatchRead((await coordinator.dispatchOperation(id))!, "overlap_reconcile", actor, Date.now());
+        expect(claim.acquired).toBe(true);
+      }
+      const before = { ...counts };
+      const held = await call("sync_latest_activity", { expected_date: "2026-10-13", activity_id: "73" }, protocol);
+      expect(held).toMatchObject({ accepted: false, data_ready: false, should_continue_polling: false,
+        dispatch_status: { operation_id: id, duplicate_guard_held: true } });
+      expect(held.request_id).toBeUndefined(); // A blocker is not the new target's job.
+      expect(await coordinator.dispatchOperation(id)).toMatchObject({ owner_released_at: null });
+      expect(await coordinator.freshJob(id)).toMatchObject({ state: "active", polls: 3 });
+      expect(counts.github_get - before.github_get).toBeLessThanOrEqual(1);
+      expect(counts.r2_control_get - before.r2_control_get).toBe(["wrong_job_scope", "wrong_owner", "open_claim"].includes(variant) ? 0 : 1);
+      expect(counts.github_post).toBe(before.github_post);
+      expect(counts.r2_put).toBe(0);
+      const budget = await runInDurableObject(coordinator, (_instance, storage) => storage.storage.sql.exec<{ used: number }>(
+        "SELECT used FROM daily_budgets WHERE budget_key = 'targeted-reconcile'").toArray());
+      expect(budget).toEqual(["wrong_job_scope", "wrong_owner"].includes(variant) ? [] : [{ used: 1 }]);
+    });
+
+  it(`new-request reconcile: settles once under simultaneous new callers through ${protocol}`, async () => {
+    const { state, id } = await expiredActiveActivity(protocol, "activity", 3, NOW + 5 * 60_000);
+    state.terminal = true;
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    state.beforeRun = async () => { entered(); await held; };
+    const before = { ...counts };
+    const first = call("sync_latest_activity", { expected_date: DAY, activity_id: "73" }, protocol);
+    await started;
+    try {
+      const shared = await call("sync_latest_activity", { expected_date: DAY, activity_id: "73" }, protocol);
+      expect(shared).toMatchObject({ accepted: false, dispatch_status: { duplicate_guard_held: true } });
+      expect(shared.request_id).toBeUndefined(); // Existing latest/new scope differs from this exact ID.
+      expect(counts.github_post).toBe(before.github_post);
+    } finally { release(); }
+    expect(await first).toMatchObject({ accepted: true, data_ready: false });
+    expect(counts.github_post - before.github_post).toBe(1);
+    expect(counts.github_get - before.github_get).toBe(2);
+    expect(counts.r2_control_get - before.r2_control_get).toBe(2);
+    expect(await coordinator.dispatchOperation(id)).toMatchObject({ dispatch_state: "verified_terminal", read_claim: null });
+  });
 }
 
 for (const protocol of ["2025-03-26", "2026-07-28"]) {
@@ -912,7 +1112,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
   });
 
   it.each(["active", "403", "429", "wrong_sha", "missing_receipt", "changed_receipt"])(
-    `retains the expired guard on %s and never refunds its overlap check through ${protocol}`, async variant => {
+    `retains the expired guard on %s and needs new exact evidence on a later request through ${protocol}`, async variant => {
       const { state, id } = await expiredActiveActivity(protocol);
       state.terminal = variant !== "active";
       if (variant === "403" || variant === "429") state.status = Number(variant);
@@ -934,10 +1134,13 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       state.status = 200; state.sha = "a".repeat(40); state.terminal = true;
       vi.mocked(Date.now).mockReturnValue(NOW + 4 * 86_400_000);
       const spent = { ...counts }; actor = crypto.randomUUID();
-      await call("sync_latest_activity", { expected_date: "2026-10-18", new_activity_expected: true }, protocol);
-      expect(counts.github_get).toBe(spent.github_get);
-      expect(counts.github_post).toBe(spent.github_post);
-      expect(counts.r2_control_get).toBe(spent.r2_control_get);
+      const later = await call("sync_latest_activity", { expected_date: "2026-10-18", new_activity_expected: true }, protocol);
+      const recoverable = !["missing_receipt", "changed_receipt"].includes(variant);
+      expect(later.accepted).toBe(recoverable);
+      expect(counts.github_get - spent.github_get).toBe(recoverable ? 2 : 0);
+      expect(counts.github_post - spent.github_post).toBe(recoverable ? 1 : 0);
+      expect(counts.r2_control_get - spent.r2_control_get).toBe(recoverable ? 2 : variant === "missing_receipt" ? 1 : 0);
+      expect((await coordinator.dispatchOperation(id))!.owner_released_at).toEqual(recoverable ? expect.any(Number) : null);
     });
 
   it(`admits one old exact GET across concurrent distinct requests through ${protocol}`, async () => {
@@ -1103,8 +1306,8 @@ it.each(["2025-03-26", "2026-07-28"])("accepts a valid missing-workout sync when
 });
 
 
-// A client can leave after1/2 ordinary windows; the separate overlap lane is
-// still single-use and does not spend/refund those remaining ordinary tickets.
+// A client can leave after1/2 ordinary windows. Explicit-request lifecycle
+// checks do not spend/refund those remaining ordinary tickets.
 for (const protocol of ["2025-03-26", "2026-07-28"]) {
   it.each([
     [1, DAY, "success"], [2, "2026-10-13", "success"],
@@ -1127,7 +1330,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
   it.each([
     [1, "active"], [2, "403"], [1, "429"],
     [2, "wrong_sha"], [1, "missing_receipt"], [2, "changed_receipt"],
-  ] as const)(`keeps an abandoned %i-poll job held on %s without refilling its overlap lane through ${protocol}`, async (polls, variant) => {
+  ] as const)(`keeps an abandoned %i-poll job held on %s until new exact evidence through ${protocol}`, async (polls, variant) => {
     const { state, id } = await expiredActiveActivity(protocol, "activity", polls, NOW + 2 * 60 * 60_000 + 1);
     state.terminal = variant !== "active";
     if (variant === "403" || variant === "429") state.status = Number(variant);
@@ -1149,9 +1352,13 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     state.terminal = true; state.status = 200; state.sha = "a".repeat(40);
     vi.mocked(Date.now).mockReturnValue(NOW + 3 * 60 * 60_000); actor = crypto.randomUUID();
     const spent = { ...counts };
-    await call("sync_latest_activity", { expected_date: "2026-10-12", new_activity_expected: true }, protocol);
-    expect(counts.github_get).toBe(spent.github_get); expect(counts.github_post).toBe(spent.github_post);
-    expect(counts.r2_control_get).toBe(spent.r2_control_get);
+    const later = await call("sync_latest_activity", { expected_date: "2026-10-12", new_activity_expected: true }, protocol);
+    const recoverable = !["missing_receipt", "changed_receipt"].includes(variant);
+    expect(later.accepted).toBe(recoverable);
+    expect(counts.github_get - spent.github_get).toBe(recoverable ? 2 : 0);
+    expect(counts.github_post - spent.github_post).toBe(recoverable ? 1 : 0);
+    expect(counts.r2_control_get - spent.r2_control_get).toBe(recoverable ? 2 : variant === "missing_receipt" ? 1 : 0);
+    expect((await coordinator.dispatchOperation(id))!.owner_released_at).toEqual(recoverable ? expect.any(Number) : null);
   });
 
   it(`keeps one-poll readmission atomic across concurrent explicit requests through ${protocol}`, async () => {
