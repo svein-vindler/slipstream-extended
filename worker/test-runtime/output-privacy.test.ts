@@ -3,6 +3,7 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, expect, it as test, vi } from "vitest";
 import worker from "../src/index";
 import { PROTOCOL_VERSION_META_KEY, CLIENT_CAPABILITIES_META_KEY } from "@modelcontextprotocol/server";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { clearSummaryCaches } from "../src/r2-storage";
 
 const marker = "SYNTHETIC_PRIVATE token email@example.invalid GPS=1,2 health=77 2041-02-03 key/private\n\u001b[31m" + "x".repeat(1000);
@@ -109,6 +110,35 @@ async function call(name: string, args: unknown, protocol = "2025-03-26") {
   const line = body.split("\n").find(value => value.startsWith("data: "));
   return { body, media: response.headers.get("content-type"), status: response.status, message: JSON.parse(line ? line.slice(6) : body) };
 }
+it("keeps sanitized newest-protocol errors decodable by the installed v2 client", async () => {
+  const client = new Client({ name: "privacy-modern-client", version: "1" }, {
+    versionNegotiation: { mode: { pin: "2026-07-28" } },
+  });
+  const contexts: ExecutionContext[] = [];
+  const transport = new StreamableHTTPClientTransport(new URL("https://" + hostname + "/mcp"), {
+    requestInit: { headers: { host: hostname, "cf-access-jwt-assertion": token } },
+    fetch: async (url, init) => {
+      const ctx = createExecutionContext(); contexts.push(ctx);
+      return worker.fetch(new Request(String(url), init), testEnv, ctx);
+    },
+  });
+  try {
+    await client.connect(transport);
+    const guidance = await client.callTool({ name: "sleep_history", arguments: {
+      start_date: "2041-02-01", end_date: "2041-02-08", detail_level: "full",
+    } });
+    expect(guidance).toMatchObject({ isError: true, content: [{ type: "text",
+      text: "Full HRV readings or sleep stages are limited to 7 days per request." }] });
+    const failure = await client.callTool({ name: "hrv_curve", arguments: { date: "2041-02-03" } });
+    expect(failure).toMatchObject({ isError: true, content: [{ type: "text",
+      text: "The request could not be completed. Check arguments, access, configuration and service availability." }] });
+    expect(JSON.stringify({ guidance, failure, logs })).not.toContain("SYNTHETIC_PRIVATE");
+    expect(r2Calls).toEqual(["get"]); expect(githubCalls).toEqual([]);
+  } finally {
+    await client.close();
+    await Promise.all(contexts.map(ctx => waitOnExecutionContext(ctx)));
+  }
+});
 for (const protocol of ["2025-03-26", "2025-11-25", "2026-07-28"]) {
   for (const failure of ["error", "body", "json", "oversize"]) {
     it("sanitizes actual MCP R2 " + failure + " errors with protocol " + protocol, async () => {
@@ -254,7 +284,8 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       it("preserves " + name + " guidance: " + guidance + " in " + protocol, async () => {
         const result = await call(name, args, protocol);
         expect(result.status).toBe(200);
-        expect(result.message.result).toEqual({ content: [{ type: "text", text: guidance }], isError: true });
+        expect(result.message.result).toEqual({ content: [{ type: "text", text: guidance }], isError: true,
+          ...(protocol === "2026-07-28" ? { resultType: "complete" } : {}) });
         expect(r2Calls).toEqual([]); expect(githubCalls).toEqual([]); expect(logs).toEqual([]);
       });
     }
@@ -263,7 +294,8 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     it("preserves weight guidance: " + JSON.stringify(args) + " in " + protocol, async () => {
       const result = await call("weight_history", { start_date: "2041-02-01", end_date: "2041-02-01", ...args }, protocol);
       expect(result.status).toBe(200);
-      expect(result.message.result).toEqual({ content: [{ type: "text", text: guidance }], isError: true });
+      expect(result.message.result).toEqual({ content: [{ type: "text", text: guidance }], isError: true,
+        ...(protocol === "2026-07-28" ? { resultType: "complete" } : {}) });
       expect(result.body + JSON.stringify(logs)).not.toContain("SYNTHETIC_PRIVATE");
       expect(r2Calls).toEqual([]); expect(githubCalls).toEqual([]); expect(logs).toEqual([]);
     });
@@ -280,6 +312,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
     expect(result.message.result).toEqual({
       content: [{ type: "text", text: "Full HRV readings or sleep stages are limited to 7 days per request." }],
       isError: true,
+      ...(protocol === "2026-07-28" ? { resultType: "complete" } : {}),
     });
     expect(r2Calls).toEqual([]); expect(githubCalls).toEqual([]); expect(logs).toEqual([]);
   });
@@ -305,6 +338,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
         content: [{ type: "text", text: limit === "daily"
           ? "The daily MCP write safety limit has been reached. Retry in 43139 seconds."
           : "A similar write was accepted recently. Retry in 60 seconds." }], isError: true,
+        ...(protocol === "2026-07-28" ? { resultType: "complete" } : {}),
       });
       expect(r2Calls.filter(value => value === "put")).toHaveLength(2);
       expect(githubCalls).toEqual([]);
@@ -336,7 +370,8 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
         expect(result.status).toBe(200);
         expect(result.media).toContain(protocol === "2026-07-28" ? "application/json" : "text/event-stream");
         expect(result.message.result).toEqual({ content: [{ type: "text",
-          text: "The request could not be completed. Check arguments, access, configuration and service availability." }], isError: true });
+          text: "The request could not be completed. Check arguments, access, configuration and service availability." }], isError: true,
+          ...(protocol === "2026-07-28" ? { resultType: "complete" } : {}) });
         expect(result.body + JSON.stringify(logs)).not.toContain("SYNTHETIC_PRIVATE");
         expect(r2Calls).not.toContain("put"); expect(githubCalls).toEqual([]);
       });
@@ -400,7 +435,8 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) {
       const second = await call("add_activity_context", { activity_id: "garmin-123", rpe: 6 }, protocol);
       expect(second.message.result).toEqual({ content: [{ type: "text", text: limit === "daily"
         ? "The daily MCP write safety limit has been reached. Retry in 43189 seconds."
-        : "A similar write was accepted recently. Retry in 10 seconds." }], isError: true });
+        : "A similar write was accepted recently. Retry in 10 seconds." }], isError: true,
+        ...(protocol === "2026-07-28" ? { resultType: "complete" } : {}) });
       expect(r2Calls.filter(value => value === "put")).toHaveLength(1);
       expect(githubCalls).toEqual([]); expect(logs).toEqual([]);
     });

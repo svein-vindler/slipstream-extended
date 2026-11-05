@@ -186,7 +186,7 @@ async function rpc(protocol: string, method: string, params: Row) {
   expect(response.headers.get("referrer-policy")).toBe("no-referrer");
   const line = raw.split("\n").find(value => value.startsWith("data: "));
   const message = JSON.parse(line ? line.slice(6) : raw); expect(message.id).toBe(id); expect(message.error).toBeUndefined();
-  return { result: message.result, raw, id };
+  return { result: message.result, raw, id, protocol };
 }
 async function initialize(protocol: string) {
   // The installed 2026 transport is stateless and has no initialize handshake.
@@ -219,7 +219,8 @@ function controlledError(reply: Awaited<ReturnType<typeof rpc>>) {
     expect(JSON.parse(reply.result.content[0].text)).toEqual(value);
     return;
   }
-  expect(reply.result).toEqual({ content: [{ type: "text", text: FAILURE }], isError: true });
+  expect(reply.result).toEqual({ content: [{ type: "text", text: FAILURE }], isError: true,
+    ...(reply.protocol === "2026-07-28" ? { resultType: "complete" } : {}) });
 }
 function contractTest(name: string, body: () => Promise<void>) {
   it(name, body);

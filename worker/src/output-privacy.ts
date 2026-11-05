@@ -102,7 +102,11 @@ export function safeMcpMessage(message: JSONRPCMessage, guidance?: ApplicationTo
       error: { code: message.error.code, message: "The MCP request could not be completed." } };
   }
   if ("result" in message && message.result.isError === true) {
-    return { ...message, result: safeToolResult(message.result, guidance) };
+    const result = safeToolResult(message.result, guidance);
+    // SDK encoding precedes this transport projection; modern clients require
+    // this discriminator. Preserve only the known literal, never provider fields.
+    if (message.result.resultType === "complete") result.resultType = "complete";
+    return { ...message, result };
   }
   return message;
 }
