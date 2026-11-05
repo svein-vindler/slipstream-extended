@@ -28,23 +28,54 @@ def daily(job, args):
     ):
         raise Stop("explicit_bounded_run_required")
     initial = job.snapshot()
-    dates = list(
-        dict.fromkeys(row["date"] for row in initial["rows"] if row["status"] in {"pending", "ready"})
-    )[: args.max_dates]
+    previous = initial["baseline_refresh"]
+    previous_dates = previous.get("finalize_dates", [])
+    previous_complete = previous.get("cohort_complete", (
+        previous.get("status") in {"complete", "waiting_until_close"}
+        and previous.get("closed_pending") == 0
+        and not previous.get("held_periods") and not previous.get("blocked")
+    ))
+    continue_cohort = bool(previous_dates) and (
+        not previous_complete or any(
+            row["status"] in {"pending", "ready"} and row["date"] in previous_dates
+            for row in initial["rows"]
+        )
+    )
+    dates = list(dict.fromkeys(
+        row["date"] for row in initial["rows"]
+        if row["status"] in {"pending", "ready"}
+        and (not continue_cohort or row["date"] in previous_dates)
+    ))[: args.max_dates]
     source_needed = any(
         row["status"] == "pending" and row["date"] in dates for row in initial["rows"]
     )
     state = job.admission(args.plan_sha, args.resume, source=source_needed)
+    # Persisted cohort dates keep a stored-only continuation scoped to this
+    # round, rather than recalculating unrelated history in a multi-year plan.
+    cohort_dates = previous_dates if continue_cohort or not dates else dates
+    from .night_baseline_refresh import affected_periods
+
+    periods = set()
+    for row in initial["rows"]:
+        if row["date"] in cohort_dates:
+            periods.update(affected_periods(
+                "signals" if row["stream"] == "hr" else "hrv", row["date"]
+            ))
+    # One bounded slot per affected period also covers a known split product
+    # checkpoint. Requests/bytes still share the unchanged execution budget.
+    phase_limit = min(14, max(1, (len(dates) + 6) // 7 + len(periods)))
     http = phases = 0
-    execution_context = {}
+    # Keep the existing 256-GET allowance for independent destination checks.
+    execution_context = {"publication_get_limit": 2000}
     reports = []
     raw_deferred = False
 
-    def publish_phase(target_dates=None):
+    def publish_phase(target_dates=None, *, defer_references=False):
         nonlocal phases
         result = publish(
             job, args.plan_sha, confirm=True, target_dates=target_dates,
-            execution_context=execution_context, finalize_dates=dates or None,
+            execution_context=execution_context, finalize_dates=cohort_dates,
+            defer_references=defer_references,
         )
         phases += 1
         reports.append(result["baseline_refresh"])
@@ -87,7 +118,7 @@ def daily(job, args):
                 "daily_publication_phases": phases, "daily_baseline_reports": reports,
             }
         if any(row["status"] == "ready" and row["date"] in chunk for row in job.snapshot()["rows"]):
-            publish_phase(chunk)
+            publish_phase(chunk, defer_references=True)
         if any(
             row["status"] in {"ready", "pending"} and row["date"] in chunk
             for row in job.snapshot()["rows"]
@@ -97,30 +128,38 @@ def daily(job, args):
 
     # A previous report cannot prove today's queue/period closure. This ordinary
     # R2-only phase needs no Garmin credential and respects a source-only pause.
-    if not dates:
-        publish_phase([])
     if not raw_deferred:
-        while phases < 5 and reports:
+        # Raw chunks deliberately leave assembly for a fresh bounded phase after
+        # every selected canonical curve/index has its ACK and exact readback.
+        # Even an unknown pending count from a capacity checkpoint cannot consume
+        # this reserved first finishing slot.
+        publish_phase([])
+        while phases < phase_limit:
             reference = reports[-1]
+            progress = reference.get("periods_completed") or reference.get("products_written")
             if (
-                reference.get("status") != "bounded_pending"
-                or not reference.get("closed_pending")
-                or reference.get("held_periods")
-                or reference.get("blocked")
+                reference.get("cohort_complete")
+                or reference.get("status") not in {"bounded_pending", "held"}
+                or reference.get("cohort_closed_pending", reference.get("closed_pending")) == 0
+                or reference.get("cohort_held_periods", reference.get("held_periods"))
+                or reference.get("cohort_blocked", reference.get("blocked"))
+                or not progress
             ):
-                break
-            result = publish_phase([])
-            current = result["baseline_refresh"]
-            if not (current.get("periods_completed") or current.get("products_written")):
-                break  # A known capacity/no-progress result is not a retry loop.
+                break  # Known capacity/no progress stays pending, without retry.
+            publish_phase([])
 
     result = job.status()
     reference = result["baseline_refresh"]
-    references_complete = (
+    global_complete = (
         reference.get("status") in {"complete", "waiting_until_close"}
         and reference.get("closed_pending") == 0
         and not reference.get("held_periods")
         and not reference.get("blocked")
+    )
+    # An older journal without a bound cohort cannot turn an empty period
+    # filter into proof that its still-pending references have completed.
+    references_complete = (
+        reference.get("cohort_complete", global_complete) if cohort_dates else global_complete
     )
     return {
         **result,
