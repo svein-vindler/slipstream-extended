@@ -2,7 +2,7 @@
 -r requirements-backup.in
 
 pip-audit==2.10.1
-pytest==9.1.1
+pytest==9.2.0
 # Pytest requires this on Windows; keep the shared hash lock installable there.
 colorama==0.4.6 ; sys_platform == "win32"
 ruff==0.17.3
