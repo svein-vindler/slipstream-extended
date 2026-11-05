@@ -15,6 +15,8 @@ from .output_privacy import SafeArgumentParser
 
 def daily(job, args):
     """A bounded serial source/publication run, including closed references."""
+    if job.plan.get("quota_experiment") is not None:
+        raise Stop("experiment_requires_single_date_collect")
     from .history_collect import collect
     from .history_publish import publish
 
@@ -144,6 +146,12 @@ def main(argv=None):
     plan.add_argument(
         "--account", required=True, help="Same private GARMIN_ACCOUNT identity; never printed."
     )
+    plan.add_argument("--experiment-max-reloads", type=int,
+                      help="Opt-in immutable absolute rolling reload ceiling for this finite experiment.")
+    plan.add_argument("--experiment-max-http", type=int,
+                      help="Opt-in immutable absolute rolling HTTP ceiling for this finite experiment.")
+    plan.add_argument("--ledger", action="append", type=Path, default=[],
+                      help="Every original/manual/prior-experiment journal; required for experiment plans.")
     commands.add_parser("status", help="Offline verified local progress.")
     commands.add_parser("missing", help="Offline CSV of unresolved or unpublished targets.")
     pause = commands.add_parser(
@@ -193,6 +201,11 @@ def main(argv=None):
                 args.streams.split(","),
                 args.provider,
                 args.account,
+                experiment_limits=({"reloads": args.experiment_max_reloads,
+                                    "HTTP": args.experiment_max_http}
+                                   if args.experiment_max_reloads is not None
+                                   or args.experiment_max_http is not None else None),
+                ledger_paths=args.ledger,
             )
             print(json.dumps(job.status()))
         else:

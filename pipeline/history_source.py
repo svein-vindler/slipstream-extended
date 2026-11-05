@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from importlib.metadata import version
 from urllib.parse import parse_qs, urlsplit
+from zoneinfo import ZoneInfo
 
 from .history_canonical import prepare
 from .history_state import Stop, digest, write
@@ -59,6 +60,14 @@ class HistorySource:
         self.failed = False
         self.failure = None
         self.seen_identity = set()
+        self.calendar_counts = {"UTC": {}, "Europe/Oslo": {}}
+        self.reload_intent_UTC = self.reload_ACK_UTC = None
+
+    def _calendar(self, kind, instant):
+        for name in self.calendar_counts:
+            day = instant.astimezone(ZoneInfo(name)).date().isoformat()
+            counts = self.calendar_counts[name].setdefault(day, {"HTTP": 0, "reload_intent": 0, "reload_ACK": 0})
+            counts[kind] += 1
 
     def _sleep(self, seconds):
         started = self.clock.monotonic()
@@ -250,12 +259,18 @@ class HistorySource:
                 raise Stop("date_deadline")
             self.last = self.clock.monotonic()
             self.http_count += 1
+            sent_at = self.clock.now()
+            self._calendar("HTTP", sent_at)
+            if is_reload:
+                self.reload_intent_UTC = sent_at.isoformat()
+                self._calendar("reload_intent", sent_at)
             write(
                 self.folder / f"http-{self.http_count:02d}.json",
                 {
                     "attempt": self.http_count,
                     "kind": self.current if fitness or is_reload else "identity_auth",
                     "at_monotonic": self.last,
+                    "UTC": sent_at.isoformat(),
                 },
             )
             kwargs.update(stream=True, allow_redirects=False, timeout=(5, 20), verify=True)
@@ -353,6 +368,9 @@ class HistorySource:
                 if status == 204 and body:
                     raise Stop("unexpected_no_content_body")
                 if is_reload:
+                    acknowledged_at = self.clock.now()
+                    self.reload_ACK_UTC = acknowledged_at.isoformat()
+                    self._calendar("reload_ACK", acknowledged_at)
                     raise ReloadAck()
                 if (
                     fitness

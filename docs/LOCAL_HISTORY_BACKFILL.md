@@ -91,6 +91,62 @@ Personal API archive reload is unverified and unsupported; requesting it records
 `unsupported` without credentials or HTTP, and never switches to legacy.
 Personal ordinary supported HR/HRV reads keep using the existing adapter.
 
+## Explicit bounded quota experiment
+
+Ordinary plans keep the rolling **30 reload / 240 physical HTTP** ceiling.
+An explicitly authorized experiment uses a **new immutable plan**, not an edited
+or reset consumed plan. The CLI and `Job.create` bind its absolute rolling
+ceilings, at most seven new dates / 56 new HTTP, and the exact required input
+journal paths with their byte-prefix hashes. Include every original, manual and
+previous experiment journal; a missing, changed or truncated binding stops before
+credentials or source access. There is no global quota setting or provider fallback.
+
+For an initial seven-date window, with 30 reloads / 240 HTTP already observed,
+the absolute experiment ceilings are 37 / 296. The newest-first window below is
+29–23 April 2026, HR and HRV, legacy only (synthetic example dates):
+
+```bash
+python -m pipeline.history_backfill --state .granular/quota-experiment-01 plan --start 2026-04-23 --end 2026-04-29 --streams hr,hrv --provider legacy --account YOUR_PRIVATE_ACCOUNT --experiment-max-reloads 37 --experiment-max-http 296 --ledger PRIVATE_ORIGINAL_EVENTS.jsonl --ledger PRIVATE_MANUAL_EVENTS.jsonl --ledger PRIVATE_PREVIOUS_EXPERIMENT_EVENTS.jsonl
+```
+
+Use the real complete journal list; the example paths are placeholders, not a
+request to invent a previous experiment. Preserve all earlier counters and actual
+timestamps. Midnight does not refund the rolling allowance. A later deliberately
+bounded stage can use a new plan with larger absolute ceilings derived from the
+observed totals, without another code change, but must bind every prior journal
+and retain the same seven-date / 56-new-HTTP window. This is not permission for
+automatic successive plans or an unlimited until-stop loop.
+
+Qualify the source window and remaining rolling budget before pausing competing
+cloud jobs. Keep one actual source owner and finish competing jobs first. Execute
+only one ordinary bounded date at a time using the new plan's exact SHA:
+
+```bash
+python -m pipeline.history_backfill --state .granular/quota-experiment-01 collect --plan-sha PLAN_SHA256 --confirm-cloud-jobs-paused --archive-reload --max-dates 1 --max-http 8
+```
+
+Inspect the durable result before another separately authorized date. The first
+`empty_unresolved`, failure, denial, real rate limit or unknown result stops the
+experiment; a new plan must not retry that date or evade the stop. `daily` refuses
+experimental plans. Publish verified results separately through the existing
+R2-only `publish` command; do not replay already delivered source targets.
+
+The existing account binding and selected cached auth remain in use; no new
+credential or interactive login is required by this experiment option. All other
+contracts remain: eight HTTP per date including auth/identity, serial 1.5-second
+pacing, one date-bound reload, the full 120-second archive wait, bounded bodies
+and deadlines, preserved primary/cleanup/native evidence, actual single-writer
+control and restore, and unchanged R2 budgets, conditional writes and readback.
+
+An application ceiling is a **local cap**, not an observed Garmin quota. A
+native0 result with `empty_unresolved` establishes only missing readable detail;
+it does not prove429, a quota reset, or permanent absence. Keep actual provider
+HTTP outcomes separate from these local observations. New experiment evidence
+records actual UTC intent and ACK timestamps so rolling24-hour usage and calendar
+counts in both UTC and `Europe/Oslo` can be compared. Older journals with only
+date-close aggregate timestamps remain labeled aggregate-only evidence; they
+cannot supply invented per-send calendar timestamps or an unobserved ACK.
+
 ## One ordinary bounded local run
 
 After the offline plan and your normal provider/R2 setup, use one command to
