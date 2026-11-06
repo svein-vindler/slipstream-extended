@@ -116,17 +116,19 @@ def test_source_pause_does_not_block_stored_only_baseline_completion(
     assert result["counts"] == {"published": 1}
 
 
-def test_daily_five_phase_limit_reports_remaining_closed_work(monkeypatch):
+def test_daily_requires_explicit_continuation_for_unfinished_legacy_budget(monkeypatch):
     from datetime import date, timedelta
     from types import SimpleNamespace
 
+    import pytest
     from test_history_baseline_integration import memory_job
 
     from pipeline.history_backfill import daily
     from pipeline.history_publish import publish
+    from pipeline.history_state import Stop
 
     days = [(date(2025, 12, 28) + timedelta(days=offset)).isoformat() for offset in range(30)]
-    job, _ = memory_job(monkeypatch, [{"date": day, "stream": "hrv"} for day in days])
+    job, files = memory_job(monkeypatch, [{"date": day, "stream": "hrv"} for day in days])
     server = BaselineServer()
     configured_storage(monkeypatch, server)
     context = {"publication_get_limit": 2000}
@@ -134,32 +136,41 @@ def test_daily_five_phase_limit_reports_remaining_closed_work(monkeypatch):
         publish(job, job.plan_sha, confirm=True, store=sdk_store(server),
                 target_dates=days[offset:offset + 7], finalize_dates=days,
                 execution_context=context, defer_references=True)
-    assert job.status()["counts"] == {"published": 30}
-    # A lower configured write limit splits real product groups. A default
-    # stored-only call must still stop at its five-phase allowance, even when
-    # resuming the larger bound cohort, with known progress honestly pending.
-    monkeypatch.setenv("R2_MAX_WRITES_PER_RUN", "5")
+    previous = job.status()
+    assert previous["counts"] == {"published": 30}
+    assert previous["baseline_refresh"]["cohort_closed_pending"] > 0
+    receipts = {
+        name: body for name, body in files.items()
+        if name.endswith(("/RECEIPT.json", "/REMOTE-VERIFIED.json"))
+    }
+    calls, puts, objects = list(server.calls), list(server.puts), dict(server.objects)
+    source_events = [frame for frame in job.events()[0]
+                     if frame["event"]["type"] in {"date_reserved", "date_closed"}]
+    # A new ordinary daily allowance cannot upgrade an unfinished immutable
+    # 2000-GET receipt. Only the explicit receipt-bound continuation admits it.
     monkeypatch.delenv("GARMINTOKENS", raising=False)
     monkeypatch.delenv("GARMIN_PERSONAL_API_KEY", raising=False)
-    result = daily(job, SimpleNamespace(
-        confirm_cloud_jobs_paused=True, confirm_r2_write=True,
-        max_dates=7, max_http=56, plan_sha=job.plan_sha, resume=False,
-        archive_reload=False, ledger=[],
-    ))
-    assert result["daily_status"] == "baselines_pending"
-    assert result["daily_publication_phases"] == 5
-    assert result["baseline_refresh"]["cohort_closed_pending"] > 0
-    assert sum(row["products_written"] for row in result["daily_baseline_reports"]) > 0
-    assert result["daily_HTTP"] == 0 and not result["locked"]
+    with pytest.raises(Stop) as stopped:
+        daily(job, SimpleNamespace(
+            confirm_cloud_jobs_paused=True, confirm_r2_write=True,
+            max_dates=7, max_http=56, plan_sha=job.plan_sha, resume=False,
+            archive_reload=False, ledger=[],
+        ))
+    assert stopped.value.category == "unfinished_publication_round_requires_continuation"
+    result = job.status()
+    assert result["baseline_refresh"] == previous["baseline_refresh"]
+    assert not result["locked"]
     assert result["counts"] == {"published": 30}
+    assert [frame for frame in job.events()[0]
+            if frame["event"]["type"] in {"date_reserved", "date_closed"}] == source_events
+    assert server.calls == calls and server.puts == puts and server.objects == objects
+    assert {name: body for name, body in files.items()
+            if name.endswith(("/RECEIPT.json", "/REMOTE-VERIFIED.json"))} == receipts
     assert all(server.puts.count(f"health/hrv/{day[:4]}/{day[5:7]}/{day}.json") == 1 for day in days)
-    totals = result["daily_baseline_reports"][-1]["execution_totals"]
-    print(json.dumps({
-        "default_cap_ledger": "stored_only_bound_cohort",
-        "phases": result["daily_publication_phases"],
-        "cohort_closed_pending": result["baseline_refresh"]["cohort_closed_pending"],
-        "HTTP": result["daily_HTTP"], "totals": totals,
-    }, sort_keys=True))
+    totals = result["baseline_refresh"]["execution_totals"]
+    assert totals["publication_get_limit"] == context["publication_get_limit"] == 2000
+    assert totals["counts"] == context["counts"]
+    assert totals["body_bytes"] == context["body_bytes"]
     assert totals["counts"]["get"] <= 2000
     assert totals["counts"]["list"] + totals["counts"]["put"] <= 1000
     assert totals["body_bytes"] <= 10 * 1024 * 1024

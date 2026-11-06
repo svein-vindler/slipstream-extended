@@ -156,10 +156,12 @@ collect a bounded batch, publish its verified dates, and finish eligible closed 
 python -m pipeline.history_backfill daily --plan-sha PLAN_SHA256 --confirm-cloud-jobs-paused --confirm-r2-write --archive-reload
 ```
 
-The default remains seven dates and 56 source HTTP requests, in serial order.
+The default remains seven **new source dates** and 56 source HTTP requests, in serial order.
 Omit `--archive-reload` when you intend ordinary reads only. An explicitly ordered
 larger daily batch may use `--max-dates 30 --max-http 240`; it still runs bounded
-source/publication chunks of at most seven dates. It never walks an unbounded
+source/publication chunks of at most seven dates. Locally verified ready curves
+and a prior publication backlog are reused without consuming that new-date
+target. They still consume their actual publication allowance. It never walks an unbounded
 queue, starts a schedule or increases the source limits. Collection and
 publication remain separate phases: source reads only the selected Garmin
 credential, and publication reads only R2 credentials. Existing `collect`,
@@ -175,9 +177,8 @@ python -m pipeline.history_backfill daily --plan-sha PLAN_SHA256 --confirm-cloud
 Source/publication chunks checkpoint the raw curves and indexes first. Reference
 assembly waits until all selected raw chunks have checkpointed, then the same run drains up to
 two eligible closed ISO weeks (Monday–Sunday) or calendar months per phase.
-Default calls retain at most five publication phases. For an explicit selection
-larger than seven dates, the finite phase allowance is derived from raw chunks
-and affected periods, with at most fourteen phases for 30 dates. It reserves bounded reference
+Each durable daily round has at most fourteen publication phases, including
+reference-only finishing phases. It reserves bounded reference
 completion while the serial source chunks remain unchanged; the shared request
 and byte budgets still stop work earlier when needed.
 It reuses exact verified canonical source snapshots for initial calculation,
@@ -189,8 +190,11 @@ published from an unuploaded or stale source. Capacity, held work or a phase
 without progress stays pending rather than starting a retry loop.
 
 `daily_status=bounded_complete` means the selected raw work and its affected
-closed references completed. A stored-only continuation finishes the same bound
-cohort before selecting another source batch from a larger plan. Global queue
+closed references completed. The round durably binds its new-date selection,
+stored backlog and affected cohort. An unfinished invocation reuses that selection
+and its spent source/publication allowances after restart, rather than selecting
+another 30 dates. A completed round can admit the next finite selection without
+erasing cumulative counters or old receipts. Global queue
 counts remain visible; unrelated older pending periods are not recalculated or
 claimed complete by this round. An older journal without a bound cohort keeps
 closed references pending; the explicit `publish` command remains available
@@ -201,6 +205,18 @@ force a partial reference. Each actual phase report remains in
 `daily_baseline_reports`. A repeated all-published daily run can contact R2 to
 check closure; it does not collect Garmin again.
 
+With `--archive-reload`, the first HR or HRV channel still `empty_unresolved`
+after the bounded reload stops source work before another date. The other
+channel's verified bytes and actual date-native result are retained. Qualified
+R2-only finishing can publish those positive curves while source stays paused.
+The command returns exit 2 with `daily_status=source_stopped` and
+`daily_source_stop=empty_unresolved`; `last_run_status` still describes the
+latest actual phase, which may be publication. Reopening the same round does
+not clear the source stop or retry reference work automatically. Explicit
+`publish` remains available without source, and an explicitly admitted
+`daily --resume` can continue untouched targets without reloading the empty one.
+An empty channel is not evidence of Garmin quota exhaustion.
+
 These private paths become bound to the job. Later commands may omit the flags
 and reuse the bound list; an explicit replacement list must match it. Keep the
 original journals. The tool verifies their complete physical-line hash chains
@@ -208,6 +224,74 @@ and counts old, manual and new source usage together over a rolling 24 hours.
 Midnight does not reset the 30 reload/240 HTTP ceiling. Unknown reservations stay
 charged and cannot age into permission. This is an application ceiling, not a
 claim about Garmin's available quota or permission to start source work.
+
+For an authorized 30-new-date run, use:
+
+```bash
+python -m pipeline.history_backfill daily --plan-sha PLAN_SHA256 --confirm-cloud-jobs-paused --confirm-r2-write --archive-reload --max-dates 30 --max-http 240
+```
+
+There is no extra fixed 24-hour delay between round starts. If a previous run
+started late, validated persistent rolling usage determines the exact safe
+`daily_not_before`. The command can wait and resume untouched dates in the same
+day, with a default total wait allowance of 3600 seconds. `--max-wait-seconds`
+accepts 0..21600; zero returns known `source_budget_pending` immediately with
+the not-before time and exit 2. Waiting performs no Garmin/R2/GitHub calls, uses
+bounded local checks, and cannot reset source counters or retry a failed date.
+Real provider/operator pauses, unknown reservations and changed evidence still
+stop the run. `daily_new_date_target`, `daily_new_dates`,
+`daily_stored_dates_reused`, `daily_round` and `daily_wait_seconds` distinguish
+the admitted target from actual progress. Thirty is an operational target, not
+an established Garmin quota or a guarantee that every date contains both curves.
+
+Run the ordinary command once per admitted operator phase, using the existing
+selected credentials. It does not query GitHub quota/workflow inventory or ask
+for an interactive login per date. Do not add separate connection probes around
+every date. Native source children still perform their required guarded SDK
+authentication/account checks, counted in physical HTTP; their isolation and
+provider rejection rules are unchanged. An external operator must establish
+the exact cloud-workflow baseline once, stop overlapping jobs, and restore that
+same baseline only after physical terminal evidence. This CLI does not activate
+schedules or alter workflows. A scheduler's local trigger time is not a reset of
+rolling source usage or permission to overlap another owner.
+
+### Explicit reference-only continuation of an older cap
+
+A prior immutable receipt with a smaller publication cap is not silently
+upgraded by starting a fresh context or daily round. If known nonadmission left
+at most three already affected closed references pending, explicitly authorize
+their continuation from the same job and exact plan:
+
+```bash
+python -m pipeline.history_backfill --state PRIVATE_JOB daily --help
+python -m pipeline.history_backfill --state PRIVATE_JOB continue-publication --plan-sha PLAN_SHA256 --confirm-r2-write --prior-receipt-sha OLD_RECEIPT_SHA256 --independent-gets PRIOR_INDEPENDENT_GET_COUNT --period week/2020-W02 --period week/2020-W03 --period week/2020-W04
+```
+
+The example periods are synthetic placeholders; select only the actual bound
+pending references reported for that job. The admission binds purpose, job,
+plan, exact old receipt and journal tip, previous cumulative usage, independently
+metered GETs, target periods and the new finite allowance. It never reads Garmin,
+replaces raw source or edits an old receipt/cap. `continuation_status` separates
+`bounded_complete`, `references_pending` and `budget_pending`; incomplete results
+return exit 2. Retain `publication_continuation_sha256` and resume that admission:
+
+```bash
+python -m pipeline.history_backfill --state PRIVATE_JOB continue-publication --plan-sha PLAN_SHA256 --confirm-r2-write --continuation-sha CONTINUATION_SHA256
+```
+
+Selecting one of several eligible periods only completes that selection:
+`continuation_complete` and `continuation_status=bounded_complete` do not declare
+the original cohort finished. Admission and later receipts retain its original
+`finalize_dates` and closure evidence. `cohort_complete` and
+`original_cohort_complete` distinguish completion of that qualified cohort.
+Unfinished original periods remain bound to the carried usage during a later
+daily round; they cannot open a fresh resource baseline. Once the original
+cohort completes, unrelated global queue entries do not block a new baseline.
+
+Wrong job/plan/receipt, changed proof, an unresolved write/owner or a real new
+limit exhaustion remains stopped. Do not remove locks, rewrite receipts, refund
+usage or invoke lower-level publication helpers to continue. All old local
+source/R2 journals remain part of the installation's actual history.
 
 Already ready or published source targets are skipped without another Garmin
 read. A failed date retains the verified targets it completed before the stop,
@@ -253,7 +337,9 @@ python -m pipeline.history_backfill resume --plan-sha PLAN_SHA256 --confirm-clou
 Use `daily --resume` with the same explicit confirmations if you intend the
 combined bounded source/publication command after a known pause. An early resume
 sends zero HTTP and does not load credentials, including after a process restart. There is no hot polling, automatic next-day wake-up or automatic
-retry. Two fully empty bounded batches record `no_more_observed`; this is an
+retry. Without archive reload, two fully empty bounded batches record
+`no_more_observed`. With archive reload, the first unresolved channel records
+that source-only pause immediately, including when its sibling is positive. This is an
 observation pause, not proof of429 or permanent absence. Explicit resume can
 continue safe pending targets after that pause. Previously empty, failed,
 unsupported or rate-limited targets remain in the CSV; this version does not
@@ -346,14 +432,15 @@ with the existing 5 GiB / 100,000 object bucket ceiling (or lower configured lim
 Responses remain bounded (64 KiB error/PUT,512 KiB GET,1 MiB LIST), with 16 MiB
 raw / 32 MiB decoded totals, 1 MiB decoded objects and a 900 second job deadline.
 One R2Store shares its cached inventory throughout each publication phase.
-A default `daily` call keeps its five-phase ceiling, including reference-only
-completion. An explicit selection larger than seven dates derives its finite
-allowance from raw chunks plus affected periods (at most fourteen phases for
-30 dates). All phases share one physical execution counter with at most
-1000 class A operations (LIST+PUT), 2256 class B operations (GET/HEAD), and
-10 MiB attempted write bytes. Daily publication itself remains capped at 2000 GET/HEAD,
-leaving 256 of the total for independent destination checks; these checks still
-belong to the same operator budget. Every phase keeps the original limits and freshly
+A daily round keeps a fourteen-phase ceiling, including reference-only
+completion. All phases share monotonic physical execution counters across
+restart, with a round allowance of at most 1000 class A operations (LIST+PUT),
+6000 publication GET/HEAD plus a 256-GET independent verification reserve
+(6256 combined class B), and 10 MiB attempted write bytes. Per-round baselines
+do not erase cumulative usage; a new baseline requires a validated new round
+after completed work. Independent checks remain explicitly metered operator
+work, not an extra unbounded allowance or a claim about arbitrary clients.
+Every phase keeps the original limits and freshly
 inventories the bucket. Earlier live/controller consumption still belongs to the
 operator's standing budget; starting this command does not reset that journal. The source's rolling 30/240 ceiling
 is shared across all chunks; a new publication phase never resets it.

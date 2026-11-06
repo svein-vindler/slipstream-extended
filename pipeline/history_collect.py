@@ -26,6 +26,9 @@ def collect(
     ledger_paths=(),
     target_dates=None,
 ):
+    def instant():
+        return now() if callable(now) else now or datetime.now(timezone.utc)
+
     if (
         not confirm
         or type(max_dates) is not int
@@ -34,7 +37,7 @@ def collect(
         or not 1 <= max_http <= 56
     ):
         raise Stop("explicit_bounded_run_required")
-    state = job.admission(plan_sha, resume, now)
+    state = job.admission(plan_sha, resume, instant())
     limits = job.source_limits()
     experiment = job.plan.get("quota_experiment") is not None
     if experiment and (max_dates != 1 or max_http > 8 or not reload):
@@ -49,11 +52,13 @@ def collect(
         return job.status()
     from .history_state import rolling_usage
 
-    usage = rolling_usage(job, ledger_paths, now)
+    usage = rolling_usage(job, ledger_paths, instant())
     if usage["unknown_reservations"]:
         raise Stop("unknown_source_reservation_hold")
-    if usage["HTTP"] >= limits["HTTP"] or (reload and usage["reloads"] >= limits["reloads"]):
-        raise Stop("rolling_source_budget")
+    if usage["HTTP"] + min(8, max_http) > limits["HTTP"] or (
+        reload and usage["reloads"] >= limits["reloads"]
+    ):
+        raise Stop("rolling_source_budget", usage["next_date_not_before"])
     run = uuid.uuid4().hex
     nonce = uuid.uuid4().hex
     folder = job.folder / "runs" / run
@@ -61,7 +66,7 @@ def collect(
     owner = {"run": run, "plan": job.plan_sha, "phase": "collect", "nonce": digest(nonce.encode())}
     write(job.folder / "OWNER.lock", owner)
     try:
-        state = job.admission(plan_sha, resume, now, owner=owner)
+        state = job.admission(plan_sha, resume, instant(), owner=owner)
     except Stop:
         # This known preflight pause occurs before begin/credentials/source.
         if json.loads(read(job.folder / "OWNER.lock")) == owner:
@@ -115,10 +120,12 @@ def collect(
                 wait_started = time.monotonic()
                 time.sleep(1.5)  # Cross-child pacing; each child also uses monotonic pacing.
                 parent_wait += time.monotonic() - wait_started
-            usage = rolling_usage(job, ledger_paths, now)
+            usage = rolling_usage(job, ledger_paths, instant())
             if usage["unknown_reservations"]:
                 raise Stop("unknown_source_reservation_hold")
-            if usage["HTTP"] >= limits["HTTP"] or (reload and usage["reloads"] >= limits["reloads"]):
+            if usage["HTTP"] + min(8, max_http - http) > limits["HTTP"] or (
+                reload and usage["reloads"] >= limits["reloads"]
+            ):
                 terminal = "rolling_source_budget"
                 break
             target_streams = [r["stream"] for r in pending if r["date"] == day]
@@ -153,7 +160,7 @@ def collect(
                 {
                     "type": "date_reserved",
                     "id": reservation,
-                    "UTC": (now or datetime.now(timezone.utc)).isoformat(),
+                    "UTC": instant().isoformat(),
                     "HTTP_reserved": intent["max_http"],
                     "reload_reserved": int(reload),
                 }
@@ -219,7 +226,7 @@ def collect(
                 {
                     "type": "date_closed",
                     "id": reservation,
-                    "UTC": (now or datetime.now(timezone.utc)).isoformat(),
+                    "UTC": instant().isoformat(),
                     "physicalHTTP": receipt["HTTP"],
                     "reload_ACK": receipt.get("reload_ACK", 0),
                     "reload_intent": receipt.get("reload_intent", int(reload)),
@@ -228,22 +235,31 @@ def collect(
                 }
             )
             if experiment:
-                observed = rolling_usage(job, ledger_paths, now)
+                observed = rolling_usage(job, ledger_paths, instant())
                 job.append({"type": "quota_experiment_observation",
                             "rolling24h": {key: observed[key] for key in ("HTTP", "reloads")},
-                            "UTC": (now or datetime.now(timezone.utc)).isoformat()})
+                            "UTC": instant().isoformat()})
             empty_dates = 0 if positive else empty_dates + 1
             if experiment and (outcome.returncode != 0 or any(
                     row["status"] == "empty_unresolved" for row in receipt["targets"])):
                 job.append({"type": "quota_experiment_stop",
                             "reason": receipt.get("category", "empty_unresolved"),
-                            "UTC": (now or datetime.now(timezone.utc)).isoformat()})
+                            "UTC": instant().isoformat()})
             if outcome.returncode == 2:
                 terminal = receipt["category"]
                 if terminal == "rate_limited":
                     job.append(
                         {"type": "pause", "reason": terminal, "not_before": receipt["not_before"]}
                     )
+                break
+            if reload and not experiment and any(
+                row["status"] == "empty_unresolved" for row in receipt["targets"]
+            ):
+                # A completed date can retain one unresolved channel. Preserve
+                # its actual native proof and positive sibling, but stop source
+                # work before another date, including an unattended restart.
+                terminal = "empty_unresolved"
+                job.append({"type": "pause", "reason": "no_more_observed", "not_before": None})
                 break
         # Empty observations are neither a quota nor permanent absence. The
         # operator explicitly resumes; no automatic next day or retry loop.
