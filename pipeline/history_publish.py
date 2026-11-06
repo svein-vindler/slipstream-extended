@@ -782,11 +782,12 @@ def admit_continuation(
     if (not isinstance(cohort, list) or not cohort
             or any(not isinstance(day, str) for day in cohort)
             or len(set(cohort)) != len(cohort)
-            or not set(cohort) <= {row["date"] for row in state["rows"]}
             or not isinstance(closure_day, str)):
         raise Stop("continuation_cohort_unverified")
+    # The exact receipt cohort can include reused dates without source-plan rows.
+    # Only published plan rows below authorize the requested reference periods.
     try:
-        if date.fromisoformat(closure_day).isoformat() != closure_day:
+        if any(date.fromisoformat(day).isoformat() != day for day in [*cohort, closure_day]):
             raise ValueError()
     except ValueError:
         raise Stop("continuation_cohort_unverified") from None

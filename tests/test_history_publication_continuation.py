@@ -399,3 +399,73 @@ def test_continuation_holds_legacy_receipt_without_bound_cohort(monkeypatch):
     assert failure.value.category == "continuation_cohort_unverified"
     assert len(server.calls) == calls and files[str(job.folder / "events.jsonl")] == journal
     assert not any("publication-continuation-" in name for name in files)
+
+
+def test_continuation_preserves_reused_date_outside_source_plan(monkeypatch):
+    from pipeline.granular import gzip_json
+    from pipeline.history_canonical import prepare
+
+    monkeypatch.setenv("HEALTH_TIMEZONE", "Europe/Oslo")
+    day, reused = "2026-04-15", "2026-04-16"
+    job, files = memory_job(monkeypatch, [{"date": day, "stream": "hr"}])
+    server = BaselineServer()
+    reused_key = "health/signals/v1/2026/04/2026-04-16.json"
+    stored = (gzip_json(prepare("hr", reused, {
+        "calendarDate": reused, "heartRateValues": [[1776297600000, 56]],
+    })), '"already-published"')
+    server.objects[reused_key] = stored
+    initial = history_publish.publish(
+        job, job.plan_sha, confirm=True, store=sdk_store(server), defer_references=True,
+        finalize_dates=[day, reused], execution_context={"publication_get_limit": 2000},
+    )["baseline_refresh"]
+    receipts = {name: body for name, body in files.items() if name.endswith("/RECEIPT.json")}
+    receipt = next(body for body in receipts.values() if "baseline_refresh" in json.loads(body))
+    assert json.loads(receipt)["baseline_refresh"]["finalize_dates"] == [day, reused]
+    assert job.status()["counts"] == {"published": 1}
+    admission = history_publish.admit_continuation(
+        job, job.plan_sha, confirm=True, prior_receipt_sha256=digest(receipt),
+        independent_gets=7, period_names=["week/2026-W16", "month/2026-04"],
+    )
+    puts = len(server.puts)
+    for _ in range(4):
+        result = history_publish.publish(
+            job, job.plan_sha, confirm=True, store=sdk_store(server), target_dates=[],
+            continuation_sha256=admission,
+        )["baseline_refresh"]
+        if result["continuation_complete"]:
+            break
+    assert result["continuation_complete"] is True
+    assert result["finalize_dates"] == [day, reused]
+    assert result["execution_totals"]["counts"]["get"] > initial["execution_totals"]["counts"]["get"]
+    assert result["execution_totals"]["independent_gets"] == 7
+    assert all(not name.startswith("health/signals/") for name in server.puts[puts:])
+    assert server.objects[reused_key] == stored
+    assert all(files[name] == body for name, body in receipts.items())
+
+
+@pytest.mark.parametrize("extra,period,category", [
+    ("2026-02-30", "week/2026-W16", "continuation_cohort_unverified"),
+    ("20260416", "week/2026-W16", "continuation_cohort_unverified"),
+    ("2026-02-18", "week/2026-W08", "continuation_periods_outside_closed_cohort"),
+])
+def test_extra_receipt_dates_cannot_bypass_calendar_or_published_period_binding(monkeypatch, extra, period, category):
+    monkeypatch.setenv("HEALTH_TIMEZONE", "Europe/Oslo")
+    day = "2026-04-15"
+    job, files = memory_job(monkeypatch, [{"date": day, "stream": "hr"}])
+    server = BaselineServer()
+    history_publish.publish(
+        job, job.plan_sha, confirm=True, store=sdk_store(server), defer_references=True,
+        finalize_dates=[day, extra], execution_context={"publication_get_limit": 2000},
+    )
+    receipt = next(body for name, body in files.items() if name.endswith("/RECEIPT.json")
+                   and "baseline_refresh" in json.loads(body))
+    journal, calls = files[str(job.folder / "events.jsonl")], len(server.calls)
+    with pytest.raises(Stop) as failure:
+        history_publish.admit_continuation(
+            job, job.plan_sha, confirm=True, prior_receipt_sha256=digest(receipt),
+            independent_gets=7, period_names=[period],
+        )
+    assert failure.value.category == category
+    assert len(server.calls) == calls
+    assert files[str(job.folder / "events.jsonl")] == journal
+    assert not any("publication-continuation-" in name for name in files)
