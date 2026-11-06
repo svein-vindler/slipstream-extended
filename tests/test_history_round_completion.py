@@ -358,96 +358,71 @@ def test_thirty_date_daily_finishes_closed_references_with_shared_measured_budge
     assert repeat["daily_status"] == "bounded_complete"
     assert repeat["daily_HTTP"] == 0 and len(source_calls) == before_source
     assert server.puts == before_puts and len(server.calls) == before_wire + 1
-    assert repeat["baseline_refresh"]["execution_totals"]["counts"] == {
-        "get": 1,
-        "list": 0,
-        "put": 0,
+    repeat_totals = repeat["baseline_refresh"]["execution_totals"]
+    assert server.calls[before_wire:] == [("GET", QUEUE_KEY, {})]
+    assert repeat["baseline_refresh"]["publication_counts"] == {"get": 1, "list": 0, "put": 0}
+    assert repeat_totals["counts"] == {
+        "get": totals["counts"]["get"] + 1,
+        "list": totals["counts"]["list"],
+        "put": totals["counts"]["put"],
     }
-
-
-def test_daily_finishes_prior_cohort_before_collecting_later_pending_dates(monkeypatch):
-    import pytest
-    from test_history_baseline_integration import memory_job, sdk_store
-
-    monkeypatch.setenv("HEALTH_TIMEZONE", "UTC")
-    old_day, later_day = "2025-12-15", "2026-01-15"
-    targets = [
-        {"date": day, "stream": stream} for day in (old_day, later_day) for stream in ("hr", "hrv")
-    ]
-    job, _ = memory_job(monkeypatch, targets)
-    monkeypatch.setattr(history_collect, "write", history_publish.write)
-    monkeypatch.setattr(history_collect, "read", history_state.read)
-    for stream in ("hr", "hrv"):
-        job.append({"type": "target", "date": later_day, "stream": stream, "status": "pending"})
-    server = Server()
-    initial = history_publish.publish(
-        job,
-        job.plan_sha,
-        confirm=True,
-        store=sdk_store(server),
-        target_dates=[old_day],
-        finalize_dates=[old_day],
-        defer_references=True,
-    )
-    assert initial["counts"] == {"published": 2, "pending": 2}
-    assert initial["baseline_refresh"]["closed_pending"] == 3
-    first_raw = {
-        key: value
-        for key, value in server.objects.items()
-        if key.startswith(("health/signals/", "health/hrv/"))
-    }
-    source_calls = []
-
-    def source_process(*args, **kwargs):
-        source_calls.append(True)
-        pytest.fail("next source cohort started before prior closed references finished")
-
-    monkeypatch.setattr(history_collect.subprocess, "run", source_process)
-    native_client = boto3.client
-
-    def client_factory(*args, **kwargs):
-        client = native_client(*args, **kwargs)
-        client._endpoint.http_session.send = server.send
-        return client
-
-    monkeypatch.setattr(boto3, "client", client_factory)
-    for name, value in {
-        "CLOUDFLARE_ACCOUNT_ID": ACCOUNT,
-        "R2_BUCKET": BUCKET,
-        "R2_ACCESS_KEY_ID": "synthetic",
-        "R2_SECRET_ACCESS_KEY": "synthetic",
-    }.items():
-        monkeypatch.setenv(name, value)
-    args = SimpleNamespace(
-        confirm_cloud_jobs_paused=True,
-        confirm_r2_write=True,
-        max_dates=30,
-        max_http=240,
-        plan_sha=job.plan_sha,
-        resume=False,
-        archive_reload=False,
-        ledger=[],
-    )
-    result = history_backfill.daily(job, args)
-    assert result["daily_status"] == "bounded_complete"
-    assert result["daily_HTTP"] == 0 and not source_calls
-    assert result["counts"] == {"published": 2, "pending": 2}
-    assert result["baseline_refresh"]["finalize_dates"] == [old_day]
-    assert result["baseline_refresh"]["closed_pending"] == 0
-    assert {key: server.objects[key] for key in first_raw} == first_raw
-    assert Counter(
-        key for key in server.puts if key.startswith(("health/signals/", "health/hrv/"))
-    ) == Counter({key: 1 for key in first_raw})
-    wire = Counter(
+    repeat_wire = Counter(
         "list" if query.get("list-type") == ["2"] else "put" if method == "PUT" else "get"
         for method, _, query in server.calls
     )
-    assert result["baseline_refresh"]["execution_totals"]["counts"] == dict(wire)
-    assert (
-        result["baseline_refresh"]["execution_totals"]["body_bytes"]
-        >= initial["baseline_refresh"]["execution_totals"]["body_bytes"]
-    )
+    assert repeat_totals["counts"] == dict(repeat_wire)
+    assert repeat_totals["body_bytes"] == totals["body_bytes"]
+    final_run = next(frame["event"]["run"] for frame in reversed(job.events()[0])
+                     if frame["event"]["type"] == "end"
+                     and frame["event"].get("status") == "published")
+    receipt = json.loads(files[str(job.folder / "runs" / final_run / "REMOTE-VERIFIED.json")])
+    assert receipt["baseline_refresh"]["execution_totals"] == repeat_totals
+    print(json.dumps({"repeat_prior_totals": totals, "repeat_totals": repeat_totals,
+                      "repeat_physical_delta": server.calls[before_wire:]}))
 
+
+def test_daily_finishes_prior_cohort_and_collects_new_dates_without_rewrites(monkeypatch):
+    from daily_autonomy_fixture import daily_system, transport_counts
+
+    system = daily_system(monkeypatch)
+    job, server = system.job, system.server
+    old_day = "2025-12-27"
+    history_collect.collect(job, job.plan_sha, confirm=True, max_dates=1,
+                            target_dates=[old_day])
+    initial = history_publish.publish(
+        job, job.plan_sha, confirm=True,
+        target_dates=[old_day], finalize_dates=[old_day], defer_references=True,
+    )
+    assert initial["counts"] == {"published": 2, "pending": 60}
+    assert initial["baseline_refresh"]["closed_pending"] > 0
+    first_raw = {key: value for key, value in server.objects.items()
+                 if key.startswith(("health/signals/", "health/hrv/"))}
+    source_count = len(system.source_calls)
+    args = SimpleNamespace(
+        confirm_cloud_jobs_paused=True, confirm_r2_write=True,
+        max_dates=30, max_http=240, plan_sha=job.plan_sha,
+        resume=False, archive_reload=True, ledger=[],
+    )
+    result = history_backfill.daily(job, args)
+    # A pending prior publication cohort joins the new round. Its stored date
+    # cannot finish the daily target or trigger a duplicate source/raw write.
+    assert result["daily_status"] == "bounded_complete"
+    assert result["daily_HTTP"] == 210
+    assert result["counts"] == {"published": 62}
+    assert old_day not in {day for day, _, _ in system.source_calls[source_count:]}
+    assert len({day for day, _, _ in system.source_calls[source_count:]}) == 30
+    assert old_day in result["baseline_refresh"]["finalize_dates"]
+    assert len(result["baseline_refresh"]["finalize_dates"]) == 31
+    assert result["baseline_refresh"]["closed_pending"] == 0
+    wire = transport_counts(server.calls)
+    totals = result["baseline_refresh"]["execution_totals"]
+    assert totals["counts"] == {"get": wire["GET"] + wire["HEAD"],
+                                "list": wire["LIST"], "put": wire["PUT"]}
+    assert totals["body_bytes"] == server.attempted_write_bytes
+    assert totals["counts"]["get"] > initial["baseline_refresh"]["execution_totals"]["counts"]["get"]
+    assert {key: server.objects[key] for key in first_raw} == first_raw
+    assert Counter(key for key in server.puts if key in first_raw) == Counter(
+        {key: 1 for key in first_raw})
 
 def test_daily_with_unknown_legacy_cohort_keeps_closed_global_references_pending(monkeypatch):
     from test_history_baseline_integration import memory_job, sdk_store

@@ -286,7 +286,21 @@ def rolling_usage(job, ledger_paths=(), now=None):
                 }
             )
     _quota_events([frame["event"] for frame in job.events()[0]], reservations)
-    return {**_source_usage(reservations, instant), "journals": provenance, "window_hours": 24}
+    usage = _source_usage(reservations, instant)
+    limits = job.source_limits()
+    not_before = None
+    if not usage["unknown_reservations"]:
+        expiries = sorted({
+            utc(entry["closed"]["UTC"]) + timedelta(hours=24, microseconds=1)
+            for entry in reservations.values() if entry.get("closed")
+        })
+        for candidate in [instant, *(expiry for expiry in expiries if expiry > instant)]:
+            remaining = _source_usage(reservations, candidate)
+            if remaining["HTTP"] + 8 <= limits["HTTP"] and remaining["reloads"] + 1 <= limits["reloads"]:
+                not_before = candidate.isoformat()
+                break
+    return {**usage, "journals": provenance, "window_hours": 24,
+            "next_date_not_before": not_before}
 
 
 def _journal_events(data):

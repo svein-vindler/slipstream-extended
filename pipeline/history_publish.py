@@ -59,8 +59,21 @@ class StorageGuard:
         self.execution_context = execution_context if execution_context is not None else {}
         self.execution_context.setdefault("counts", {"get": 0, "list": 0, "put": 0})
         self.execution_context.setdefault("body_bytes", 0)
-        limit = self.execution_context.setdefault("publication_get_limit", 2256)
-        if type(limit) is not int or not 0 <= limit <= 2256:
+        limit = self.execution_context.setdefault("publication_get_limit", 6000)
+        if type(limit) is not int or not 0 <= limit <= 6000:
+            raise Stop("storage_execution_budget")
+        self.baseline = self.execution_context.setdefault("round_baseline", {
+            "counts": {"get": 0, "list": 0, "put": 0}, "body_bytes": 0,
+        })
+        independent = self.execution_context.setdefault("independent_gets", 0)
+        if (type(independent) is not int or not 0 <= independent <= 256
+                or any(type(self.execution_context["counts"].get(k)) is not int
+                       or type(self.baseline.get("counts", {}).get(k)) is not int
+                       or not 0 <= self.baseline["counts"][k] <= self.execution_context["counts"][k]
+                       for k in ("get", "list", "put"))
+                or type(self.execution_context["body_bytes"]) is not int
+                or type(self.baseline.get("body_bytes")) is not int
+                or not 0 <= self.baseline["body_bytes"] <= self.execution_context["body_bytes"]):
             raise Stop("storage_execution_budget")
         self.counts = {"get": 0, "list": 0, "put": 0}
         self.expected = {}
@@ -210,8 +223,9 @@ class StorageGuard:
                 raise Stop("storage_list_prefix")
         totals = self.execution_context["counts"]
         if (
-            totals["get"] + (kind == "get") > self.execution_context["publication_get_limit"]
-            or totals["list"] + totals["put"] + (kind in {"list", "put"}) > 1000
+            totals["get"] - self.baseline["counts"]["get"] + (kind == "get") > self.execution_context["publication_get_limit"]
+            or totals["get"] - self.baseline["counts"]["get"] + (kind == "get") + self.execution_context["independent_gets"] > 6256
+            or totals["list"] + totals["put"] - self.baseline["counts"]["list"] - self.baseline["counts"]["put"] + (kind in {"list", "put"}) > 1000
         ):
             self.failed = True
             raise Stop("storage_execution_budget")
@@ -244,7 +258,7 @@ class StorageGuard:
             if (
                 length < 0
                 or self.body_bytes + length > 2097152
-                or self.execution_context["body_bytes"] + length > 10485760
+                or self.execution_context["body_bytes"] - self.baseline["body_bytes"] + length > 10485760
             ):
                 raise Stop("storage_bytes")
             self.body_bytes += length
@@ -536,6 +550,9 @@ def _snapshot(store, object_key):
 def _reference_complete(reference):
     if "cohort_complete" in reference:
         return reference["cohort_complete"] is True
+    if "continuation_complete" in reference:
+        # A legacy selected-period receipt does not prove its original cohort.
+        return reference.get("original_cohort_complete") is True
     return (
         reference.get("status") in {"complete", "waiting_until_close"}
         and reference.get("closed_pending") == 0
@@ -561,6 +578,21 @@ def _completed_context(job, state, target_sha, execution_context, finalize_dates
     local_snapshots = {}
     cohort = set(finalize_dates) if finalize_dates is not None else None
     frames, journal_tip = job.events()
+    requested_round = execution_context.get("round")
+    round_start = None
+    if requested_round is not None:
+        starts = [frame for frame in frames if frame["event"].get("type") == "daily_round_started"
+                  and frame["event"].get("round") == requested_round]
+        if not re.fullmatch(r"[a-f0-9]{32}", requested_round) or len(starts) != 1:
+            raise Stop("publication_round_unverified")
+        round_start = starts[0]
+        event = round_start["event"]
+        if (not isinstance(event.get("dates"), list) or not isinstance(event.get("finalize_dates"), list)
+                or not set(event["dates"]) <= {r["date"] for r in state["rows"]}
+                or not set(event["finalize_dates"]) <= {r["date"] for r in state["rows"]}):
+            raise Stop("publication_round_unverified")
+    latest_end_sequence = None
+    legacy_phases = 0
     for frame in frames:
         event = frame["event"]
         if event["type"] == "begin":
@@ -608,13 +640,16 @@ def _completed_context(job, state, target_sha, execution_context, finalize_dates
                 ) for target, destination in zip(targets, destinations, strict=True)
             ):
                 raise Stop("publication_checkpoint_unverified")
+            legacy_phases += 1
             latest = receipt
+            latest_end_sequence = frame["sequence"]
             reference = receipt.get("baseline_refresh", {})
             if not isinstance(reference, dict):
                 raise Stop("publication_checkpoint_unverified")
             complete = _reference_complete(reference)
             same_cohort = cohort is not None and reference.get("finalize_dates") == sorted(cohort)
             if complete and not same_cohort:
+                legacy_phases = 0
                 local_snapshots.clear()
                 continue
             for ordinal, destination in enumerate(destinations):
@@ -661,42 +696,172 @@ def _completed_context(job, state, target_sha, execution_context, finalize_dates
     cache.update(local_snapshots)
     if latest is not None:
         reference = latest.get("baseline_refresh", {})
-        if not (
-            _reference_complete(reference) and not any(
-                row["status"] in {"ready", "pending"}
-                and row["date"] in reference.get("finalize_dates", [])
-                for row in state["rows"]
-            )
-        ):
+        complete = _reference_complete(reference) and not any(
+            row["status"] in {"ready", "pending"}
+            and row["date"] in reference.get("finalize_dates", []) for row in state["rows"]
+        )
+        if not complete or requested_round is not None or execution_context.get("continuation_sha256") is not None:
             totals = reference.get("execution_totals", {})
             counts = totals.get("counts", {})
-            if all(type(counts.get(kind)) is int and counts[kind] >= 0 for kind in ("get", "list", "put")) and (
-                type(totals.get("body_bytes")) is int and totals["body_bytes"] >= 0
-            ):
-                limit = totals.get("publication_get_limit", 2256)
-                if type(limit) is not int or not 0 <= limit <= 2256:
-                    raise Stop("publication_checkpoint_unverified")
-                execution_context["publication_get_limit"] = min(
-                    execution_context.get("publication_get_limit", 2256), limit
-                )
-                current = execution_context.setdefault("counts", {"get": 0, "list": 0, "put": 0})
-                for kind in ("get", "list", "put"):
-                    current[kind] = max(current[kind], counts[kind])
-                execution_context["body_bytes"] = max(
-                    execution_context.get("body_bytes", 0), totals["body_bytes"]
-                )
-            else:
+            if not (all(type(counts.get(kind)) is int and counts[kind] >= 0
+                        for kind in ("get", "list", "put"))
+                    and type(totals.get("body_bytes")) is int and totals["body_bytes"] >= 0):
                 raise Stop("publication_checkpoint_unverified")
+            limit = totals.get("publication_get_limit", 2256)
+            if type(limit) is not int or not 0 <= limit <= 6000:
+                raise Stop("publication_checkpoint_unverified")
+            new_round = requested_round is not None and totals.get("round") != requested_round
+            joining_round = new_round and not complete and totals.get("round") is None and limit == 6000
+            if new_round and ((not complete and not joining_round) or round_start["sequence"] <= latest_end_sequence):
+                raise Stop("unfinished_publication_round_requires_continuation")
+            if joining_round and not set(reference.get("finalize_dates", [])) <= set(finalize_dates or []):
+                raise Stop("unfinished_publication_cohort_changed")
+            prior_continuation = totals.get("continuation_sha256")
+            if not new_round and prior_continuation and execution_context.get("continuation_sha256") != prior_continuation:
+                raise Stop("explicit_continuation_required")
+            if new_round and not joining_round:
+                execution_context["round_baseline"] = {
+                    "counts": dict(counts), "body_bytes": totals["body_bytes"],
+                }
+                execution_context["phases"] = 0
+                execution_context["independent_gets"] = 0
+            else:
+                execution_context["publication_get_limit"] = min(
+                    execution_context.get("publication_get_limit", 6000), limit
+                )
+                if "round_baseline" in totals:
+                    execution_context["round_baseline"] = totals["round_baseline"]
+                execution_context["phases"] = max(execution_context.get("phases", 0), totals.get("phases", legacy_phases))
+                execution_context["independent_gets"] = max(
+                    execution_context.get("independent_gets", 0), totals.get("independent_gets", 0)
+                )
+            current = execution_context.setdefault("counts", {"get": 0, "list": 0, "put": 0})
+            for kind in ("get", "list", "put"):
+                current[kind] = max(current[kind], counts[kind])
+            execution_context["body_bytes"] = max(execution_context.get("body_bytes", 0), totals["body_bytes"])
     return journal_tip
 
 
+def admit_continuation(
+    job, plan_sha, *, confirm=False, prior_receipt_sha256, independent_gets, period_names,
+):
+    """Freeze an explicit R2-only extension of one known terminal legacy round."""
+    from .night_baseline_refresh import affected_periods, is_closed
+
+    if not confirm:
+        raise Stop("explicit_storage_phase_required")
+    state = job.admission(plan_sha, source=False)
+    periods = sorted(set(period_names))
+    if (
+        not 1 <= len(periods) <= 3 or len(periods) != len(period_names)
+        or any(not re.fullmatch(r"(?:week/[0-9]{4}-W[0-9]{2}|month/[0-9]{4}-[0-9]{2})", name)
+               for name in periods)
+        or type(independent_gets) is not int or not 0 <= independent_gets <= 256
+        or not re.fullmatch(r"[a-f0-9]{64}", prior_receipt_sha256)
+    ):
+        raise Stop("continuation_binding_unverified")
+    target_sha = json.loads(read(job.folder / "storage-target.json"))["target_sha256"]
+    context = {}
+    tip = _completed_context(job, state, target_sha, context, None)
+    frames, _ = job.events()
+    runs = [frame["event"]["run"] for frame in frames
+            if frame["event"]["type"] == "end" and frame["event"]["status"] == "published"]
+    if not runs:
+        raise Stop("continuation_binding_unverified")
+    receipt_bytes = read(job.folder / "runs" / runs[-1] / "RECEIPT.json")
+    receipt = json.loads(receipt_bytes)
+    if (
+        digest(receipt_bytes) != prior_receipt_sha256
+        or context.get("publication_get_limit") != 2000
+        or _reference_complete(receipt["baseline_refresh"])
+        or any(frame["event"]["type"] == "publication_continuation" for frame in frames)
+    ):
+        raise Stop("continuation_binding_unverified")
+    reference = receipt["baseline_refresh"]
+    cohort, closure_day = reference.get("finalize_dates"), reference.get("closure_day")
+    if (not isinstance(cohort, list) or not cohort
+            or any(not isinstance(day, str) for day in cohort)
+            or len(set(cohort)) != len(cohort)
+            or not set(cohort) <= {row["date"] for row in state["rows"]}
+            or not isinstance(closure_day, str)):
+        raise Stop("continuation_cohort_unverified")
+    try:
+        if date.fromisoformat(closure_day).isoformat() != closure_day:
+            raise ValueError()
+    except ValueError:
+        raise Stop("continuation_cohort_unverified") from None
+    allowed = set()
+    for row in state["rows"]:
+        if row["status"] == "published" and row["date"] in cohort:
+            allowed.update(name for name, period in affected_periods(
+                "signals" if row["stream"] == "hr" else "hrv", row["date"]
+            ).items() if is_closed(period, closure_day))
+    if not set(periods) <= allowed:
+        raise Stop("continuation_periods_outside_closed_cohort")
+    admission = {
+        "schema": 1, "purpose": "pending_references_only", "job": str(job.folder),
+        "plan_sha256": plan_sha, "target_sha256": target_sha, "journal_tip": tip,
+        "prior_receipt_sha256": prior_receipt_sha256, "prior_run": runs[-1],
+        "prior_usage": {"counts": dict(context["counts"]), "body_bytes": context["body_bytes"],
+                        "publication_get_limit": 2000, "phases": context.get("phases", 0)},
+        "independent_gets": independent_gets, "period_names": periods,
+        "finalize_dates": sorted(cohort), "closure_day": closure_day,
+        "publication_get_limit": 6000, "total_get_limit": 6256,
+        "class_a_limit": 1000, "body_bytes_limit": 10485760, "phase_limit": 14,
+    }
+    from .history_state import encoded
+
+    sha = digest(encoded(admission))
+    write(job.folder / ("publication-continuation-" + sha + ".json"), admission)
+    job.append({"type": "publication_continuation", "sha256": sha})
+    return sha
+
+
+def _continuation(job, sha):
+    if not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{64}", sha):
+        raise Stop("continuation_binding_unverified")
+    body = read(job.folder / ("publication-continuation-" + sha + ".json"))
+    admission = json.loads(body)
+    frames, _ = job.events()
+    matches = [frame for frame in frames if frame["event"] == {
+        "type": "publication_continuation", "sha256": sha,
+    }]
+    if (
+        digest(body) != sha or len(matches) != 1
+        or matches[0]["previous"] != admission.get("journal_tip")
+        or admission.get("job") != str(job.folder) or admission.get("plan_sha256") != job.plan_sha
+        or admission.get("purpose") != "pending_references_only"
+        or admission.get("publication_get_limit") != 6000
+        or admission.get("total_get_limit") != 6256 or admission.get("phase_limit") != 14
+        or admission.get("class_a_limit") != 1000 or admission.get("body_bytes_limit") != 10485760
+        or digest(read(job.folder / "runs" / admission["prior_run"] / "RECEIPT.json"))
+        != admission.get("prior_receipt_sha256")
+    ):
+        raise Stop("continuation_binding_unverified")
+    # Older immutable admissions omitted this binding. Recover it only from the
+    # exact original receipt already pinned above, without rewriting old bytes.
+    prior = json.loads(read(job.folder / "runs" / admission["prior_run"] / "RECEIPT.json"))
+    original = prior["baseline_refresh"]
+    for field in ("finalize_dates", "closure_day"):
+        if field in admission and admission[field] != original.get(field):
+            raise Stop("continuation_cohort_unverified")
+        admission[field] = original.get(field)
+    return admission
+
 def publish(
     job, plan_sha, *, confirm=False, store=None, target_dates=None, execution_context=None,
-    finalize_dates=None, defer_references=False,
+    finalize_dates=None, defer_references=False, continuation_sha256=None,
 ):
     if not confirm:
         raise Stop("explicit_storage_phase_required")
     state = job.admission(plan_sha, source=False)
+    continuation = _continuation(job, continuation_sha256) if continuation_sha256 else None
+    if continuation is not None:
+        if target_dates not in (None, []) or finalize_dates is not None or defer_references:
+            raise Stop("continuation_references_only")
+        target_dates = []
+        execution_context = execution_context if execution_context is not None else {}
+        execution_context["continuation_sha256"] = continuation_sha256
     ready = [
         r
         for r in state["rows"]
@@ -798,6 +963,25 @@ def _publish_store(
     if execution_context is None:
         execution_context = {}
     context_tip = _completed_context(job, state, target_sha, execution_context, finalize_dates)
+    continuation_sha = execution_context.get("continuation_sha256")
+    continuation = _continuation(job, continuation_sha) if continuation_sha else None
+    if continuation is not None:
+        if continuation["target_sha256"] != target_sha:
+            raise Stop("continuation_binding_unverified")
+        finalize_dates = continuation["finalize_dates"]
+        execution_context["publication_get_limit"] = 6000
+        execution_context["independent_gets"] = continuation["independent_gets"]
+        for kind in ("get", "list", "put"):
+            execution_context["counts"][kind] = max(
+                execution_context["counts"][kind], continuation["prior_usage"]["counts"][kind]
+            )
+        execution_context["body_bytes"] = max(
+            execution_context["body_bytes"], continuation["prior_usage"]["body_bytes"]
+        )
+    phases = execution_context.get("phases", 0)
+    if type(phases) is not int or not 0 <= phases < 14:
+        raise Stop("storage_execution_phase_budget")
+    execution_context["phases"] = phases + 1
     run = uuid.uuid4().hex
     folder = job.folder / "runs" / run
     owner = {"run": run, "plan": plan_sha, "phase": "publish"}
@@ -1035,6 +1219,8 @@ def _publish_store(
                     period_names.difference_update(affected_periods(
                         "signals" if row["stream"] == "hr" else "hrv", row["date"]
                     ))
+        if continuation is not None:
+            period_names = set(continuation["period_names"])
         raw_destinations = [
             {
                 "date": r["date"], "stream": r["stream"], "key": k, "revision": rev, "sha256": sha,
@@ -1057,6 +1243,13 @@ def _publish_store(
             reference_store, snapshot_cache=snapshot_cache,
             period_names=set() if defer_references else period_names,
         )
+        if continuation is not None:
+            rows = reference_store.queue_rows
+            pending_names = sorted(set(rows or {}) & set(continuation["period_names"]))
+            baseline_report.update(
+                continuation_periods=continuation["period_names"], continuation_pending=pending_names,
+                continuation_complete=bool(rows is not None and not pending_names),
+            )
         if defer_references:
             baseline_report["reference_work_deferred"] = True
         if finalize_dates is not None:
@@ -1072,7 +1265,8 @@ def _publish_store(
                         row["stream"], row["date"]
                     ) not in delivered
             rows = reference_store.queue_rows
-            closure_day = baseline_report.get("closure_day")
+            closure_day = (continuation["closure_day"] if continuation is not None
+                           else baseline_report.get("closure_day"))
             known = rows is not None and type(baseline_report.get("pending")) is int
             pending = {name: row for name, row in (rows or {}).items() if name in cohort_names}
             known = known and (not pending or closure_day is not None)
@@ -1089,6 +1283,11 @@ def _publish_store(
                 cohort_blocked=blocked,
                 cohort_complete=bool(known and not raw_pending and closed == 0 and not held and not blocked),
             )
+            if continuation is not None:
+                baseline_report.update(
+                    original_cohort_complete=baseline_report["cohort_complete"],
+                    original_cohort_closure_day=closure_day,
+                )
         evidence = {
             "status": "remote_verified_cleanup_pending",
             "run": run, "plan_sha256": plan_sha, "target_sha256": target_sha,
@@ -1100,6 +1299,11 @@ def _publish_store(
                     "counts": dict(guard.execution_context["counts"]),
                     "body_bytes": guard.execution_context["body_bytes"],
                     "publication_get_limit": guard.execution_context["publication_get_limit"],
+                    "phases": guard.execution_context["phases"],
+                    "round_baseline": guard.execution_context["round_baseline"],
+                    **({"round": guard.execution_context["round"]} if "round" in guard.execution_context else {}),
+                    "independent_gets": guard.execution_context.get("independent_gets", 0),
+                    **({"continuation_sha256": continuation_sha} if continuation_sha else {}),
                 },
                 "sources_queued": queued,
                 "source_targets_deferred": selected_count - len(done),

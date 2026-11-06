@@ -7,69 +7,131 @@ import csv
 import io
 import json
 import logging
+import uuid
 from pathlib import Path
 
 from .history_state import DurabilityError, Job, Stop, write
 from .output_privacy import SafeArgumentParser
 
 
-def daily(job, args):
+def daily(job, args, *, clock=None):
     """A bounded serial source/publication run, including closed references."""
     if job.plan.get("quota_experiment") is not None:
         raise Stop("experiment_requires_single_date_collect")
     from .history_collect import collect
     from .history_publish import publish
+    from .history_source import Clock
+    from .history_state import rolling_usage, utc
+
+    clock = clock or Clock()
+    wait_limit = getattr(args, "max_wait_seconds", 3600)
 
     if (
         not args.confirm_cloud_jobs_paused
         or not args.confirm_r2_write
         or not 1 <= args.max_dates <= 30
         or not 1 <= args.max_http <= 240
+        or type(wait_limit) is not int or not 0 <= wait_limit <= 21600
     ):
         raise Stop("explicit_bounded_run_required")
-    initial = job.snapshot()
+    initial = job.admission(args.plan_sha, args.resume, source=False)
     previous = initial["baseline_refresh"]
     previous_dates = previous.get("finalize_dates", [])
-    previous_complete = previous.get("cohort_complete", (
+    previous_complete = previous.get("original_cohort_complete", previous.get("cohort_complete", (
         previous.get("status") in {"complete", "waiting_until_close"}
         and previous.get("closed_pending") == 0
         and not previous.get("held_periods") and not previous.get("blocked")
-    ))
+    )))
     continue_cohort = bool(previous_dates) and (
         not previous_complete or any(
             row["status"] in {"pending", "ready"} and row["date"] in previous_dates
             for row in initial["rows"]
         )
     )
-    dates = list(dict.fromkeys(
-        row["date"] for row in initial["rows"]
-        if row["status"] in {"pending", "ready"}
-        and (not continue_cohort or row["date"] in previous_dates)
-    ))[: args.max_dates]
-    source_needed = any(
-        row["status"] == "pending" and row["date"] in dates for row in initial["rows"]
-    )
-    state = job.admission(args.plan_sha, args.resume, source=source_needed)
+    # The durable round owns a fixed selection across process restarts. Stored
+    # curves and a prior publication cohort never consume the new-source goal.
+    active_round = None
+    round_start = 0
+    frames = job.events()[0]
+    for index, frame in enumerate(frames):
+        event = frame["event"]
+        if event["type"] == "daily_round_started":
+            if active_round is not None:
+                raise Stop("daily_round_unclosed")
+            active_round, round_start = event, index + 1
+        elif event["type"] == "daily_round_finished":
+            if active_round is None or active_round["round"] != event["round"]:
+                raise Stop("daily_round_binding_changed")
+            active_round = None
+    if active_round is None:
+        stored_dates = list(dict.fromkeys(
+            row["date"] for row in initial["rows"] if row["status"] == "ready"
+        ))
+        source_dates = list(dict.fromkeys(
+            row["date"] for row in initial["rows"]
+            if row["status"] == "pending" and row["date"] not in stored_dates
+        ))[:args.max_dates]
+        dates = list(dict.fromkeys(stored_dates + source_dates))
+        cohort_dates = list(dict.fromkeys(
+            (previous_dates if continue_cohort else []) + dates
+        ))
+        active_round = {
+            "type": "daily_round_started", "round": uuid.uuid4().hex,
+            "dates": dates, "new_dates": source_dates, "stored_dates": stored_dates,
+            "finalize_dates": cohort_dates, "max_dates": args.max_dates,
+            "max_http": args.max_http,
+        }
+        job.append(active_round)
+        round_start = len(job.events()[0])
+    elif (active_round["max_dates"], active_round["max_http"]) != (args.max_dates, args.max_http):
+        raise Stop("daily_round_parameters_changed")
+    planned_dates = {row["date"] for row in job.plan["targets"]}
+    if (
+        not isinstance(active_round.get("round"), str)
+        or len(active_round["round"]) != 32
+        or any(char not in "0123456789abcdef" for char in active_round["round"])
+        or any(
+            not isinstance(active_round.get(field), list)
+            or any(not isinstance(day, str) or day not in planned_dates for day in active_round[field])
+            or len(set(active_round[field])) != len(active_round[field])
+            for field in ("dates", "new_dates", "stored_dates", "finalize_dates")
+        )
+        or not set(active_round["new_dates"]) <= set(active_round["dates"])
+        or not set(active_round["stored_dates"]) <= set(active_round["dates"])
+        or set(active_round["new_dates"]) & set(active_round["stored_dates"])
+        or not set(active_round["dates"]) <= set(active_round["finalize_dates"])
+        or len(active_round["new_dates"]) > args.max_dates
+    ):
+        raise Stop("daily_round_binding_changed")
+    dates = active_round["dates"]
+    cohort_dates = active_round["finalize_dates"]
+    source_dates = active_round["new_dates"]
+    state = initial
     # Persisted cohort dates keep a stored-only continuation scoped to this
     # round, rather than recalculating unrelated history in a multi-year plan.
-    cohort_dates = previous_dates if continue_cohort or not dates else dates
-    from .night_baseline_refresh import affected_periods
-
-    periods = set()
-    for row in initial["rows"]:
-        if row["date"] in cohort_dates:
-            periods.update(affected_periods(
-                "signals" if row["stream"] == "hr" else "hrv", row["date"]
-            ))
     # One bounded slot per affected period also covers a known split product
     # checkpoint. Requests/bytes still share the unchanged execution budget.
-    phase_cap = 5 if args.max_dates <= 7 else 14
-    phase_limit = min(phase_cap, max(1, (len(dates) + 6) // 7 + len(periods)))
-    http = phases = 0
+    phase_limit = 14
+    round_events = [frame["event"] for frame in job.events()[0][round_start:]]
+    source_stop = None
+    for event in round_events:
+        if event["type"] == "end" and event.get("status") == "empty_unresolved":
+            source_stop = "empty_unresolved"
+        elif event["type"] == "resume":
+            source_stop = None
+    if source_stop is not None and args.resume:
+        # Explicit resume still uses the ordinary pause/clock/owner admission.
+        # Collect records the actual resume only when it can start safely.
+        job.admission(args.plan_sha, True, clock.now())
+        source_stop = None
+    http = sum(event["physicalHTTP"] for event in round_events if event["type"] == "date_closed")
     # Keep the existing 256-GET allowance for independent destination checks.
-    execution_context = {"publication_get_limit": 2000}
-    reports = []
+    execution_context = {"publication_get_limit": 6000, "round": active_round["round"]}
+    reports = [event["report"] for event in round_events if event["type"] == "reference_refresh"]
+    phases = len(reports)
     raw_deferred = False
+    wait_seconds = 0.0
+    next_source = None
 
     def publish_phase(target_dates=None, *, defer_references=False):
         nonlocal phases
@@ -82,15 +144,66 @@ def daily(job, args):
         reports.append(result["baseline_refresh"])
         return result
 
+    def result_fields():
+        closed_dates = {
+            frame["event"]["id"].rsplit(":", 1)[-1]
+            for frame in job.events()[0][round_start:]
+            if frame["event"]["type"] == "date_closed"
+        }
+        return {
+            "daily_HTTP": http, "daily_publication_phases": phases,
+            "daily_baseline_reports": reports,
+            "daily_new_date_target": active_round["max_dates"],
+            "daily_new_dates": len(closed_dates.intersection(source_dates)),
+            "daily_stored_dates_reused": len(active_round["stored_dates"]),
+            "daily_round": active_round["round"],
+            "daily_wait_seconds": wait_seconds,
+            "daily_not_before": next_source,
+            "daily_source_stop": source_stop,
+        }
+
+    def source_admitted():
+        nonlocal wait_seconds, next_source
+        # A real provider/operator pause is never converted into a local wait.
+        # Only expiry of fully closed, validated rolling usage can resume here.
+        while True:
+            job.admission(args.plan_sha, args.resume, clock.now())
+            usage = rolling_usage(job, args.ledger, clock.now())
+            if usage["unknown_reservations"]:
+                raise Stop("unknown_source_reservation_hold")
+            next_source = usage["next_date_not_before"]
+            if next_source is None:
+                raise Stop("unknown_source_reservation_hold")
+            remaining = (utc(next_source) - clock.now()).total_seconds()
+            if remaining <= 0:
+                next_source = None
+                return True
+            allowance = wait_limit - wait_seconds
+            if allowance <= 0 or remaining > allowance:
+                return False
+            duration = min(60.0, remaining)
+            started = clock.monotonic()
+            clock.sleep(duration)
+            elapsed = clock.monotonic() - started
+            if elapsed <= 0:
+                raise Stop("source_wait_clock_unknown")
+            wait_seconds += elapsed
+
     for offset in range(0, len(dates), 7):
+        if source_stop is not None:
+            break
         chunk = dates[offset : offset + 7]
         pending = any(
             row["status"] == "pending" and row["date"] in chunk for row in job.snapshot()["rows"]
         )
-        if pending:
+        while pending:
             if http >= args.max_http:
                 raw_deferred = True
                 break
+            if not source_admitted():
+                return {
+                    **job.status(), "daily_status": "source_budget_pending", **result_fields(),
+                }
             before = len(job.events()[0])
             result = collect(
                 job,
@@ -102,23 +215,35 @@ def daily(job, args):
                 max_http=min(56, args.max_http - http),
                 ledger_paths=args.ledger,
                 target_dates=chunk,
+                now=clock.now,
             )
             http += sum(
                 frame["event"]["physicalHTTP"]
                 for frame in job.events()[0][before:]
                 if frame["event"]["type"] == "date_closed"
             )
+            if result["last_run_status"] == "rolling_source_budget":
+                continue
+            if result["last_run_status"] == "empty_unresolved":
+                source_stop = "empty_unresolved"
+                break
             if result["last_run_status"] != "bounded_complete":
                 return {
-                    **result, "daily_status": "source_stopped", "daily_HTTP": http,
-                    "daily_publication_phases": phases, "daily_baseline_reports": reports,
+                    **result, "daily_status": "source_stopped", **result_fields(),
                 }
-        elif state["last_run_status"] not in {None, "bounded_complete", "published", "user_stop"}:
+            break
+        if source_stop is not None or raw_deferred:
+            break
+        if not pending and state["last_run_status"] not in {
+            None, "bounded_complete", "published", "user_stop"
+        }:
             return {
-                **job.status(), "daily_status": "source_stopped", "daily_HTTP": http,
-                "daily_publication_phases": phases, "daily_baseline_reports": reports,
+                **job.status(), "daily_status": "source_stopped", **result_fields(),
             }
         if any(row["status"] == "ready" and row["date"] in chunk for row in job.snapshot()["rows"]):
+            if phases >= phase_limit:
+                raw_deferred = True
+                break
             publish_phase(chunk, defer_references=True)
         if any(
             row["status"] in {"ready", "pending"} and row["date"] in chunk
@@ -127,9 +252,28 @@ def daily(job, args):
             raw_deferred = True
             break
 
+    if source_stop is not None:
+        ready = any(
+            row["status"] == "ready" and row["date"] in dates
+            for row in job.snapshot()["rows"]
+        )
+        if not ready:
+            # The durable source stop survives publication's later end status.
+            # Reopening it is not an automatic reference retry; explicit R2-only
+            # publish remains available under the source-only pause.
+            return {
+                **job.status(), "daily_status": "source_stopped", **result_fields(),
+            }
+        if phases < phase_limit:
+            publish_phase(dates, defer_references=True)
+        raw_deferred = any(
+            row["status"] == "ready" and row["date"] in dates
+            for row in job.snapshot()["rows"]
+        )
+
     # A previous report cannot prove today's queue/period closure. This ordinary
     # R2-only phase needs no Garmin credential and respects a source-only pause.
-    if not raw_deferred:
+    if not raw_deferred and phases < phase_limit:
         # Raw chunks deliberately leave assembly for a fresh bounded phase after
         # every selected canonical curve/index has its ACK and exact readback.
         # Even an unknown pending count from a capacity checkpoint cannot consume
@@ -162,13 +306,66 @@ def daily(job, args):
     references_complete = (
         reference.get("cohort_complete", global_complete) if cohort_dates else global_complete
     )
+    if source_stop is None and not raw_deferred and references_complete:
+        job.append({"type": "daily_round_finished", "round": active_round["round"]})
     return {
         **result,
-        "daily_status": "raw_pending" if raw_deferred else
+        "daily_status": "source_stopped" if source_stop is not None else
+        "raw_pending" if raw_deferred else
         "bounded_complete" if references_complete else "baselines_pending",
-        "daily_HTTP": http,
-        "daily_publication_phases": phases,
-        "daily_baseline_reports": reports,
+        **result_fields(),
+    }
+
+
+def continue_publication(job, args):
+    """Explicit, receipt-bound R2-only completion; never admits source work."""
+    from .history_publish import admit_continuation, publish
+
+    admission = args.continuation_sha
+    if admission:
+        if args.prior_receipt_sha is not None or args.independent_gets is not None or args.period:
+            raise Stop("continuation_binding_unverified")
+    else:
+        if args.prior_receipt_sha is None or args.independent_gets is None or not args.period:
+            raise Stop("continuation_binding_unverified")
+        admission = admit_continuation(
+            job, args.plan_sha, confirm=args.confirm_r2_write,
+            prior_receipt_sha256=args.prior_receipt_sha,
+            independent_gets=args.independent_gets, period_names=args.period,
+        )
+    reports = []
+    for _ in range(14):
+        try:
+            result = publish(
+                job, args.plan_sha, confirm=args.confirm_r2_write,
+                continuation_sha256=admission,
+            )
+        except Stop as error:
+            state = job.status()
+            if error.category != "storage_execution_budget" or state["locked"]:
+                raise
+            return {
+                **state, "continuation_status": "budget_pending",
+                "publication_continuation_sha256": admission,
+                "continuation_reports": reports,
+            }
+        reference = result["baseline_refresh"]
+        reports.append(reference)
+        if reference.get("continuation_complete"):
+            return {
+                **result, "continuation_status": "bounded_complete",
+                "publication_continuation_sha256": admission,
+                "continuation_reports": reports,
+            }
+        if (
+            reference.get("status") != "bounded_pending"
+            or reference.get("held_periods") or reference.get("blocked")
+            or not (reference.get("products_written") or reference.get("periods_completed"))
+        ):
+            break
+    return {
+        **job.status(), "continuation_status": "references_pending",
+        "publication_continuation_sha256": admission, "continuation_reports": reports,
     }
 
 
@@ -222,11 +419,22 @@ def main(argv=None):
         if command == "daily":
             run.add_argument("--confirm-r2-write", action="store_true")
             run.add_argument("--resume", action="store_true")
+            run.add_argument("--max-wait-seconds", type=int, default=3600,
+                             help="Wait only for validated rolling-source expiry; 0..21600 seconds.")
     publish = commands.add_parser(
         "publish", help="Separate verified R2-only phase; zero Garmin calls."
     )
     publish.add_argument("--plan-sha", required=True)
     publish.add_argument("--confirm-r2-write", action="store_true")
+    continuation = commands.add_parser(
+        "continue-publication", help="Explicit receipt-bound R2-only reference continuation."
+    )
+    continuation.add_argument("--plan-sha", required=True)
+    continuation.add_argument("--confirm-r2-write", action="store_true")
+    continuation.add_argument("--prior-receipt-sha")
+    continuation.add_argument("--independent-gets", type=int)
+    continuation.add_argument("--period", action="append", default=[])
+    continuation.add_argument("--continuation-sha", help="Resume the existing immutable admission.")
     child = commands.add_parser("_date", help=argparse.SUPPRESS)
     child.add_argument("--run", required=True)
     child.add_argument("--date", required=True)
@@ -267,6 +475,11 @@ def main(argv=None):
                 result = daily(job, args)
                 print(json.dumps(result))
                 if result["daily_status"] != "bounded_complete":
+                    return 2
+            elif args.command == "continue-publication":
+                result = continue_publication(job, args)
+                print(json.dumps(result))
+                if result["continuation_status"] != "bounded_complete":
                     return 2
             elif args.command in ("collect", "resume"):
                 from .history_collect import collect
