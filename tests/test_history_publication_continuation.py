@@ -23,21 +23,43 @@ def test_bounded_new_round_can_use_6000_publication_get_allowance(monkeypatch):
     assert len([c for c in server.calls if c[0] in {"GET", "HEAD"} and not c[2]]) == 8
 
 
-def test_authorized_old_2000_round_continues_only_three_bound_references(monkeypatch):
+@pytest.mark.parametrize("prior_body_bytes", [4111887, 4111889])
+def test_authorized_old_2000_round_continues_only_three_bound_references(monkeypatch, prior_body_bytes):
+    class BodyServer(BaselineServer):
+        def __init__(self):
+            super().__init__()
+            self.write_body_sizes = []
+
+        def send(self, request):
+            if request.method == "PUT":
+                body = request.body
+                if isinstance(body, bytes):
+                    size = len(body)
+                else:
+                    position = body.tell()
+                    size = len(body.read())
+                    body.seek(position)
+                self.write_body_sizes.append(size)
+            return super().send(request)
+
     monkeypatch.setenv("HEALTH_TIMEZONE", "Europe/Oslo")
     job, files = memory_job(monkeypatch, [
         {"date": "2025-12-21", "stream": "hr"},
         {"date": "2025-12-28", "stream": "hr"},
     ])
-    server = BaselineServer()
+    server = BodyServer()
     initial = history_publish.publish(
         job, job.plan_sha, confirm=True, store=sdk_store(server), defer_references=True,
         finalize_dates=[row["date"] for row in job.plan["targets"]],
         execution_context={"counts": {"get": 1587, "list": 379, "put": 235},
-                           "body_bytes": 4111887, "publication_get_limit": 2000, "phases": 9},
+                           "body_bytes": prior_body_bytes, "publication_get_limit": 2000, "phases": 9},
     )["baseline_refresh"]
     assert initial["execution_totals"]["counts"] == {"get": 1602, "list": 380, "put": 241}
-    assert initial["execution_totals"]["body_bytes"] == 4117737
+    # Compressed sizes vary between zlib implementations. The independent
+    # HTTP observer accounts for every attempted body on top of the prior seed.
+    assert len(server.write_body_sizes) == 6
+    initial_body_bytes = prior_body_bytes + sum(server.write_body_sizes)
+    assert initial["execution_totals"]["body_bytes"] == initial_body_bytes
     receipts = {name: body for name, body in files.items() if name.endswith("/RECEIPT.json")}
     prior = next(body for name, body in receipts.items() if json.loads(body).get("status") == "complete"
                  and "baseline_refresh" in json.loads(body))
@@ -57,9 +79,14 @@ def test_authorized_old_2000_round_continues_only_three_bound_references(monkeyp
     totals = result["execution_totals"]
     assert totals["counts"]["get"] > 1602
     assert totals["independent_gets"] == 95 and totals["publication_get_limit"] == 6000
+    physical_gets = sum(method in {"GET", "HEAD"} and not query for method, _, query in server.calls)
+    assert totals["counts"]["get"] == 1587 + physical_gets
+    assert totals["counts"]["list"] == 379 + sum(bool(query) for _, _, query in server.calls)
+    assert totals["counts"]["put"] == 235 + len(server.write_body_sizes)
     assert totals["phases"] == 12
     assert totals["counts"]["list"] >= initial["execution_totals"]["counts"]["list"]
-    assert totals["body_bytes"] > 4117737
+    assert totals["body_bytes"] > initial_body_bytes
+    assert totals["body_bytes"] == prior_body_bytes + sum(server.write_body_sizes)
     assert all(files[name] == body for name, body in receipts.items())
     from pipeline.night_baseline_refresh import QUEUE_KEY
 
@@ -75,6 +102,7 @@ def test_authorized_old_2000_round_continues_only_three_bound_references(monkeyp
     )["baseline_refresh"]["execution_totals"]
     assert repeated["counts"]["get"] == totals["counts"]["get"] + 1
     assert repeated["independent_gets"] == 95
+    assert repeated["body_bytes"] == totals["body_bytes"]
 
 
 def test_rolling_admission_reports_first_safe_24h_expiry_without_reset(monkeypatch):
