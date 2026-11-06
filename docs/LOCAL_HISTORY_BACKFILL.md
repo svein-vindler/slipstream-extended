@@ -284,6 +284,9 @@ Selecting one of several eligible periods only completes that selection:
 the original cohort finished. Admission and later receipts retain its original
 `finalize_dates` and closure evidence. `cohort_complete` and
 `original_cohort_complete` distinguish completion of that qualified cohort.
+The receipt cohort can include reused stored dates outside the source plan;
+these dates do not authorize additional periods. Requested closed periods must
+still be supported by published source-plan rows within that exact receipt cohort.
 Unfinished original periods remain bound to the carried usage during a later
 daily round; they cannot open a fresh resource baseline. Once the original
 cohort completes, unrelated global queue entries do not block a new baseline.
