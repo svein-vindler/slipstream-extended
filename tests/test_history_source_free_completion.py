@@ -7,9 +7,10 @@ from datetime import datetime, timezone
 import boto3
 import pytest
 from history_storage_fixture import ACCOUNT, BUCKET
+from test_history_baseline_integration import BaselineServer
+
 from pipeline.history_backfill import main
 from pipeline.history_state import Job, digest, encoded, read, write
-from test_history_baseline_integration import BaselineServer
 
 ROUND = "c" * 32
 SELECTED = ["2026-04-29", "2026-04-28"]
