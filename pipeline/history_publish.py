@@ -724,7 +724,7 @@ def _completed_context(job, state, target_sha, execution_context, finalize_dates
                     "counts": dict(counts), "body_bytes": totals["body_bytes"],
                 }
                 execution_context["phases"] = 0
-                execution_context["independent_gets"] = 0
+                execution_context.setdefault("independent_gets", 0)
             else:
                 execution_context["publication_get_limit"] = min(
                     execution_context.get("publication_get_limit", 6000), limit
@@ -849,13 +849,175 @@ def _continuation(job, sha):
         admission[field] = original.get(field)
     return admission
 
+def source_free_binding(job, plan_sha, proof_path, proof_sha, *, owner=None):
+    """Pin one existing stopped daily round; this is never source admission."""
+    state = job.admission(plan_sha, source=False, owner=owner)
+    body = read(proof_path)
+    if not isinstance(proof_sha, str) or not re.fullmatch(r"[a-f0-9]{64}", proof_sha) or digest(body) != proof_sha:
+        raise Stop("source_free_proof_changed")
+    proof = json.loads(body)
+    if (
+        not isinstance(proof, dict) or proof.get("schema") != 1
+        or proof.get("operation") != "source-free-publication"
+        or proof.get("plan_sha256") != plan_sha
+        or any(not isinstance(proof.get(field), str) or not re.fullmatch(r"[a-f0-9]{64}", proof[field])
+               for field in ("storage_target_sha256", "source_stop_proof_sha256"))
+        or type(proof.get("independent_gets")) is not int or not 0 <= proof["independent_gets"] <= 256
+        or not isinstance(proof.get("source_dates"), list)
+    ):
+        raise Stop("source_free_binding_changed")
+    frames, tip = job.events()
+    prefix = proof.get("journal", {})
+    count = prefix.get("frames") if isinstance(prefix, dict) else None
+    if (type(count) is not int or not 1 <= count <= len(frames)
+            or prefix.get("tip") != (frames[count]["previous"] if count < len(frames) else tip)):
+        raise Stop("source_free_journal_changed")
+    active, start = None, None
+    for index, frame in enumerate(frames):
+        event = frame["event"]
+        if event["type"] == "daily_round_started":
+            if active is not None:
+                raise Stop("daily_round_unclosed")
+            active, start = event, index
+        elif event["type"] == "daily_round_finished":
+            if active is None or active["round"] != event["round"]:
+                raise Stop("daily_round_binding_changed")
+            active = None
+    planned = {row["date"] for row in job.plan["targets"]}
+    if (
+        active is None or start >= count or active.get("round") != proof.get("daily_round")
+        or not isinstance(active.get("round"), str) or not re.fullmatch(r"[a-f0-9]{32}", active["round"])
+        or any(not isinstance(active.get(field), list)
+               or any(not isinstance(day, str) or day not in planned for day in active[field])
+               or len(set(active[field])) != len(active[field])
+               for field in ("dates", "new_dates", "stored_dates", "finalize_dates"))
+        or set(active["dates"]) != set(active["new_dates"]) | set(active["stored_dates"])
+        or set(active["new_dates"]) & set(active["stored_dates"])
+        or not set(active["dates"]) <= set(active["finalize_dates"])
+        or type(active.get("max_dates")) is not int or not 1 <= active["max_dates"] <= 30
+        or len(active["new_dates"]) > active["max_dates"]
+        or type(active.get("max_http")) is not int or not 1 <= active["max_http"] <= 240
+    ):
+        raise Stop("source_free_round_changed")
+    wanted = set()
+    for frame in frames[start + 1:count]:
+        event = frame["event"]
+        if event["type"] == "date_closed":
+            run, day = event["id"].split(":")
+            if day not in active["dates"]:
+                raise Stop("source_free_selection_changed")
+            wanted.add((run, day))
+    for row in state["rows"]:
+        if row["date"] in active["dates"] and row["status"] in {"ready", "published"}:
+            folder = Path(row["folder"])
+            if folder.parent.parent != job.folder / "runs" or folder.name != row["date"]:
+                raise Stop("source_folder_binding")
+            wanted.add((folder.parent.name, folder.name))
+    supplied = set()
+    for source in proof["source_dates"]:
+        if (not isinstance(source, dict) or not isinstance(source.get("run"), str)
+                or not re.fullmatch(r"[a-f0-9]{32}", source["run"])
+                or not isinstance(source.get("date"), str) or source["date"] not in active["dates"]):
+            raise Stop("source_free_source_changed")
+        identity = source["run"], source["date"]
+        if identity in supplied or identity not in wanted:
+            raise Stop("source_free_source_changed")
+        supplied.add(identity)
+        folder = job.folder / "runs" / source["run"] / source["date"]
+        values = {}
+        for name in ("intent", "result", "receipt"):
+            data = read(folder / (name.upper() + ".json"))
+            if source.get(name + "_sha256") != digest(data):
+                raise Stop("source_free_source_changed")
+            values[name] = json.loads(data)
+        intent, result, receipt = (values[name] for name in ("intent", "result", "receipt"))
+        if (
+            intent.get("plan") != plan_sha or intent.get("run") != source["run"]
+            or intent.get("date") != source["date"]
+            or type(result.get("native")) is not int or result["native"] not in (0, 2)
+            or (result["native"] == 0) != (receipt.get("status") == "complete")
+            or receipt.get("status") not in {"complete", "stopped"}
+            or receipt.get("cleanup_status") != "complete"
+            or result.get("receipt_sha256") != source["receipt_sha256"]
+            or receipt.get("intent_sha256") != source["intent_sha256"]
+            or not isinstance(receipt.get("targets"), list)
+        ):
+            raise Stop("source_free_native_unverified")
+        for target in receipt["targets"]:
+            if target.get("date") != source["date"] or target.get("stream") not in intent["streams"]:
+                raise Stop("source_free_source_changed")
+            if target.get("status") != "ready":
+                continue
+            if target.get("source_verified") is not True:
+                raise Stop("native_source_unverified")
+            for field in ("wire", "view"):
+                name = target.get(field)
+                if not isinstance(name, str) or Path(name).name != name:
+                    raise Stop("source_folder_binding")
+                if digest(read(folder / name, 5 * 1024 * 1024)) != target.get(field + "_sha256"):
+                    raise Stop("source_bytes_changed")
+            current = next(row for row in state["rows"]
+                           if (row["date"], row["stream"]) == (target["date"], target["stream"]))
+            if (current["status"] not in {"ready", "published"}
+                    or current.get("folder") != str(folder)
+                    or current.get("native") != result["native"]
+                    or current.get("receipt_sha256") != source["receipt_sha256"]
+                    or any(current.get(field) != target.get(field)
+                           for field in ("wire", "view", "wire_sha256", "view_sha256"))):
+                raise Stop("source_free_target_changed")
+    if not supplied or supplied != wanted:
+        raise Stop("source_free_source_changed")
+    # Only this admission's ordinary, fully closed publications may extend its prefix.
+    current_run, reports = None, []
+    for frame in frames[count:]:
+        event = frame["event"]
+        kind = event["type"]
+        if kind == "begin" and current_run is None:
+            current_run, reports = event["run"], []
+        elif kind == "target" and current_run is not None and event.get("status") == "published":
+            if event.get("date") not in active["dates"]:
+                raise Stop("source_free_selection_changed")
+        elif kind == "reference_refresh" and current_run is not None:
+            reports.append(event["report"])
+        elif kind == "end" and current_run == event.get("run") and event.get("status") == "published":
+            folder = job.folder / "runs" / current_run
+            receipt = json.loads(read(folder / "RECEIPT.json"))
+            remote = json.loads(read(folder / "REMOTE-VERIFIED.json"))
+            reference = receipt.get("baseline_refresh", {})
+            totals = reference.get("execution_totals", {})
+            if (receipt.get("status") != "complete" or remote.get("status") != "remote_verified_cleanup_pending"
+                    or {k: v for k, v in receipt.items() if k != "status"}
+                    != {k: v for k, v in remote.items() if k != "status"}
+                    or receipt.get("run") != current_run or receipt.get("plan_sha256") != plan_sha
+                    or receipt.get("target_sha256") != proof["storage_target_sha256"]
+                    or receipt.get("source_calls") != 0 or reports != [reference]
+                    or reference.get("finalize_dates") != sorted(active["finalize_dates"])
+                    or totals.get("round") != active["round"]
+                    or totals.get("source_free_proof_sha256") != proof_sha):
+                raise Stop("source_free_publication_changed")
+            current_run = None
+        else:
+            raise Stop("source_free_journal_changed")
+    if current_run is not None:
+        raise Stop("source_free_journal_changed")
+    return proof, active
+
+
 def publish(
     job, plan_sha, *, confirm=False, store=None, target_dates=None, execution_context=None,
-    finalize_dates=None, defer_references=False, continuation_sha256=None,
+    finalize_dates=None, defer_references=False, continuation_sha256=None, source_free_proof=None,
 ):
     if not confirm:
         raise Stop("explicit_storage_phase_required")
     state = job.admission(plan_sha, source=False)
+    if source_free_proof is not None:
+        proof, round_binding = source_free_binding(job, plan_sha, *source_free_proof)
+        if (continuation_sha256 is not None or target_dates not in (round_binding["dates"], [])
+                or finalize_dates != round_binding["finalize_dates"]
+                or execution_context is None or execution_context.get("round") != round_binding["round"]
+                or execution_context.get("source_free_proof_sha256") != source_free_proof[1]
+                or execution_context.get("independent_gets", 0) < proof["independent_gets"]):
+            raise Stop("source_free_binding_changed")
     continuation = _continuation(job, continuation_sha256) if continuation_sha256 else None
     if continuation is not None:
         if target_dates not in (None, []) or finalize_dates is not None or defer_references:
@@ -943,6 +1105,7 @@ def publish(
             job, plan_sha, state, ready, store=store,
             execution_context=execution_context, finalize_dates=finalize_dates,
             defer_references=defer_references, close_owned=close_owned,
+            source_free_proof=source_free_proof,
         )
     except BaseException:
         primary = True
@@ -954,10 +1117,14 @@ def publish(
 
 def _publish_store(
     job, plan_sha, state, ready, *, store, execution_context,
-    finalize_dates, defer_references, close_owned,
+    finalize_dates, defer_references, close_owned, source_free_proof=None,
 ):
     selected_count = len(ready)
     target_sha = digest((store.client.meta.endpoint_url + "\0" + store.bucket).encode())
+    if source_free_proof is not None:
+        proof, _ = source_free_binding(job, plan_sha, *source_free_proof)
+        if target_sha != proof["storage_target_sha256"]:
+            raise Stop("storage_target_changed")
     target_file = job.folder / "storage-target.json"
     if target_file.exists() and json.loads(read(target_file)) != {"target_sha256": target_sha}:
         raise Stop("storage_target_changed")
@@ -1018,6 +1185,8 @@ def _publish_store(
             raise Stop("source_progress_changed_before_owner")
         if job.events()[1] != context_tip:
             raise Stop("publication_progress_changed_before_owner")
+        if source_free_proof is not None:
+            source_free_binding(job, plan_sha, *source_free_proof, owner=owner)
         begin_attempted = True
         job.append({"type": "begin", "run": run})
         from .night_baseline_refresh import (
@@ -1304,6 +1473,8 @@ def _publish_store(
                     "round_baseline": guard.execution_context["round_baseline"],
                     **({"round": guard.execution_context["round"]} if "round" in guard.execution_context else {}),
                     "independent_gets": guard.execution_context.get("independent_gets", 0),
+                    **({"source_free_proof_sha256": guard.execution_context["source_free_proof_sha256"]}
+                       if "source_free_proof_sha256" in guard.execution_context else {}),
                     **({"continuation_sha256": continuation_sha} if continuation_sha else {}),
                 },
                 "sources_queued": queued,

@@ -417,6 +417,59 @@ Without it reference work reports `calendar_timezone_required`. Open periods wai
 until closure. Missing native input is not zero-filled into a curve; replacing a
 reference preserves immutable history and freshly checks source/context revisions.
 
+### Finish a stopped daily round without the source
+
+An explicitly admitted operator stage can finish the saved positive targets of
+one stopped daily round through the same publisher:
+
+```bash
+python -m pipeline.history_backfill --state PRIVATE_JOB publish-source-free --plan-sha PLAN_SHA256 --confirm-r2-write --source-proof PRIVATE_PROOF.json --source-proof-sha PROOF_SHA256
+```
+
+This requires known physical source cleanup and a separately authorized R2-only
+stage. It does not provide that authorization or resolve an unresolved source
+claim. The operator retains the original native result, source stop, pause,
+denied targets and HOLD. Only R2 credentials are used; no source request, date
+reservation, archive reload, source resume, new plan or replacement job is made.
+
+The immutable proof uses schema `1`, operation `source-free-publication`, the
+exact `plan_sha256` and `daily_round`, and `journal: {frames, tip}` for the original
+hash-chained prefix. `storage_target_sha256` always binds the intended endpoint
+and bucket, including before the job's first publication. `independent_gets` is
+the already used independent GET count for this current round, not a new
+allowance or lifetime total. `source_stop_proof_sha256` identifies the operator's
+original physical-cleanup/source-stop admission. `source_dates` contains exact
+`run`, `date`, `intent_sha256`, `result_sha256` and `receipt_sha256` entries for
+every date closed in this round plus the original source artifacts of selected
+ready or published targets. Unrelated source dates are rejected.
+
+The command derives the fixed selection and reference cohort from the existing
+active daily-round event. It verifies source receipts, known date cleanup and
+positive wire/view bytes before credentials and again under the publication
+owner, and checks the intended R2 target before sending. It publishes only that
+selection and finishes only its eligible references. Foreign ready targets and
+the unrelated reference queue remain outside this stage. The ordinary
+publisher's current source/context fences, conditional writes, ACK/readback,
+cleanup and resource limits still apply.
+
+Earlier complete and current-round publication receipts carry their cumulative
+usage and round baseline; the current independent-read count is retained. Every
+new ordinary receipt also records
+`baseline_refresh.execution_totals.source_free_proof_sha256`. Only completed
+publication phases bound to this same proof may extend its original journal
+prefix. A new source event, altered proof/selection/bytes, unknown owner or
+different target stops without automatic adoption or retry.
+
+`source_free_status` reports `bounded_complete`, `raw_pending` or
+`baselines_pending`; the latter two return exit `2`. Successful R2 completion can
+return exit `0` while `daily_status=source_stopped` and
+`source_free_source_native=2` preserve the original stage outcome.
+`daily_round` and `source_free_round` identify the same round. It never appends a
+daily-round completion event or declares the denied/incomplete source work
+successful. Keep the original source evidence and perform the operator's
+existing independently metered destination and normal-reader checks before
+closing the stage.
+
 Each source publication binds the first
 configured R2 endpoint/bucket digest for this job and rejects a later target
 change. Existing good curves are preserved. Missing HR objects use create-only

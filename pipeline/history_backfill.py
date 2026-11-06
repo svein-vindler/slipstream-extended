@@ -317,6 +317,76 @@ def daily(job, args, *, clock=None):
     }
 
 
+def publish_source_free(job, args):
+    """Finish only saved positive work from one physically closed source stage."""
+    from .history_publish import publish, source_free_binding
+
+    if not args.confirm_r2_write:
+        raise Stop("explicit_storage_phase_required")
+    admission = args.source_proof, args.source_proof_sha
+    proof, active = source_free_binding(job, args.plan_sha, *admission)
+    context = {"publication_get_limit": 6000, "round": active["round"],
+               "independent_gets": proof["independent_gets"],
+               "source_free_proof_sha256": args.source_proof_sha}
+    frames = job.events()[0]
+    start = next(index for index, frame in enumerate(frames)
+                 if frame["event"].get("type") == "daily_round_started"
+                 and frame["event"].get("round") == active["round"])
+    events = [frame["event"] for frame in frames[start + 1:]]
+    reports = [event["report"] for event in events if event["type"] == "reference_refresh"]
+    phases = len(reports)
+
+    def phase(raw):
+        nonlocal phases
+        result = publish(
+            job, args.plan_sha, confirm=True, target_dates=active["dates"] if raw else [],
+            finalize_dates=active["finalize_dates"], execution_context=context,
+            defer_references=raw, source_free_proof=admission,
+        )
+        phases += 1
+        reports.append(result["baseline_refresh"])
+
+    def ready_count():
+        return sum(row["status"] == "ready" and row["date"] in active["dates"]
+                   for row in job.snapshot()["rows"])
+
+    while ready_count() and phases < 14:
+        before = ready_count()
+        phase(True)
+        if ready_count() >= before:
+            break  # A known capacity checkpoint is not a retry instruction.
+    if not ready_count() and phases < 14:
+        # Reuse a completed admitted phase on an explicit restart. A raw phase
+        # deliberately defers references and cannot supply that completion.
+        already_complete = bool(reports) and not reports[-1].get("reference_work_deferred") and (
+            reports[-1].get("cohort_complete") is True
+        )
+        if not already_complete:
+            phase(False)
+            while phases < 14:
+                reference = reports[-1]
+                if (reference.get("cohort_complete")
+                        or reference.get("status") not in {"bounded_pending", "held"}
+                        or reference.get("cohort_closed_pending", reference.get("closed_pending")) == 0
+                        or reference.get("cohort_held_periods", reference.get("held_periods"))
+                        or reference.get("cohort_blocked", reference.get("blocked"))
+                        or not (reference.get("periods_completed") or reference.get("products_written"))):
+                    break
+                phase(False)
+    status = job.status()
+    reference = status["baseline_refresh"]
+    return {
+        **status, "daily_status": "source_stopped", "daily_round": active["round"],
+        "source_free_round": active["round"], "source_free_source_native": 2,
+        "source_free_status": "raw_pending" if ready_count() else
+        "bounded_complete" if reference.get("cohort_complete") else "baselines_pending",
+        "daily_publication_phases": phases, "daily_baseline_reports": reports,
+        "daily_HTTP": sum(event["physicalHTTP"] for event in events if event["type"] == "date_closed"),
+        "daily_source_stop": next((event["status"] for event in reversed(events)
+                                   if event["type"] == "end" and event["status"] != "published"), None),
+    }
+
+
 def continue_publication(job, args):
     """Explicit, receipt-bound R2-only completion; never admits source work."""
     from .history_publish import admit_continuation, publish
@@ -426,6 +496,13 @@ def main(argv=None):
     )
     publish.add_argument("--plan-sha", required=True)
     publish.add_argument("--confirm-r2-write", action="store_true")
+    source_free = commands.add_parser(
+        "publish-source-free", help="Finish one proof-bound stopped daily round; zero Garmin calls."
+    )
+    source_free.add_argument("--plan-sha", required=True)
+    source_free.add_argument("--confirm-r2-write", action="store_true")
+    source_free.add_argument("--source-proof", type=Path, required=True)
+    source_free.add_argument("--source-proof-sha", required=True)
     continuation = commands.add_parser(
         "continue-publication", help="Explicit receipt-bound R2-only reference continuation."
     )
@@ -480,6 +557,11 @@ def main(argv=None):
                 result = continue_publication(job, args)
                 print(json.dumps(result))
                 if result["continuation_status"] != "bounded_complete":
+                    return 2
+            elif args.command == "publish-source-free":
+                result = publish_source_free(job, args)
+                print(json.dumps(result))
+                if result["source_free_status"] != "bounded_complete":
                     return 2
             elif args.command in ("collect", "resume"):
                 from .history_collect import collect
