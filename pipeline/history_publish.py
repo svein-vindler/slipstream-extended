@@ -392,6 +392,7 @@ class _ReferenceStore:
         self.current_source = None
         self.queue_pending = set()
         self.queue_rows = None
+        self.queue_snapshot = None
         self.queue_bytes = 0
 
     def __getattr__(self, name):
@@ -431,6 +432,7 @@ class _ReferenceStore:
         except ClientError as error:
             if name == QUEUE_KEY and missing_object(error):
                 self.queue_rows = {}
+                self.queue_snapshot = {"pending": {}}
             if expected and expected[0] == "if-match" and missing_object(error):
                 raise Stop("source_preimage_changed") from None
             raise
@@ -439,7 +441,8 @@ class _ReferenceStore:
         from .night_baseline_refresh import QUEUE_KEY
 
         if name == QUEUE_KEY:
-            self.queue_rows = decode(snapshot.data).get("pending", {})
+            self.queue_snapshot = decode(snapshot.data)
+            self.queue_rows = self.queue_snapshot.get("pending", {})
             self.queue_pending = set(self.queue_rows)
             self.queue_bytes = len(snapshot.data)
         return snapshot
@@ -463,6 +466,16 @@ class _ReferenceStore:
             raise Stop("reference_prefix_outside_contract")
         self.guard.prefixes.add(prefix)
         return self.store.list_prefix_bounded(prefix, **kwargs)
+
+    def list_revisions_bounded(self, prefix, *, max_keys):
+        # The consumer chooses only per-window canonical/context months. The
+        # physical guard still charges every page and verifies the raw envelope.
+        canonical = re.fullmatch(r"health/(?:sleep/v1|hrv|signals/v1)/[0-9]{4}/[0-9]{2}/", prefix)
+        context = re.fullmatch(r"health/night-context/v1/[0-9]{4}/[0-9]{2}/", prefix)
+        if not (canonical and max_keys == 63 or context and max_keys == 3101):
+            raise Stop("reference_prefix_outside_contract")
+        self.guard.prefixes.add(prefix)
+        return self.store.list_revisions_bounded(prefix, max_keys=max_keys)
 
     def can_write_group(self, *, attempts, byte_count):
         from .night_baseline_refresh import ComponentBudgetDeferred, affected_periods
@@ -548,6 +561,8 @@ def _snapshot(store, object_key):
 
 
 def _reference_complete(reference):
+    if "rolling_plan_complete" in reference:
+        return reference["rolling_plan_complete"] is True
     if "cohort_complete" in reference:
         return reference["cohort_complete"] is True
     if "continuation_complete" in reference:
@@ -700,8 +715,15 @@ def _completed_context(job, state, target_sha, execution_context, finalize_dates
             row["status"] in {"ready", "pending"}
             and row["date"] in reference.get("finalize_dates", []) for row in state["rows"]
         )
-        if not complete or requested_round is not None or execution_context.get("continuation_sha256") is not None:
+        if (not complete or requested_round is not None
+                or execution_context.get("continuation_sha256") is not None
+                or execution_context.get("rolling_plan") is not None
+                or execution_context.get("retain_reference_ledger")):
             totals = reference.get("execution_totals", {})
+            prior_rolling = totals.get("rolling_plan_sha256")
+            current_rolling = execution_context.get("rolling_plan", {}).get("reference_plan_sha256")
+            if not complete and prior_rolling is not None and prior_rolling != current_rolling:
+                raise Stop("unfinished_rolling_plan_requires_same_plan")
             counts = totals.get("counts", {})
             if not (all(type(counts.get(kind)) is int and counts[kind] >= 0
                         for kind in ("get", "list", "put"))
@@ -717,7 +739,10 @@ def _completed_context(job, state, target_sha, execution_context, finalize_dates
             if joining_round and not set(reference.get("finalize_dates", [])) <= set(finalize_dates or []):
                 raise Stop("unfinished_publication_cohort_changed")
             prior_continuation = totals.get("continuation_sha256")
-            if not new_round and prior_continuation and execution_context.get("continuation_sha256") != prior_continuation:
+            if (not new_round and prior_continuation
+                    and execution_context.get("continuation_sha256") != prior_continuation
+                    and not (execution_context.get("rolling_plan") is not None
+                             and reference.get("continuation_complete") is True)):
                 raise Stop("explicit_continuation_required")
             if new_round and not joining_round:
                 execution_context["round_baseline"] = {
@@ -739,6 +764,22 @@ def _completed_context(job, state, target_sha, execution_context, finalize_dates
             for kind in ("get", "list", "put"):
                 current[kind] = max(current[kind], counts[kind])
             execution_context["body_bytes"] = max(execution_context.get("body_bytes", 0), totals["body_bytes"])
+    reference_round = execution_context.get("reference_round_sha256")
+    if reference_round is not None:
+        from .rolling_reference_cli import apply_reference_round
+
+        apply_reference_round(
+            job, job.plan_sha,
+            execution_context.get("rolling_plan", {}).get("reference_plan_sha256"),
+            reference_round, target_sha=target_sha, execution_context=execution_context,
+            latest_receipt=latest, journal_tip=journal_tip,
+        )
+    successor = execution_context.get("reference_successor_sha256")
+    if successor is not None:
+        from .history_reference_successor import apply
+
+        apply(job, successor, target_sha=target_sha, context=execution_context,
+              latest=latest, journal_tip=journal_tip, cohort=finalize_dates)
     return journal_tip
 
 
@@ -1009,6 +1050,18 @@ def publish(
 ):
     if not confirm:
         raise Stop("explicit_storage_phase_required")
+    if execution_context and execution_context.get("reference_successor_sha256") is not None and (
+        target_dates != [] or not finalize_dates or defer_references
+        or continuation_sha256 is not None or source_free_proof is not None
+        or execution_context.get("rolling_plan") is not None
+        or execution_context.get("reference_round_sha256") is not None
+    ):
+        raise Stop("daily_successor_references_only")
+    if execution_context and execution_context.get("rolling_plan") is not None and (
+        target_dates != [] or finalize_dates is not None or defer_references
+        or continuation_sha256 is not None or source_free_proof is not None
+    ):
+        raise Stop("rolling_plan_references_only")
     state = job.admission(plan_sha, source=False)
     if source_free_proof is not None:
         proof, round_binding = source_free_binding(job, plan_sha, *source_free_proof)
@@ -1130,6 +1183,25 @@ def _publish_store(
         raise Stop("storage_target_changed")
     if execution_context is None:
         execution_context = {}
+    rolling_plan = execution_context.get("rolling_plan")
+    if rolling_plan is not None:
+        from .rolling_reference_cli import load_plan
+
+        binding, verified_cache, planned_context, _ = load_plan(
+            job, plan_sha, rolling_plan.get("reference_plan_sha256"), store=store,
+            reference_round_sha=execution_context.get("reference_round_sha256"),
+        )
+        if rolling_plan != binding:
+            raise Stop("rolling_plan_binding_changed")
+        cache = execution_context.setdefault("snapshot_cache", {})
+        for name, snapshot in verified_cache.items():
+            cache.setdefault(name, snapshot)
+        for kind in ("get", "list", "put"):
+            counts = execution_context.setdefault("counts", {"get": 0, "list": 0, "put": 0})
+            counts[kind] = max(counts[kind], planned_context["counts"][kind])
+        execution_context["body_bytes"] = max(
+            execution_context.get("body_bytes", 0), planned_context["body_bytes"],
+        )
     context_tip = _completed_context(job, state, target_sha, execution_context, finalize_dates)
     continuation_sha = execution_context.get("continuation_sha256")
     continuation = _continuation(job, continuation_sha) if continuation_sha else None
@@ -1369,6 +1441,11 @@ def _publish_store(
             )
         reference_store.draining = True
         reference_store.index_reserve = reference_store.index_bytes = 0
+        if rolling_plan is not None and rolling_plan["verified_sleep_sources"]:
+            from .night_baseline_refresh import register_rolling_endpoints
+
+            register_rolling_endpoints(reference_store, rolling_plan["verified_sleep_sources"],
+                                       today=rolling_plan["today"])
         period_names = None
         if finalize_dates is not None:
             period_names = set()
@@ -1411,7 +1488,15 @@ def _publish_store(
         })
         baseline_report = refresh_pending(
             reference_store, snapshot_cache=snapshot_cache,
-            period_names=set() if defer_references else period_names,
+            today=rolling_plan["today"] if rolling_plan else None,
+            timezone=rolling_plan["timezone"] if rolling_plan else None,
+            period_names=set() if defer_references or rolling_plan is not None else period_names,
+            rolling_endpoints=rolling_plan["endpoints"] if rolling_plan is not None else None,
+            rolling_sources=[] if defer_references else (
+                [("signals" if row["stream"] == "hr" else "hrv", row["date"])
+                 for row in state["rows"] if row["date"] in finalize_dates]
+                if finalize_dates is not None else None
+            ),
         )
         if continuation is not None:
             rows = reference_store.queue_rows
@@ -1422,6 +1507,28 @@ def _publish_store(
             )
         if defer_references:
             baseline_report["reference_work_deferred"] = True
+        if rolling_plan is not None:
+            from . import rolling_night_references as rolling
+
+            current_queue = reference_store.queue_snapshot
+            if current_queue is None:
+                raise Stop("rolling_queue_unverified")
+            remaining = rolling.status(current_queue, today=rolling_plan["today"])
+            count = 0
+            for channels in remaining.values():
+                for item in channels.values():
+                    item["ranges"] = rolling.merge([
+                        [day, day] for day in rolling_plan["endpoints"]
+                        if any(first <= day <= last for first, last in item["ranges"])
+                    ])
+                    item["count"] = sum((date.fromisoformat(b) - date.fromisoformat(a)).days + 1
+                                        for a, b in item["ranges"])
+                    count += item["count"]
+            baseline_report.update(
+                rolling_plan_sha256=rolling_plan["reference_plan_sha256"],
+                rolling_plan_remaining=remaining,
+                rolling_plan_complete=count == 0,
+            )
         if finalize_dates is not None:
             baseline_report["finalize_dates"] = sorted(set(finalize_dates))
             cohort_names = set()
@@ -1446,9 +1553,42 @@ def _publish_store(
             ) if known and pending else 0 if known else None
             held = sum(_held(row) for row in pending.values()) if known else None
             blocked = [name for name, row in pending.items() if row.get("blocked")] if known else None
+            legacy_closed = closed
+            if known:
+                from . import rolling_discovery
+                from . import rolling_night_references as rolling
+
+                sources = [("signals" if row["stream"] == "hr" else "hrv", row["date"])
+                           for row in state["rows"] if row["date"] in finalize_dates]
+                queue = reference_store.queue_snapshot
+                remaining = rolling.status(queue, today=closure_day, sources=sources)
+                discovery = rolling_discovery.discovery_status(
+                    queue, today=closure_day, sources=sources,
+                )
+                rolling_count = sum(item["count"] for channels in remaining.values()
+                                    for item in channels.values())
+                closed += rolling_count + discovery["count"]
+                for name, row in rows.items():
+                    if not row.get("rolling_window") or not any(
+                        first <= row["end_date"] <= last
+                        for first, last in remaining[str(row["rolling_window"])][row["channel"]]["ranges"]
+                    ):
+                        continue
+                    held += bool(_held(row))
+                    if row.get("blocked"):
+                        blocked.append(name)
+                # Unknown context writes remain holds only for dependent windows.
+                held += sum(any(
+                    first <= rolling.source_range("sleep", binding["wake_date"], int(n))[1]
+                    and last >= binding["wake_date"]
+                    for n, channels in remaining.items() for item in channels.values()
+                    for first, last in item["ranges"]
+                ) for binding in queue.get("rolling_context_intents", {}).values())
+                baseline_report.update(cohort_rolling_remaining=remaining,
+                                       cohort_discovery_remaining=discovery)
             baseline_report.update(
                 cohort_closed_pending=closed,
-                cohort_deferred_open=len(pending) - closed if known else None,
+                cohort_deferred_open=len(pending) - legacy_closed if known else None,
                 cohort_held_periods=held,
                 cohort_blocked=blocked,
                 cohort_complete=bool(known and not raw_pending and closed == 0 and not held and not blocked),
@@ -1476,6 +1616,12 @@ def _publish_store(
                     **({"source_free_proof_sha256": guard.execution_context["source_free_proof_sha256"]}
                        if "source_free_proof_sha256" in guard.execution_context else {}),
                     **({"continuation_sha256": continuation_sha} if continuation_sha else {}),
+                    **({"rolling_plan_sha256": rolling_plan["reference_plan_sha256"]}
+                       if rolling_plan is not None else {}),
+                    **({"reference_round_sha256": execution_context["reference_round_sha256"]}
+                       if execution_context.get("reference_round_sha256") else {}),
+                    **({"reference_successor_sha256": execution_context["reference_successor_sha256"]}
+                       if execution_context.get("reference_successor_sha256") else {}),
                 },
                 "sources_queued": queued,
                 "source_targets_deferred": selected_count - len(done),

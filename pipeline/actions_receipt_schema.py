@@ -3,18 +3,23 @@
 import re
 from datetime import datetime, timedelta
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 RECEIPT_KIND = "actions-run-receipt"
+MORNING_SCHEDULES = (
+    {"cron_expression": "0 8 * * 1-5", "timezone": "Europe/Oslo"},
+    {"cron_expression": "0 10 * * 0,6", "timezone": "Europe/Oslo"},
+)
+# cron preserves the historical UTC configuration used by v1 receipts.
 WORKFLOWS = {
-    "refresh.yml": {"module": "pipeline.refresh", "cron": "0 */6 * * *"},
+    "refresh.yml": {"module": "pipeline.refresh", "cron": "0 */6 * * *", "schedules": MORNING_SCHEDULES},
     "activity-refresh.yml": {"module": "pipeline.activity_refresh", "cron": "15 23 * * *"},
     "scheduled-activity-backfill.yml": {
         "module": "pipeline.activity_backfill_scheduler", "cron": "30 2,8,14,20 * * *",
     },
     "scheduled-health-detail-backfill.yml": {
-        "module": "pipeline.health_detail_backfill", "cron": "15 1,7,13,19 * * *",
+        "module": "pipeline.health_detail_backfill", "cron": "15 1,7,13,19 * * *", "schedules": MORNING_SCHEDULES,
     },
-    "scheduled-hrv-backfill.yml": {"module": "pipeline.hrv_backfill", "cron": "30 4,10,16,22 * * *"},
+    "scheduled-hrv-backfill.yml": {"module": "pipeline.hrv_backfill", "cron": "30 4,10,16,22 * * *", "schedules": MORNING_SCHEDULES},
     "coach-input-backfill.yml": {"module": "pipeline.coach_backfill", "cron": "40 2,8,14,20 * * *"},
 }
 DATA_OUTCOMES = frozenset({"complete", "partial", "no_work", "not_ready", "error", "unknown", "unsupported"})
@@ -34,6 +39,14 @@ RECEIPT_FIELDS = frozenset({
     "context_status",
 })
 
+RECEIPT_FIELDS_V2 = RECEIPT_FIELDS | {"cron_timezone"}
+
+
+def configured_schedules(workflow):
+    """Current nominal schedules; never evidence of a unique trigger occurrence."""
+    config = WORKFLOWS[workflow]
+    return config.get("schedules", ({"cron_expression": config["cron"], "timezone": "UTC"},))
+
 
 def utc_time(value):
     """Parse an explicit UTC instant; never infer a timezone from a naive time."""
@@ -49,8 +62,8 @@ def validate_receipt(value):
     """Reject unknown fields/statuses; return the validated existing dictionary."""
     try:
         valid = (
-            isinstance(value, dict) and set(value) == RECEIPT_FIELDS
-            and type(value["schema_version"]) is int and value["schema_version"] == SCHEMA_VERSION
+            isinstance(value, dict) and set(value) == (RECEIPT_FIELDS_V2 if value.get("schema_version") == 2 else RECEIPT_FIELDS)
+            and type(value["schema_version"]) is int and value["schema_version"] in {1, 2}
             and value["kind"] == RECEIPT_KIND and value["workflow"] in WORKFLOWS
             and value["event"] in {"schedule", "workflow_dispatch", "workflow_run", "unknown"}
             and value["trigger_provenance"] == "unavailable"
@@ -75,8 +88,19 @@ def validate_receipt(value):
         ):
             raise ValueError("Invalid run receipt")
         cron = value["cron_expression"]
-        if cron is not None and not (value["event"] == "schedule" and cron == WORKFLOWS[value["workflow"]]["cron"]):
-            raise ValueError("Invalid run receipt")
+        if value["schema_version"] == 1:
+            if cron is not None and not (value["event"] == "schedule" and cron == WORKFLOWS[value["workflow"]]["cron"]):
+                raise ValueError("Invalid run receipt")
+        else:
+            zone = value["cron_timezone"]
+            if cron is None:
+                if zone is not None:
+                    raise ValueError("Invalid run receipt")
+            elif value["event"] != "schedule" or not any(
+                cron == item["cron_expression"] and zone == item["timezone"]
+                for item in configured_schedules(value["workflow"])
+            ):
+                raise ValueError("Invalid run receipt")
         if value["context_status"] == "valid" and (
             any(value[key] is None for key in ("run_id", "run_attempt", "head_sha"))
             or value["event"] == "unknown" or value["event"] == "schedule" and cron is None

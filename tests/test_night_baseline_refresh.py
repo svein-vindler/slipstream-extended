@@ -44,6 +44,14 @@ class WritableSnapshots(Snapshots):
         self.operations["list_pages"] += 1
         return super().list_prefix_bounded(prefix, **kwargs)
 
+    def list_revisions_bounded(self, prefix, *, max_keys):
+        self.operations["list_pages"] += 1
+        result = {key: {"revision": value.revision, "size": len(value.data)}
+                  for key, value in self.objects.items() if key.startswith(prefix)}
+        if len(result) > max_keys:
+            raise ValueError("Synthetic namespace bound")
+        return result
+
     def create_with_receipt(self, key, data, kind, **kwargs):
         if key in self.objects:
             return SimpleNamespace(accepted=False, revision=None)
@@ -81,7 +89,7 @@ class IncrementalTest(unittest.TestCase):
         self.assertTrue(
             refresh.publish_source(store, key, canonical(source).encode(), "application/json")
         )
-        first = refresh.refresh_pending(store, today="2026-10-26", timezone="Europe/Oslo")
+        first = refresh.refresh_pending(store, today="2026-10-26", timezone="Europe/Oslo", rolling_sources=[])
         self.assertEqual((first["periods_completed"], first["products_written"]), (1, 2))
         week_args = normalize_args(
             start_date="2026-10-19", end_date="2026-10-25", period="7", channel="hrv"
@@ -96,23 +104,24 @@ class IncrementalTest(unittest.TestCase):
         reopened = WritableSnapshots()
         reopened.objects = store.objects
         store = reopened
-        second = refresh.refresh_pending(store, today="2026-11-01", timezone="Europe/Oslo")
+        second = refresh.refresh_pending(store, today="2026-11-01", timezone="Europe/Oslo", rolling_sources=[])
         self.assertEqual((second["periods_completed"], second["products_written"]), (1, 2))
         reopened = WritableSnapshots()
         reopened.objects = store.objects
         store = reopened
-        self.assertEqual(refresh.refresh_pending(store, today="2026-11-02")["products_written"], 0)
+        self.assertEqual(refresh.refresh_pending(store, today="2026-11-02", rolling_sources=[])["products_written"], 0)
         source["readings"][0]["hrv_ms"] = 75
         self.assertTrue(
             refresh.publish_source(store, key, canonical(source).encode(), "application/json")
         )
-        corrected = refresh.refresh_pending(store, today="2026-11-02", timezone="Europe/Oslo")
+        corrected = refresh.refresh_pending(store, today="2026-11-02", timezone="Europe/Oslo", rolling_sources=[])
         self.assertEqual((corrected["periods_completed"], corrected["products_written"]), (2, 4))
-        self.assertEqual(corrected["status"], "complete")
+        self.assertEqual(corrected["status"], "bounded_pending")
+        self.assertEqual(corrected["discovery_remaining"]["count"], 90)
         print({"corrected_week_and_month": corrected["component_operations"]})
         reopened = WritableSnapshots()
         reopened.objects = store.objects
-        remainder = refresh.refresh_pending(reopened, today="2026-11-02", timezone="Europe/Oslo")
+        remainder = refresh.refresh_pending(reopened, today="2026-11-02", timezone="Europe/Oslo", rolling_sources=[])
         self.assertEqual(remainder["products_written"], 0)
         self.assertEqual(corrected["products_written"] + remainder["products_written"], 4)
         self.assertEqual(
@@ -198,7 +207,7 @@ class ImportBoundaryTest(unittest.TestCase):
 
 
 class NormalReportTest(unittest.TestCase):
-    def test_current_open_periods_do_not_make_a_successful_source_refresh_partial(self):
+    def test_current_open_calendars_preserve_bounded_rolling_progress_after_new_sleep(self):
         from datetime import date
         from unittest.mock import patch
 
@@ -217,16 +226,17 @@ class NormalReportTest(unittest.TestCase):
         store = R2Store(client=client, bucket="synthetic")
         first = run(days=1, store=store, garmin=SyntheticGarmin(), today=date(2026, 10, 31))
         self.assertEqual(first["status"], "complete")
-        self.assertEqual(first["baseline_refresh"]["status"], "waiting_until_close")
-        self.assertEqual(first["baseline_refresh"]["products_written"], 0)
+        self.assertEqual(first["baseline_refresh"]["status"], "bounded_pending")
+        self.assertEqual(first["baseline_refresh"]["products_written"], 2)
+        self.assertEqual(first["baseline_refresh"]["rolling_remaining"]["90"]["hrv"]["count"], 1)
         first_counts = dict(store.operations)
         second = run(days=1, store=store, garmin=SyntheticGarmin(), today=date(2026, 10, 31))
         self.assertEqual(second["status"], "complete")
         self.assertTrue(
             all(stream["objects_written"] == 0 for stream in second["streams"].values())
         )
-        self.assertEqual(second["baseline_refresh"]["status"], "waiting_until_close")
-        self.assertEqual(len([key for key in client.objects if "/baseline/" in key]), 0)
+        self.assertEqual(second["baseline_refresh"]["status"], "bounded_pending")
+        self.assertEqual(len([key for key in client.objects if "/baseline/" in key]), 4)
         print(
             json.dumps(
                 {
@@ -256,11 +266,11 @@ class UnknownTest(unittest.TestCase):
         source["readings"][0]["hrv_ms"] = 65
         refresh.publish_source(store, key, canonical(source).encode(), "application/json")
         with self.assertRaises(refresh.BaselineRefreshStop):
-            refresh.refresh_pending(store, today="2026-10-26", timezone="Europe/Oslo")
+            refresh.refresh_pending(store, today="2026-10-26", timezone="Europe/Oslo", rolling_sources=[])
         self.assertEqual(len([key for key in store.writes if "/baseline/" in key]), 1)
         reopened = WritableSnapshots()
         reopened.objects = store.objects
-        result = refresh.refresh_pending(reopened, today="2026-10-26", timezone="Europe/Oslo")
+        result = refresh.refresh_pending(reopened, today="2026-10-26", timezone="Europe/Oslo", rolling_sources=[])
         self.assertEqual(result["status"], "held")
         self.assertEqual(result["held_periods"], 1)
         self.assertEqual(reopened.writes, [])
@@ -635,7 +645,7 @@ class PreservationGateTest(unittest.TestCase):
         self.assertTrue(all(store.objects[name].data == body for name, body in old.items()))
         reopened = WritableSnapshots()
         reopened.objects = store.objects
-        refresh.refresh_pending(reopened, today="2026-10-26", timezone="Europe/Oslo")
+        refresh.refresh_pending(reopened, today="2026-10-26", timezone="Europe/Oslo", rolling_sources=[])
         self.assertFalse(any("/baseline/" in name for name in reopened.writes))
 
     def test_explicit_activation_requires_exact_stored_proof_and_never_rewrites_source(self):

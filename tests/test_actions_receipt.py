@@ -213,6 +213,7 @@ def test_validated_context_and_summary_never_infer_a_scheduled_occurrence(monkey
     assert receipt["head_sha"] == "a" * 40
     assert receipt["event"] == "schedule"
     assert receipt["cron_expression"] == "15 23 * * *"
+    assert receipt["cron_timezone"] == "UTC"
     assert receipt["scheduled_for"] is None
     assert receipt["occurrence_id"] is None
     assert receipt["job_conclusion"] is None
@@ -496,3 +497,80 @@ def test_activity_all_unsupported_preserves_native_and_other_outcomes(monkeypatc
     assert observed[0]["max_activities"] == 9
     assert observed[0]["activity_id"] == "synthetic"
     assert observed[0]["force"] is True
+
+
+@pytest.mark.parametrize("workflow,module,arguments", [
+    ("refresh.yml", "refresh", ["--workflow"]),
+    ("scheduled-health-detail-backfill.yml", "health_detail_backfill", ["--max-sleep-days", "4", "--max-body-days", "5"]),
+    ("scheduled-hrv-backfill.yml", "hrv_backfill", ["--max-days", "4"]),
+])
+@pytest.mark.parametrize("cron", ["0 8 * * 1-5", "0 10 * * 0,6"])
+def test_morning_receipt_records_configured_cron_and_oslo_without_occurrence_proof(monkeypatch, tmp_path, workflow, module, arguments, cron):
+    from pipeline.actions_receipt import main
+    from pipeline.actions_receipt_schema import validate_receipt
+
+    command = importlib.import_module("pipeline." + module)
+    observed = []
+    def operation(*args, **kwargs):
+        observed.append((args, kwargs))
+        if module == "refresh":
+            assert args[0].mode == "general"
+            assert args[0].scheduled is True
+        return {"schema_version": 1, "status": "complete", "attempted_this_run": 0,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "sleep": {"schema_version": 1, "status": "complete", "attempted_this_run": 0},
+                "body_composition": {"schema_version": 1, "status": "complete", "attempted_this_run": 0}}
+    _stub_data_command(monkeypatch, command, operation)
+    for name, value in {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "a" * 40,
+                        "GITHUB_EVENT_NAME": "schedule", "ACTIONS_CRON_EXPRESSION": cron,
+                        "REFRESH_EVENT": "schedule", "ACTIVITY_ONLY": "", "NIGHT_ONLY": ""}.items():
+        monkeypatch.setenv(name, value)
+    path = tmp_path / "morning.json"
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    assert main(["--workflow", workflow, "--receipt", str(path), "--", *arguments]) == 0
+    value = validate_receipt(json.loads(path.read_text(encoding="utf-8")))
+    assert value["schema_version"] == 2
+    assert value["context_status"] == "valid"
+    assert value["cron_expression"] == cron
+    assert value["cron_timezone"] == "Europe/Oslo"
+    assert value["scheduled_for"] is None
+    assert value["occurrence_id"] is None
+    assert value["trigger_provenance"] == "unavailable"
+    assert len(observed) == 1
+    assert "Europe/Oslo" in summary.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("event", ["workflow_dispatch", "workflow_run"])
+def test_noncron_events_never_adopt_morning_cron_or_timezone(monkeypatch, tmp_path, event):
+    from pipeline.actions_receipt import main
+
+    command = importlib.import_module("pipeline.hrv_backfill")
+    _stub_data_command(monkeypatch, command, lambda *args, **kwargs: {
+        "schema_version": 1, "status": "complete"})
+    for name, value in {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "a" * 40,
+                        "GITHUB_EVENT_NAME": event, "ACTIONS_CRON_EXPRESSION": "0 8 * * 1-5"}.items():
+        monkeypatch.setenv(name, value)
+    path = tmp_path / "manual.json"
+    assert main(["--workflow", "scheduled-hrv-backfill.yml", "--receipt", str(path), "--"]) == 0
+    value = json.loads(path.read_text(encoding="utf-8"))
+    assert value["event"] == event
+    assert value["cron_expression"] is None
+    assert value["cron_timezone"] is None
+    assert value["context_status"] == "invalid"
+
+
+@pytest.mark.parametrize("changes", [
+    {"cron_expression": "0 8 * * 1-5", "cron_timezone": "UTC"},
+    {"cron_expression": "0 */6 * * *", "cron_timezone": "Europe/Oslo"},
+    {"cron_expression": None, "cron_timezone": "Europe/Oslo"},
+])
+def test_v2_validation_rejects_unconfigured_cron_timezone_pairs(changes):
+    from pipeline.actions_receipt_schema import validate_receipt
+
+    path = Path(__file__).parent / "fixtures/actions_run/receipt.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value.update(schema_version=2, cron_expression="0 8 * * 1-5", cron_timezone="Europe/Oslo")
+    value.update(changes)
+    with pytest.raises(ValueError, match="^Invalid run receipt$"):
+        validate_receipt(value)

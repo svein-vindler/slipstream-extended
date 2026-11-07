@@ -2,7 +2,10 @@ name: Scheduled Garmin health detail backfill
 
 on:
   schedule:
-    - cron: "15 1,7,13,19 * * *"  # staggered between summary and activity jobs
+    - cron: "0 8 * * 1-5"
+      timezone: "Europe/Oslo"
+    - cron: "0 10 * * 0,6"
+      timezone: "Europe/Oslo"
   workflow_dispatch:
     inputs:
       max_sleep_days:

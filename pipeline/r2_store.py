@@ -464,6 +464,45 @@ class R2Store:
         self.operations["listed_objects"] += len(entries)
         return [item["Key"] for item in entries]
 
+    def list_revisions_bounded(self, prefix: str, *, max_keys: int) -> dict[str, dict]:
+        """Complete bounded LIST with exact quoted ETags; never infer revisions.
+
+        Rolling callers additionally bind these SDK fields to bounded native XML
+        through their scoped transport observer. Legacy listings are unchanged.
+        """
+        if type(max_keys) is not int or not 1 <= max_keys <= 3101:
+            raise ValueError("Invalid storage listing limit")
+        result, tokens = {}, set()
+        token = None
+        for _ in range((max_keys + 999) // 1000):
+            args = {"Bucket": self.bucket, "Prefix": prefix, "MaxKeys": min(1000, max_keys)}
+            if token is not None:
+                args["ContinuationToken"] = token
+            self.operations["list_pages"] += 1
+            with timed(self.timings_ms, "list"):
+                page = self.client.list_objects_v2(**args)
+            rows = page.get("Contents", [])
+            if (type(page.get("IsTruncated")) is not bool
+                    or not isinstance(rows, list) or len(rows) > args["MaxKeys"]
+                    or len(result) + len(rows) > max_keys):
+                raise R2ReadBoundaryError("schema_unverified")
+            self.operations["listed_objects"] += len(rows)
+            for row in rows:
+                if (not isinstance(row, dict) or not isinstance(row.get("Key"), str)
+                        or not row["Key"].startswith(prefix) or row["Key"] in result
+                        or type(row.get("Size")) is not int or row["Size"] < 0
+                        or _opaque_revision(row.get("ETag")) is None):
+                    raise R2ReadBoundaryError("schema_unverified")
+                result[row["Key"]] = {"revision": row["ETag"], "size": row["Size"]}
+            if page["IsTruncated"] is False:
+                return result
+            token = page.get("NextContinuationToken")
+            if (not isinstance(token, str) or not 0 < len(token) <= 4096
+                    or token in tokens or len(result) >= max_keys):
+                raise R2ReadBoundaryError("schema_unverified")
+            tokens.add(token)
+        raise R2ReadBoundaryError("schema_unverified")
+
     def create_with_receipt(
         self, key: str, data: bytes, content_type: str, *, encoding: str | None = None,
     ) -> R2WriteReceipt:

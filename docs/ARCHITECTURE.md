@@ -50,7 +50,7 @@ R2 also stores detailed HRV, sleep, body-composition, and activity exports.
 Daily summary snapshots provide recovery points without putting private fitness
 data in Git history.
 
-Every six-hour summary refresh also advances up to three newly eligible sleep
+Each scheduled summary refresh also advances up to three newly eligible sleep
 and body-composition dates, refreshes the latest three eligible detail dates so
 late Garmin corrections replace early snapshots, and rewrites the latest three
 compact HRV curves. An on-demand MCP refresh then performs the optional recent
@@ -108,8 +108,8 @@ runs return without contacting Garmin or writing another R2 object.
 Detailed overnight HRV history is filled independently by
 `scheduled-hrv-backfill.yml`. It derives its target list from dates that already
 have an HRV nightly average in the R2 daily-health summary, refreshes that list
-on every run, processes up to 100 missing curves newest first four times per day, and
-skips objects already stored under `health/hrv/`. A valid Garmin response with
+on every run, processes up to 100 missing curves newest first on the morning
+schedule below, and skips objects already stored under `health/hrv/`. A valid Garmin response with
 no detailed readings is stored once as an explicit unavailable marker instead
 of consuming three later retries. New nights therefore arrive
 while older history continues filling in. Targeting only HRV dates avoids
@@ -208,11 +208,14 @@ already complete activity without downloading the files again. A manual run can
 force one explicit activity ID when Garmin changes a binary export without
 changing any observable metadata.
 
-The schedules are deliberately staggered around the six-hour summary refresh:
-refresh runs at 00:00, 06:00, 12:00, and 18:00 UTC; health details at 01:15,
-07:15, 13:15, and 19:15; activity backfill at 02:30, 08:30, 14:30, and 20:30;
-HRV backfill at 04:30, 10:30, 16:30, and 22:30; and recent activity change
-detection once daily at 23:15. All jobs share the `garmin-sync` concurrency
+The summary refresh, health-detail backfill and HRV backfill run at 08:00
+Monday-Friday and 10:00 Saturday-Sunday in `Europe/Oslo`, using native Actions
+timezone handling for DST. Morning refresh retains general scheduled mode,
+including pulse; the local 12:30 task and manual inputs are unchanged. See
+[workflow schedules](ACTIONS_RUN_VERIFICATION.md#fixed-workflow-mapping).
+
+Activity backfill keeps 02:30, 08:30, 14:30, and 20:30 UTC; recent activity change
+detection keeps 23:15 UTC daily. All jobs share the `garmin-sync` concurrency
 group, so GitHub queues rather than overlaps delayed runs.
 
 ## 2. Serve (`worker/`)
