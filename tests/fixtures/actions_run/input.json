@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "kind": "actions-reconcile-input",
+  "day_start": "2030-01-01",
+  "day_end": "2030-01-01",
+  "as_of": "2030-01-02T12:00:00Z",
+  "observation_start": "2030-01-01T00:00:00Z",
+  "observation_end": "2030-01-02T12:00:00Z",
+  "delay_window_minutes": 180,
+  "workflow_configs": [
+    {
+      "path": "workflow.json",
+      "bytes": 130,
+      "sha256": "1db5a4f6d08c56f8b0cc4385197dffaf90fb2db6b5dfb8063c7ffe77a68d2790"
+    }
+  ],
+  "runs": [
+    {
+      "path": "run.json",
+      "bytes": 289,
+      "sha256": "cea30d408fcd09d31f47f88f7d7bf7470138b3be80a844aeec9e7912d096c8de"
+    }
+  ],
+  "jobs": [
+    {
+      "path": "job.json",
+      "bytes": 99,
+      "sha256": "da18a1cb6e971e18754a11418282dee3d9253af47f4f614f0e9547e3825b1ee8"
+    }
+  ],
+  "receipts": [
+    {
+      "path": "receipt.json",
+      "bytes": 569,
+      "sha256": "5f4950822e09c2904f182f928ff93d3401e41b4e9e6cb0b6c9f0a605ab18d8de"
+    }
+  ],
+  "trigger_evidence": [],
+  "pauses": []
+}

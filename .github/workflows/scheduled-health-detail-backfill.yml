@@ -41,6 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      ACTIONS_CRON_EXPRESSION: ${{ github.event.schedule }}
       GARMIN_PROVIDER: ${{ vars.GARMIN_PROVIDER || 'legacy' }}
       GARMIN_ACCOUNT: ${{ secrets.GARMIN_ACCOUNT }}
       HEALTH_TIMEZONE: ${{ secrets.HEALTH_TIMEZONE }}
@@ -79,4 +80,4 @@ jobs:
           if [[ -n "$REPAIR_BODY_START" || -n "$REPAIR_BODY_END" ]]; then
             args+=(--repair-body-start "$REPAIR_BODY_START" --repair-body-end "$REPAIR_BODY_END")
           fi
-          python -m pipeline.health_detail_backfill "${args[@]}"
+          python -m pipeline.actions_receipt --workflow scheduled-health-detail-backfill.yml --receipt "$RUNNER_TEMP/actions-run-receipt.json" -- "${args[@]}"

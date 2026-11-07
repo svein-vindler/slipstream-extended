@@ -1306,7 +1306,7 @@ def main():
     parser.add_argument("--max-activities", type=int, default=50)
     args = parser.parse_args()
     try:
-        run(max_activities=args.max_activities)
+        return run(max_activities=args.max_activities)
     except ValueError as exc:
         parser.error(str(exc))
 

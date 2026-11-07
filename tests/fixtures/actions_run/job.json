@@ -1,0 +1,6 @@
+{
+  "workflow": "refresh.yml",
+  "run_id": "1001",
+  "run_attempt": 1,
+  "conclusion": "success"
+}

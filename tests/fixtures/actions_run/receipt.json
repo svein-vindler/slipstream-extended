@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "kind": "actions-run-receipt",
+  "workflow": "refresh.yml",
+  "run_id": "1001",
+  "run_attempt": 1,
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "event": "schedule",
+  "cron_expression": "0 */6 * * *",
+  "scheduled_for": null,
+  "occurrence_id": null,
+  "trigger_provenance": "unavailable",
+  "started_at": "2030-01-01T00:17:00Z",
+  "finished_at": "2030-01-01T00:18:00Z",
+  "native_exit": 0,
+  "command_outcome": "success",
+  "job_conclusion": null,
+  "data_outcome": "partial",
+  "counters": {},
+  "context_status": "valid"
+}

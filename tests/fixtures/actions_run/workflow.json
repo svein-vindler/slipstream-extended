@@ -1,0 +1,9 @@
+{
+  "workflow": "refresh.yml",
+  "schedules": [
+    {
+      "cron_expression": "0 */6 * * *",
+      "timezone": "UTC"
+    }
+  ]
+}

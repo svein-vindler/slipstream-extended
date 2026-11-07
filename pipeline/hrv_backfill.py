@@ -271,7 +271,7 @@ def main():
     parser.add_argument("--retry-failures", action="store_true")
     args = parser.parse_args()
     try:
-        run(max_days=args.max_days, retry_failures=args.retry_failures)
+        return run(max_days=args.max_days, retry_failures=args.retry_failures)
     except ValueError as exc:
         parser.error(str(exc))
 

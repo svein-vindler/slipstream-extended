@@ -38,6 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      ACTIONS_CRON_EXPRESSION: ${{ github.event.schedule }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -55,4 +56,4 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - name: Generate bounded missing coach inputs from existing R2 artifacts
-        run: python -m pipeline.coach_backfill --max-activities "$MAX_ACTIVITIES"
+        run: python -m pipeline.actions_receipt --workflow coach-input-backfill.yml --receipt "$RUNNER_TEMP/actions-run-receipt.json" -- --max-activities "$MAX_ACTIVITIES"
