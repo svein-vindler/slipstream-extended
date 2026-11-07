@@ -445,7 +445,7 @@ def missing_hr():
     }
 
 
-def dated_call(fixture, monkeypatch, before, after, *, reload=True):
+def dated_call(fixture, monkeypatch, before, after, *, reload=True, max_seconds=899):
     from pipeline import history_collect, history_state
 
     reader, sends, saved, clock, state = fixture
@@ -486,7 +486,7 @@ def dated_call(fixture, monkeypatch, before, after, *, reload=True):
             "plan": job.plan_sha,
             "nonce": lease["nonce"],
             "max_http": 8,
-            "max_seconds": 899,
+            "max_seconds": max_seconds,
             "archive_reload": reload,
         },
     )
@@ -513,7 +513,7 @@ def test_real_sdk_explicit_null_hr_reaches_opt_in_reload_and_full_wait(fixture, 
     assert (
         len([url for method, url, _ in sends if method == "POST" and "/epoch/request/" in url]) == 1
     )
-    assert state.request_times[4] - state.request_times[3] >= 120
+    assert state.request_times[4] - state.request_times[3] == 60
     assert json.loads(saved[str(folder / "hr-03.wire")]) == before
     assert json.loads(saved[str(folder / receipt["targets"][0]["wire"])]) == after
     assert receipt["HTTP"] == 5
@@ -537,7 +537,7 @@ def test_real_sdk_http204_remains_empty_and_can_reach_opt_in_reload(fixture, mon
     assert receipt["targets"][0]["status"] == "ready" and receipt["HTTP"] == 5
     assert [method for method, _, _ in sends] == ["GET", "GET", "GET", "POST", "GET"]
     assert saved[str(folder / "hr-03.wire")] == b""
-    assert state.request_times[4] - state.request_times[3] >= 120
+    assert state.request_times[4] - state.request_times[3] == 60
 
 
 def test_real_sdk_explicit_null_without_reload_is_unresolved_not_summary_curve(
@@ -561,8 +561,35 @@ def test_real_sdk_still_null_after_one_reload_remains_unresolved(fixture, monkey
     assert native == 0 and receipt["targets"][0]["status"] == "empty_unresolved"
     assert receipt["HTTP"] == 5
     assert [m for m, _, _ in sends] == ["GET", "GET", "GET", "POST", "GET"]
-    assert state.request_times[4] - state.request_times[3] >= 120
+    assert state.request_times[4] - state.request_times[3] == 60
     assert json.loads(saved[str(folder / "hr-05.wire")])["heartRateValues"] is None
+
+
+@pytest.mark.parametrize("stop", ["cancel", "deadline"])
+def test_real_sdk_archive_wait_stops_without_reread_or_extra_reload(fixture, monkeypatch, stop):
+    reader, sends, saved, clock, state = fixture
+    cancelled = False
+    sleep = clock.sleep
+
+    def interruptible_sleep(seconds):
+        nonlocal cancelled
+        sleep(seconds)
+        if stop == "cancel" and sends and sends[-1][0] == "POST":
+            cancelled = True
+
+    monkeypatch.setattr(clock, "sleep", interruptible_sleep)
+    monkeypatch.setattr(Folder, "exists", lambda path: cancelled and path.name == "CANCEL")
+    before = missing_hr()
+    native, receipt, folder = dated_call(
+        fixture, monkeypatch, before, before, max_seconds=40 if stop == "deadline" else 899
+    )
+    assert native == 2 and receipt["status"] == "stopped"
+    assert receipt["category"] == "cancelled_or_deadline"
+    assert receipt["reload_ACK"] == 1 and receipt["HTTP"] == 4
+    assert [method for method, _, _ in sends] == ["GET", "GET", "GET", "POST"]
+    assert clock.monotonic() - state.request_times[3] == (1 if stop == "cancel" else 36)
+    assert json.loads(saved[str(folder / "hr-03.wire")]) == before
+    assert state.fitness_values == [before]
 
 
 @pytest.mark.parametrize(
