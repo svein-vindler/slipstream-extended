@@ -83,10 +83,13 @@ python -m pipeline.history_backfill collect --plan-sha PLAN_SHA256 --confirm-clo
 ```
 
 For a date with missing detail this sends at most one fixed archive reload,
-waits the full 120 seconds and reads each missing stream once more. It never
+waits the full fixed 60 seconds and reads each missing stream once more. It never
 retries a reload. Positive data is established by after-read data, not the reload
 acknowledgement. Waiting is serial in this initial portable version. Ordinary
 Garmin/MCP access remains GET-only: no shared write switch is introduced.
+The fixed delay is local policy, not a measured Garmin readiness minimum.
+Readiness at 60 seconds still needs authorized live observation; this change
+does not admit another poll, reload or retry if the after-read is unresolved.
 Personal API archive reload is unverified and unsupported; requesting it records
 `unsupported` without credentials or HTTP, and never switches to legacy.
 Personal ordinary supported HR/HRV reads keep using the existing adapter.
@@ -134,7 +137,7 @@ R2-only `publish` command; do not replay already delivered source targets.
 The existing account binding and selected cached auth remain in use; no new
 credential or interactive login is required by this experiment option. All other
 contracts remain: eight HTTP per date including auth/identity, serial 1.5-second
-pacing, one date-bound reload, the full 120-second archive wait, bounded bodies
+pacing, one date-bound reload, the full 60-second archive wait, bounded bodies
 and deadlines, preserved primary/cleanup/native evidence, actual single-writer
 control and restore, and unchanged R2 budgets, conditional writes and readback.
 
@@ -362,7 +365,7 @@ response, profile binding, source UTC/local clocks and nulls are retained. A
 whole HTTP200 body of `null`, a missing curve key, malformed points, wrong
 date/profile or an unknown null-envelope schema stops before a reload. HTTP204
 remains a valid empty response. With the separate archive opt-in, a verified
-empty channel can use the existing one-reload/full120-second-wait path; a still
+empty channel can use the existing one-reload/full60-second-wait path; a still
 empty after-read remains unresolved. No normalizer fabricates a zero curve or
 replaces a good stored curve from this absence.
 Raw wires and their source clocks/nulls remain preserved even if a later phase

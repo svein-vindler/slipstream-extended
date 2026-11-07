@@ -222,6 +222,12 @@ def test_reload_preserves_first_completed_stream_when_next_physical_read_is_deni
     row = next(r for r in job.snapshot()["rows"] if r["stream"] == "hr")
     receipt = json.loads((__import__("pathlib").Path(row["folder"]) / "RECEIPT.json").read_bytes())
     assert receipt["reload_ACK"] == 1 and receipt["HTTP"] == 7
+    assert receipt["timings"]["source_wait_seconds"] == 67.5
+    folder = __import__("pathlib").Path(row["folder"])
+    requests = [json.loads(path.read_bytes()) for path in sorted(folder.glob("http-??.json"))]
+    assert [request["kind"] for request in requests] == [
+        "identity_auth", "identity_auth", "hr", "hrv", "reload", "hr", "hrv"
+    ]
 
 
 def test_publish_cleanup_failure_inside_unrelated_caller_except_never_becomes_success(
@@ -289,7 +295,7 @@ def test_phase_times_measure_source_wait_and_storage_without_inventing_external_
         job, job.plan_sha, confirm=True, reload=True, date_runner=native_runner("reload_sibling")
     )
     times = source["last_run_timings"]
-    assert times["source_wait_seconds"] >= 120
+    assert times["source_wait_seconds"] == 67.5
     assert times["network_seconds"] >= 0 and times["local_compute_seconds"] >= 0
     assert times["r2_seconds"] is None and times["control_seconds"] >= 0
     published = publish(job, job.plan_sha, confirm=True, store=storage(Server()))

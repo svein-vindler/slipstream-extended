@@ -173,7 +173,7 @@ def test_legacy_archive_is_dated_raw_sdk_capture_and_one_reload(monkeypatch, tmp
     source.reload()
     before = source.clock.monotonic()
     source.wait_archive()
-    assert source.clock.monotonic() - before == 120
+    assert source.clock.monotonic() - before == 60
     result = source.read("hr")
     assert result["status"] == "ready"
     assert json.loads((tmp_path / result["wire"]).read_bytes()) == raw

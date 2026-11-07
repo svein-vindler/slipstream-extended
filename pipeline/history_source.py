@@ -534,9 +534,9 @@ class HistorySource:
         self.reload_at = self.clock.monotonic()
 
     def wait_archive(self):
-        while self.clock.monotonic() - self.reload_at < 120:
+        while self.clock.monotonic() - self.reload_at < 60:
             self.checkpoint()
-            self._sleep(min(1, 120 - (self.clock.monotonic() - self.reload_at)))
+            self._sleep(min(1, 60 - (self.clock.monotonic() - self.reload_at)))
 
     def close(self):
         first = None
