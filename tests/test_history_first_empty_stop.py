@@ -128,11 +128,23 @@ def test_daily_first_empty_channel_stops_source_and_allows_verified_publication(
         return
 
     # The ordinary explicit R2-only CLI remains usable while source is paused.
-    assert history_backfill.main([
+    before_completion_wire = list(system.server.calls)
+    before_completion_puts = list(system.server.puts)
+    publication_native = history_backfill.main([
         "--state", str(job.folder), "publish", "--plan-sha", job.plan_sha,
         "--confirm-r2-write",
-    ]) == 0
-    published = json.loads(capsys.readouterr().out)
+    ])
+    if publication_native == 2:
+        # New rolling work may exhaust this round after the positive canonical
+        # ACK. An explicit command cannot silently refund those fourteen phases.
+        assert reopened.status()["baseline_refresh"]["execution_totals"]["phases"] == 14
+        assert system.server.calls == before_completion_wire
+        assert system.server.puts == before_completion_puts
+        capsys.readouterr()
+        published = reopened.status()
+    else:
+        assert publication_native == 0
+        published = json.loads(capsys.readouterr().out)
     rows = {(row["date"], row["stream"]): row for row in reopened.snapshot()["rows"]}
     assert rows[day, positive_stream]["status"] == "published"
     assert rows[day, empty_stream]["status"] == "empty_unresolved"
@@ -151,7 +163,7 @@ def test_daily_first_empty_channel_stops_source_and_allows_verified_publication(
         assert canonical["archive_hrv_quality_v1"]["missing_value_count"] == 1
     assert published["pause"] == "no_more_observed" and not published["locked"]
     with capsys.disabled():
-        print(json.dumps({"case": empty_stream, "stage": "publish", "native": 0,
+        print(json.dumps({"case": empty_stream, "stage": "publish", "native": publication_native,
                           "physical_HTTP": len(system.source_calls),
                           "physical_R2": dict(transport_counts(system.server.calls)),
                           "baseline_status": published["baseline_refresh"]["status"],

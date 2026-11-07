@@ -34,7 +34,7 @@ class MeasuredServer(Server):
         return response
 
 
-def daily_system(monkeypatch):
+def daily_system(monkeypatch, *, start="2025-12-27", end="2026-01-26"):
     """Keep SDK/R2Store/Meter/Job real; replace I/O, clock and child launch only."""
     files = memory_filesystem(monkeypatch)
     clock = Clock()
@@ -53,7 +53,7 @@ def daily_system(monkeypatch):
 
     monkeypatch.setattr(night_baseline_refresh, "datetime", Calendar)
     chosen = ProviderSelection("legacy", "synthetic", '{"di_token":"synthetic"}')
-    job = Job.create("daily-capacity", "2025-12-27", "2026-01-26", ["hr", "hrv"],
+    job = Job.create("daily-capacity", start, end, ["hr", "hrv"],
                      "legacy", "synthetic")
     active, source_calls, dated_reads, native_results = {}, [], Counter(), []
 

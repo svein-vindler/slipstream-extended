@@ -83,7 +83,7 @@ def test_one_of_three_continuation_keeps_original_cohort_and_budget_for_daily(mo
                       "continued": after["execution_totals"]}))
 
 
-def test_completed_original_cohort_opens_next_baseline_with_unrelated_queue_pending(monkeypatch):
+def test_completed_calendar_continuation_retains_rolling_rest_before_new_source_round(monkeypatch):
     system = daily_system(monkeypatch)
     job, files = system.job, system.files
     old_day, unrelated_day, next_day = "2025-12-28", "2026-01-26", "2026-01-25"
@@ -108,27 +108,25 @@ def test_completed_original_cohort_opens_next_baseline_with_unrelated_queue_pend
     ))
     reference = continuation["baseline_refresh"]
     assert reference["continuation_complete"] is True
-    assert reference["original_cohort_complete"] is True
-    assert reference["cohort_complete"] is True
+    assert reference["original_cohort_complete"] is False
+    assert reference["cohort_complete"] is False
+    assert reference["cohort_closed_pending"] > 0
     pending = json.loads(system.server.objects[QUEUE_KEY][0])["pending"]
-    assert set(pending) == {"week/2026-W04", "week/2026-W05", "month/2026-01"}
-    assert reference["closed_pending"] == 3
+    calendar_pending = {name for name, row in pending.items() if not row.get("rolling_window")}
+    assert calendar_pending == {"week/2026-W04", "week/2026-W05", "month/2026-01"}
+    assert reference["closed_pending"] >= 3
     # A new Job reconstructs completion and cumulative usage from durable bytes.
     job = Job(job.folder)
     daily = history_backfill.daily(job, SimpleNamespace(
         confirm_cloud_jobs_paused=True, confirm_r2_write=True, max_dates=1, max_http=8,
         plan_sha=job.plan_sha, resume=False, archive_reload=False, ledger=[], max_wait_seconds=0,
     ), clock=system.clock)
-    first = daily["daily_baseline_reports"][0]
-    assert first["finalize_dates"] == [next_day]
-    totals = first["execution_totals"]
-    assert totals["round_baseline"] == {
-        "counts": reference["execution_totals"]["counts"],
-        "body_bytes": reference["execution_totals"]["body_bytes"],
-    }
-    assert totals["phases"] == 1 and totals["independent_gets"] == 0
-    assert totals["counts"]["get"] > reference["execution_totals"]["counts"]["get"]
+    # The next already-stored date joins the original pending references; the
+    # selected calendar continuation was not global completion or a source call.
+    assert daily["daily_baseline_reports"][0]["finalize_dates"] == sorted([old_day, next_day])
+    assert daily["daily_publication_phases"] <= 14
+    assert daily["daily_status"] == "baselines_pending"
     assert all(files[name] == body for name, body in old_receipts.items())
     assert system.source_calls == source_before
-    print(json.dumps({"completed_original": reference["execution_totals"],
-                      "new_round_first_phase": totals}))
+    print(json.dumps({"completed_calendar": reference["execution_totals"],
+                      "rolling_remaining": reference["cohort_rolling_remaining"]}))

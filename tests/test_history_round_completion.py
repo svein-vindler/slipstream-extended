@@ -271,7 +271,7 @@ def test_thirty_date_daily_finishes_closed_references_with_shared_measured_budge
             sort_keys=True,
         )
     )
-    assert result["daily_status"] == "bounded_complete"
+    assert result["daily_status"] == "baselines_pending"
     assert result["counts"] == {"published": 60}
     assert result["daily_HTTP"] == 210
     assert len(source_calls) == 210
@@ -294,11 +294,11 @@ def test_thirty_date_daily_finishes_closed_references_with_shared_measured_budge
         else:
             assert value["archive_hrv_quality_v1"]["missing_readings"][0]["hrvValue"] is None
     queue = json.loads(server.objects[QUEUE_KEY][0])
-    assert queue["pending"] == {}
+    assert all(row.get("rolling_window") for row in queue["pending"].values())
     products = [
         json.loads(body) for key, (body, _) in server.objects.items() if "/baseline/" in key
     ]
-    assert len(products) == 16
+    assert len(products) >= 16
     # Literal ISO Monday-Sunday ranges include the prior ISO year and the
     # incomplete edge weeks. Thirty collected dates do not fill either month.
     expected = {
@@ -311,10 +311,12 @@ def test_thirty_date_daily_finishes_closed_references_with_shared_measured_budge
         ("2026-01-19", "2026-01-25"): 7,
         ("2026-01-26", "2026-02-01"): 1,
     }
-    assert Counter((p["args"]["start_date"], p["args"]["end_date"]) for p in products) == Counter(
+    calendar_products = [p for p in products
+                         if (p["args"]["start_date"], p["args"]["end_date"]) in expected]
+    assert Counter((p["args"]["start_date"], p["args"]["end_date"]) for p in calendar_products) == Counter(
         {key: 2 for key in expected}
     )
-    for product in products:
+    for product in calendar_products:
         assert (
             product["contributing_nights"]
             == expected[product["args"]["start_date"], product["args"]["end_date"]]
@@ -355,30 +357,26 @@ def test_thirty_date_daily_finishes_closed_references_with_shared_measured_budge
         list(server.puts),
     )
     repeat = history_backfill.daily(Job(job.folder), args)
-    assert repeat["daily_status"] == "bounded_complete"
-    assert repeat["daily_HTTP"] == 0 and len(source_calls) == before_source
-    assert server.puts == before_puts and len(server.calls) == before_wire + 1
+    assert repeat["daily_status"] == "baselines_pending"
+    assert len(source_calls) == before_source
+    assert len(server.puts) > len(before_puts) and len(server.calls) > before_wire
+    assert Counter(key for key in server.puts if key in raw_writes) == raw_writes
     repeat_totals = repeat["baseline_refresh"]["execution_totals"]
-    assert server.calls[before_wire:] == [("GET", QUEUE_KEY, {})]
-    assert repeat["baseline_refresh"]["publication_counts"] == {"get": 1, "list": 0, "put": 0}
-    assert repeat_totals["counts"] == {
-        "get": totals["counts"]["get"] + 1,
-        "list": totals["counts"]["list"],
-        "put": totals["counts"]["put"],
-    }
+    assert all(repeat_totals["counts"][kind] > totals["counts"][kind] for kind in ("get", "list", "put"))
     repeat_wire = Counter(
         "list" if query.get("list-type") == ["2"] else "put" if method == "PUT" else "get"
         for method, _, query in server.calls
     )
     assert repeat_totals["counts"] == dict(repeat_wire)
-    assert repeat_totals["body_bytes"] == totals["body_bytes"]
+    assert repeat_totals["body_bytes"] > totals["body_bytes"]
     final_run = next(frame["event"]["run"] for frame in reversed(job.events()[0])
                      if frame["event"]["type"] == "end"
                      and frame["event"].get("status") == "published")
     receipt = json.loads(files[str(job.folder / "runs" / final_run / "REMOTE-VERIFIED.json")])
     assert receipt["baseline_refresh"]["execution_totals"] == repeat_totals
     print(json.dumps({"repeat_prior_totals": totals, "repeat_totals": repeat_totals,
-                      "repeat_physical_delta": server.calls[before_wire:]}))
+                      "repeat_physical_delta": {kind: repeat_totals["counts"][kind] - totals["counts"][kind]
+                                                for kind in ("get", "list", "put")}}))
 
 
 def test_daily_finishes_prior_cohort_and_collects_new_dates_without_rewrites(monkeypatch):
@@ -406,14 +404,17 @@ def test_daily_finishes_prior_cohort_and_collects_new_dates_without_rewrites(mon
     result = history_backfill.daily(job, args)
     # A pending prior publication cohort joins the new round. Its stored date
     # cannot finish the daily target or trigger a duplicate source/raw write.
-    assert result["daily_status"] == "bounded_complete"
+    assert result["daily_status"] == "baselines_pending"
     assert result["daily_HTTP"] == 210
     assert result["counts"] == {"published": 62}
     assert old_day not in {day for day, _, _ in system.source_calls[source_count:]}
     assert len({day for day, _, _ in system.source_calls[source_count:]}) == 30
     assert old_day in result["baseline_refresh"]["finalize_dates"]
     assert len(result["baseline_refresh"]["finalize_dates"]) == 31
-    assert result["baseline_refresh"]["closed_pending"] == 0
+    assert result["baseline_refresh"]["closed_pending"] > 0
+    assert result["daily_publication_phases"] == 13
+    assert result["daily_reference_epoch_phases"] == 14
+    assert result["daily_publication_phases_total"] == 14
     wire = transport_counts(server.calls)
     totals = result["baseline_refresh"]["execution_totals"]
     assert totals["counts"] == {"get": wire["GET"] + wire["HEAD"],
@@ -435,7 +436,8 @@ def test_daily_with_unknown_legacy_cohort_keeps_closed_global_references_pending
     )
     assert first["counts"] == {"published": 1}
     assert first["baseline_refresh"].get("finalize_dates") is None
-    assert first["baseline_refresh"]["closed_pending"] == 3
+    assert first["baseline_refresh"]["closed_pending"] == (
+        3 + first["baseline_refresh"]["discovery_eligible_remaining"]["count"])
     before_puts = list(server.puts)
     native_client = boto3.client
 
@@ -465,6 +467,7 @@ def test_daily_with_unknown_legacy_cohort_keeps_closed_global_references_pending
     result = history_backfill.daily(job, args)
     assert result["daily_status"] == "baselines_pending"
     assert result["daily_HTTP"] == 0
-    assert result["baseline_refresh"]["closed_pending"] == 3
+    assert result["baseline_refresh"]["closed_pending"] == (
+        3 + result["baseline_refresh"]["discovery_eligible_remaining"]["count"])
     assert result["counts"] == {"published": 1}
     assert server.puts == before_puts

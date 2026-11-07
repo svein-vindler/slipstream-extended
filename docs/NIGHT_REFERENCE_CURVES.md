@@ -1,5 +1,11 @@
 # Personal night reference curves
 
+Ordinary ingestion and the local daily job maintain rolling HR/HRV references
+through the existing queue. See [incremental refresh](NIGHT_BASELINE_REFRESH.md)
+and [explicit stored-only planning](ROLLING_NIGHT_REFERENCES.md). A 30-night
+product uses the existing `custom` period with an inclusive 30-date range;
+`28` and `90` keep their existing presets and stored keys.
+
 `night_baseline` reads a precomputed reference curve made from exported native
 night signals. The offline Python command builds the product; it does not fetch
 Garmin data, scan R2, upload the product or fill historical gaps. The Worker reads

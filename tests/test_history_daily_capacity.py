@@ -16,7 +16,7 @@ from pipeline.night_baseline_refresh import QUEUE_KEY
 from pipeline.r2_store import R2Store
 
 
-def test_daily_publishes_thirty_new_dates_plus_stored_backlog_and_all_closed_references(monkeypatch):
+def test_daily_publishes_thirty_new_dates_and_reports_rolling_rest_within_original_caps(monkeypatch):
     system = daily_system(monkeypatch)
     job, server, files = system.job, system.server, system.files
     # A real prior source receipt supplies the newest stored-only date. It must
@@ -70,7 +70,9 @@ def test_daily_publishes_thirty_new_dates_plus_stored_backlog_and_all_closed_ref
                                       and frame["event"].get("status") == "published"],
     }
     print(json.dumps(measurements, sort_keys=True))
-    assert result["daily_status"] == "bounded_complete", measurements
+    assert result["daily_status"] == "baselines_pending", measurements
+    assert reports[-1]["cohort_complete"] is False
+    assert reports[-1]["cohort_rolling_remaining"]["90"]["hrv"]["count"] == 31
     assert result["counts"] == {"published": 62}
     expected_new_dates = {(date(2025, 12, 27) + timedelta(days=offset)).isoformat()
                           for offset in range(30)}
@@ -101,7 +103,9 @@ def test_daily_publishes_thirty_new_dates_plus_stored_backlog_and_all_closed_ref
             assert [p["value"] for p in channel["readings"]] == [55]
         else:
             assert value["archive_hrv_quality_v1"]["missing_readings"][0]["hrvValue"] is None
-    assert json.loads(snapshots[QUEUE_KEY].data)["pending"] == {}
+    queue = json.loads(snapshots[QUEUE_KEY].data)
+    assert all(row.get("rolling_window") for row in queue["pending"].values())
+    assert queue["rolling"]["eligible"] == [["2025-12-27", "2026-01-26"]]
     indexes = {key: decode(snapshot.data) for key, snapshot in snapshots.items()
                if key.startswith("health/indexes/hrv/")}
     assert set(indexes) == {"health/indexes/hrv/v1/2025/12.json", "health/indexes/hrv/v1/2026/01.json"}
@@ -116,9 +120,11 @@ def test_daily_publishes_thirty_new_dates_plus_stored_backlog_and_all_closed_ref
                 ("2025-12-22", "2025-12-28"): 2, ("2025-12-29", "2026-01-04"): 7,
                 ("2026-01-05", "2026-01-11"): 7, ("2026-01-12", "2026-01-18"): 7,
                 ("2026-01-19", "2026-01-25"): 7, ("2026-01-26", "2026-02-01"): 1}
-    assert Counter((p["args"]["start_date"], p["args"]["end_date"]) for p in products) == Counter(
+    calendar_products = [p for p in products
+                         if (p["args"]["start_date"], p["args"]["end_date"]) in expected]
+    assert Counter((p["args"]["start_date"], p["args"]["end_date"]) for p in calendar_products) == Counter(
         {period: 2 for period in expected})
-    for product in products:
+    for product in calendar_products:
         assert product["contributing_nights"] == expected[
             product["args"]["start_date"], product["args"]["end_date"]]
         assert {b["p50"] for b in product["bins"] if b["nights"]} == {
@@ -141,6 +147,9 @@ def test_daily_publishes_thirty_new_dates_plus_stored_backlog_and_all_closed_ref
     # spending source calls or rewriting already acknowledged canonical objects.
     before_http, before_wire, before_puts = len(system.source_calls), len(server.calls), list(server.puts)
     repeated = daily(Job(job.folder), args)
-    assert repeated["daily_status"] == "bounded_complete"
-    assert repeated["daily_HTTP"] == 0 and len(system.source_calls) == before_http
-    assert server.puts == before_puts and len(server.calls) == before_wire + 1
+    assert repeated["daily_status"] == "baselines_pending"
+    assert repeated["daily_publication_phases"] == 14
+    assert len(system.source_calls) == before_http
+    assert len(server.calls) > before_wire
+    assert len(server.puts) > len(before_puts)
+    assert repeated["baseline_refresh"]["cohort_rolling_remaining"] != reports[-1]["cohort_rolling_remaining"]

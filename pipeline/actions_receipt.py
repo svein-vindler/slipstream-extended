@@ -13,6 +13,7 @@ from .actions_receipt_schema import (
     RECEIPT_KIND,
     SCHEMA_VERSION,
     WORKFLOWS,
+    configured_schedules,
     utc_time,
     validate_receipt,
 )
@@ -51,12 +52,13 @@ def _context(workflow):
             invalid = True
         values["event"] = "unknown"
     cron = os.environ.get("ACTIONS_CRON_EXPRESSION")
-    values["cron_expression"] = (
-        cron if values["event"] == "schedule" and cron == WORKFLOWS[workflow]["cron"] else None
-    )
+    zone = next((item["timezone"] for item in configured_schedules(workflow)
+                 if cron == item["cron_expression"]), None)
+    values["cron_expression"] = cron if values["event"] == "schedule" and zone else None
+    values["cron_timezone"] = zone if values["cron_expression"] is not None else None
     if values["event"] == "schedule" and not cron:
         missing = True
-    if cron and (values["event"] != "schedule" or cron != WORKFLOWS[workflow]["cron"]):
+    if cron and (values["event"] != "schedule" or zone is None):
         invalid = True
     values["context_status"] = "invalid" if invalid else "missing" if missing else "valid"
     return values
@@ -221,7 +223,7 @@ def _emit(receipt, receipt_path):
                     f"Actions receipt: {receipt['workflow']} — command {receipt['command_outcome']}; "
                     f"data {receipt['data_outcome']}; native exit {receipt['native_exit']}.\n"
                     f"Run {receipt['run_id']}; attempt {receipt['run_attempt']}; head {receipt['head_sha']}.\n"
-                    f"Event {receipt['event']}; configured cron {receipt['cron_expression']}; context {receipt['context_status']}.\n"
+                    f"Event {receipt['event']}; configured cron {receipt['cron_expression']}; timezone {receipt['cron_timezone']}; context {receipt['context_status']}.\n"
                     f"Actual UTC start {receipt['started_at']}; finish {receipt['finished_at']}.\n"
                     "Scheduled occurrence unavailable; final job conclusion unavailable.\n"
                 )

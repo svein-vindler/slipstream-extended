@@ -45,6 +45,23 @@ class HealthClient(SummaryClient):
         self.writes.append(kwargs["Key"])
         return super().put_object(**kwargs)
 
+    def list_objects_v2(self, *, Bucket, Prefix, MaxKeys, ContinuationToken=None):
+        assert type(MaxKeys) is int and 1 <= MaxKeys <= 1000
+        offset = int(ContinuationToken or "0")
+        assert offset >= 0
+        rows = [
+            {"Key": key, "Size": len(value["Body"]), "ETag": self._etag(value["Body"])}
+            for key, value in sorted(self.objects.items()) if key.startswith(Prefix)
+        ]
+        self.counts["list"] += 1
+        self.prefixes.append(Prefix)
+        page = rows[offset:offset + MaxKeys]
+        response = {"Contents": page, "IsTruncated": offset + len(page) < len(rows),
+                    "KeyCount": len(page), "MaxKeys": MaxKeys, "Prefix": Prefix}
+        if response["IsTruncated"]:
+            response["NextContinuationToken"] = str(offset + len(page))
+        return response
+
     def get_paginator(self, name):
         assert name == "list_objects_v2"
         client = self

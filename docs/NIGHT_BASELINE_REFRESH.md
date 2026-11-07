@@ -2,10 +2,51 @@
 
 The existing ingestion commands maintain personal HR/HRV `night-baseline-v1`
 products from R2 sources, using the unchanged `pipeline.night_products` producer.
-The arguments remain `sleep_start`, 30-minute bins, no filters/exclusions, full
-Monday-Sunday ISO weeks and full calendar months. Keys and Worker reader schema
+The arguments remain `sleep_start`, 30-minute bins and no filters/exclusions.
+Full Monday-Sunday ISO weeks and full calendar months remain supported alongside
+rolling 28/30/90-night references. Keys and Worker reader schema
 remain compatible with previously generated references; a week crossing a month
 or ISO-year boundary is not clipped or regrouped.
+
+## Rolling windows and bounded historical discovery
+
+For a verified local wake-date endpoint D, a window N includes exactly
+D-(N-1)..D, including D. HR and HRV have independent queued products and coverage;
+missing nights are gaps, never zeros. The same native engine preserves units,
+alignment, nulls, actual local clocks and DST. Existing Worker `night_baseline`
+reads stored products: use periods `28`, `90`, or `custom` with a 30-date inclusive
+range. The reader does not calculate missing references or start a sync.
+
+The existing durable queue stores compact eligible/dirty date ranges. A changed
+sleep/HRV source day invalidates every eligible D through d+N-1, not only d.
+HR calendar dependencies use a conservative four-day margin for rolling work;
+the established week/month mapping is unchanged. Bounded discovery checks only
+Sleep month prefixes inside the affected horizon, verifies usable stored Sleep
+bytes and registers endpoints. Discovery candidates are explicitly distinct from
+known eligible channel jobs. Historical absence never becomes a fabricated night.
+
+At most two publication rows are materialized per phase, with the unchanged
+128-row/262144-byte queue bounds. Discovery and channel remainders persist across
+phases. Daily raw staging defers references until canonical ACK/readback; the
+finishing phases include the original source cohort's later rolling endpoints.
+A completed source stage is not proof of completed rolling references.
+
+Overlapping windows share a bounded source cache. Fresh bounded monthly revision
+inventories gate reuse; two fresh publication fences independently verify source
+revision, size and per-day context membership. A cached body alone never proves
+freshness. Canonical month inventories cap at 63 keys; context months at 3101.
+No new full bucket enumeration is introduced for rolling discovery or planning.
+
+Context appends first reserve a queue intent. Only the confirmed immutable append
+with exact event readback can durably enqueue invalidation. During an overlapping
+publisher, a `saved` marker retains the event revision and dirty work while the
+publisher row stays intact. The append owner releases its day claim only after
+that queue CAS and exact readback; this confirms queued work, not fresh products.
+The consumer later verifies the immutable event and every recorded effect before
+restarting a generation at a checkpoint with no inflight write or source intent.
+Unknown append/queue outcomes and inflight writes retain HOLD. A confirmed append
+remains `saved: true` even if subsequent invalidation fails: retry the read,
+never append the event again. Stored reads do not perform this write-side repair.
 
 ## Existing entry points
 
@@ -15,9 +56,12 @@ The hook covers `health_sync.store_day` (sleep/HRV),
 `health_detail_backfill`, `night_local_repair`, and HRV R2 `granular_export`.
 Unsupported streams do not trigger storage reads. Local-file-only export stays
 local. The opt-in `pipeline.history_backfill publish` also uses this source hook.
-It drains at most two existing closed periods before source/index work, leaves
-newly queued work for a later explicit publish or ordinary ingestion, and never
-adds a budget/stage or fetches Garmin in its publication phase. See
+It drains at most two selected periods per bounded phase and never fetches Garmin
+in its publication phase. The ordinary daily job first publishes canonical raw
+chunks and then drains its cohort's calendar/rolling references. Its later
+ordinary invocations can admit finite receipt-bound reference-only successors
+after known terminal budget exhaustion, retaining cumulative usage, the original
+source cohort and all source/per-phase/per-round limits. See
 [local history](LOCAL_HISTORY_BACKFILL.md) for its separate bounded commands.
 
 The queue is `health/night-products/v1/refresh-queue.json`. A changed canonical

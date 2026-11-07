@@ -1,5 +1,9 @@
 # Optional local HR/HRV history
 
+For bounded stored-only 28/30/90 HR/HRV planning and reference publication, see
+[rolling references](ROLLING_NIGHT_REFERENCES.md). The same daily job also tracks
+later affected endpoints and reports remaining references within its budgets.
+
 This opt-in terminal tool collects HR/HRV history locally, then publishes verified
 curves to your existing private R2 bucket in a separate command. It runs from an
 ordinary installed checkout on Windows, Linux or macOS. It does not use GitHub
@@ -179,9 +183,12 @@ python -m pipeline.history_backfill daily --plan-sha PLAN_SHA256 --confirm-cloud
 
 Source/publication chunks checkpoint the raw curves and indexes first. Reference
 assembly waits until all selected raw chunks have checkpointed, then the same run drains up to
-two eligible closed ISO weeks (Monday–Sunday) or calendar months per phase.
-Each durable daily round has at most fourteen publication phases, including
-reference-only finishing phases. It reserves bounded reference
+two selected calendar/rolling publication rows per phase. Closed ISO weeks and
+calendar months keep priority. Each invocation/reference budget epoch has at most
+fourteen publication phases, including reference-only finishing phases. A later
+ordinary invocation can admit a finite reference-only successor after the exact
+known terminal receipt, same source cohort and cumulative usage are verified.
+No routine `rolling-plan` or `rolling-refresh` command is needed. It reserves bounded reference
 completion while the serial source chunks remain unchanged; the shared request
 and byte budgets still stop work earlier when needed.
 It reuses exact verified canonical source snapshots for initial calculation,
@@ -196,7 +203,10 @@ without progress stays pending rather than starting a retry loop.
 closed references completed. The round durably binds its new-date selection,
 stored backlog and affected cohort. An unfinished invocation reuses that selection
 and its spent source/publication allowances after restart, rather than selecting
-another 30 dates. A completed round can admit the next finite selection without
+another 30 dates. Known progress with exhausted reference capacity can continue
+under a receipt-bound successor baseline, preserving cumulative counters and
+all phase/epoch/source limits. Unknown ownership/writes, bad receipts and a
+predecessor without progress do not qualify. A completed source round can admit the next finite selection without
 erasing cumulative counters or old receipts. Global queue
 counts remain visible; unrelated older pending periods are not recalculated or
 claimed complete by this round. An older journal without a bound cohort keeps
@@ -491,13 +501,16 @@ with the existing 5 GiB / 100,000 object bucket ceiling (or lower configured lim
 Responses remain bounded (64 KiB error/PUT,512 KiB GET,1 MiB LIST), with 16 MiB
 raw / 32 MiB decoded totals, 1 MiB decoded objects and a 900 second job deadline.
 One R2Store shares its cached inventory throughout each publication phase.
-A daily round keeps a fourteen-phase ceiling, including reference-only
-completion. All phases share monotonic physical execution counters across
+Each invocation/reference budget epoch keeps a fourteen-phase ceiling, including
+reference-only completion. All phases share monotonic physical execution counters across
 restart, with a round allowance of at most 1000 class A operations (LIST+PUT),
 6000 publication GET/HEAD plus a 256-GET independent verification reserve
 (6256 combined class B), and 10 MiB attempted write bytes. Per-round baselines
-do not erase cumulative usage; a new baseline requires a validated new round
-after completed work. Independent checks remain explicitly metered operator
+do not erase cumulative usage; a reference-only successor baseline requires the
+validated terminal receipt of completed physical phases, unchanged source cohort
+and known progress. Logical references may remain pending across those epochs;
+only their completion releases the source round for the next normal selection.
+Independent checks remain explicitly metered operator
 work, not an extra unbounded allowance or a claim about arbitrary clients.
 Every phase keeps the original limits and freshly
 inventories the bucket. Earlier live/controller consumption still belongs to the

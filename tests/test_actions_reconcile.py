@@ -384,3 +384,56 @@ def test_invalid_or_unbounded_input_fails_closed_with_a_fixed_safe_message(tmp_p
         assert (tmp_path / "report.json").read_text() == "PRIVATE_SENTINEL"
     else:
         assert not (tmp_path / "report.json").exists()
+
+
+@pytest.mark.parametrize("day,expected_utc", [
+    ("2026-03-27", "2026-03-27T07:00:00Z"),
+    ("2026-03-28", "2026-03-28T09:00:00Z"),
+    ("2026-03-29", "2026-03-29T08:00:00Z"),
+    ("2026-03-30", "2026-03-30T06:00:00Z"),
+    ("2026-10-23", "2026-10-23T06:00:00Z"),
+    ("2026-10-24", "2026-10-24T08:00:00Z"),
+    ("2026-10-25", "2026-10-25T09:00:00Z"),
+    ("2026-10-26", "2026-10-26T07:00:00Z"),
+])
+def test_native_morning_configs_keep_local_times_across_dst_in_real_offline_cli(tmp_path, day, expected_utc):
+    configs = [pin(tmp_path, name + ".json", {
+        "workflow": name,
+        "schedules": [{"cron_expression": "0 8 * * 1-5", "timezone": "Europe/Oslo"},
+                      {"cron_expression": "0 10 * * 0,6", "timezone": "Europe/Oslo"}],
+    }) for name in ("refresh.yml", "scheduled-health-detail-backfill.yml", "scheduled-hrv-backfill.yml")]
+    manifest(tmp_path, day_start=day, day_end=day, as_of=day + "T23:59:59Z",
+             observation_start=day + "T00:00:00Z", observation_end=day + "T23:59:59Z",
+             workflow_configs=configs)
+    value = report(tmp_path)
+    assert [(item["workflow"], item["scheduled_for"]) for item in value["occurrences"]] == [
+        ("refresh.yml", expected_utc), ("scheduled-health-detail-backfill.yml", expected_utc),
+        ("scheduled-hrv-backfill.yml", expected_utc),
+    ]
+    assert value["unsupported_schedules"] == []
+    assert all(item["status"] == "not_observed_after_window" and item["reason"] == "no_occurrence_proof"
+               for item in value["occurrences"])
+    assert value["observed_runs"] == []
+
+
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("workflow,legacy_cron", [
+    ("refresh.yml", "0 */6 * * *"),
+    ("scheduled-health-detail-backfill.yml", "15 1,7,13,19 * * *"),
+    ("scheduled-hrv-backfill.yml", "30 4,10,16,22 * * *"),
+])
+def test_legacy_and_morning_receipts_remain_readable_without_rewriting_facts(tmp_path, version, workflow, legacy_cron):
+    run = run_record(workflow=workflow)
+    value = receipt(workflow=workflow, schema_version=version, cron_expression=legacy_cron)
+    if version == 2:
+        value.update(cron_expression="0 10 * * 0,6", cron_timezone="Europe/Oslo")
+    pinned_receipt = pin(tmp_path, "receipt.json", value)
+    receipt_before = (tmp_path / "receipt.json").read_bytes()
+    job = {"workflow": workflow, "run_id": "101", "run_attempt": 1, "conclusion": "success"}
+    manifest(tmp_path, runs=[pin(tmp_path, "run.json", run)], receipts=[pinned_receipt],
+             jobs=[pin(tmp_path, "job.json", job)])
+    audit = report(tmp_path)
+    assert audit["unassigned_runs"][0]["data_outcome"] == "partial"
+    assert audit["unassigned_runs"][0]["run_id"] == "101"
+    assert audit["observed_runs"] == []
+    assert (tmp_path / "receipt.json").read_bytes() == receipt_before

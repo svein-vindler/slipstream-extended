@@ -21,7 +21,8 @@ def test_raw_phase_reserves_reference_work_until_after_canonical_delivery(monkey
     )
     reference = result["baseline_refresh"]
     assert result["counts"] == {"published": 1}
-    assert reference["status"] == "bounded_pending" and reference["closed_pending"] == 4
+    assert reference["status"] == "bounded_pending"
+    assert reference["closed_pending"] == 4 + reference["discovery_eligible_remaining"]["count"]
     assert reference["products_written"] == reference["periods_completed"] == 0
     assert reference["reference_work_deferred"] is True
     assert not any("/baseline/" in name for name in server.objects)
@@ -177,7 +178,8 @@ def test_explicit_round_completes_without_adopting_unrelated_pending_history(mon
         job, job.plan_sha, confirm=True, store=sdk_store(server), target_dates=[],
         finalize_dates=[day],
     )["baseline_refresh"]
-    assert report["status"] == "bounded_pending" and report["closed_pending"] == 2
+    assert report["status"] == "bounded_pending"
+    assert report["closed_pending"] == 2 + report["discovery_eligible_remaining"]["count"]
     assert report["cohort_complete"] is True
     assert report["cohort_closed_pending"] == report["cohort_held_periods"] == 0
     assert report["cohort_deferred_open"] == open_periods

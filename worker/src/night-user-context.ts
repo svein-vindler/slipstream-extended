@@ -7,6 +7,7 @@ import { hrvObjectKeys, sleepObjectKeys, validCalendarDay } from "./lib";
 import { R2Storage, type R2ReadLimits } from "./r2-storage";
 import { nightContext, validatedHealthTimezone } from "./night-context";
 import { structuredToolResult } from "./mcp-result";
+import { ContextQueueRejected, contextBodySha, prepareContextInvalidation, finishContextInvalidation } from "./rolling-context";
 
 const contextDate = exactDate.refine(value => validCalendarDay(value) !== undefined, { message: "Use a valid calendar wake-date." });
 const EVENT_LIMIT = 100;
@@ -199,6 +200,7 @@ export class NightContextTools {
       if (!token) throw new Error("Night context reservation was not confirmed.");
       let attempted = false;
       let context!: NightUserContext;
+      let referenceQueued = false;
       try {
         await documentedNight(this.env, day);
         const previous = await latest(this.env, day);
@@ -217,10 +219,22 @@ export class NightContextTools {
         const body = JSON.stringify(context);
         if (new TextEncoder().encode(body).byteLength > EVENT_LIMITS.stored) throw new Error("Night context event exceeds its bounded size.");
         await this.reserveActorWrite();
+        const key = `${prefix(day)}${stamp(createdAt)}-${contextId}.json`;
+        const intent = { wake_date: day, key, sha256: await contextBodySha(body), state: "intent" as const };
+        try {
+          await prepareContextInvalidation(this.env.SLIPSTREAM_DATA, contextId, intent, () => { attempted = true; });
+        } catch (error) {
+          if (error instanceof ContextQueueRejected) attempted = false; // Known no effect, before any append.
+          throw error;
+        }
         attempted = true;
-        const saved = await this.env.SLIPSTREAM_DATA.put(`${prefix(day)}${stamp(createdAt)}-${contextId}.json`, body,
+        const saved = await this.env.SLIPSTREAM_DATA.put(key, body,
           { httpMetadata: { contentType: "application/json" }, onlyIf: { etagDoesNotMatch: "*" } });
         if (!saved) throw new Error("Night context append was not confirmed.");
+        // From this ACK onward the context is saved, even if its invalidation or read is unavailable.
+        try {
+          referenceQueued = await finishContextInvalidation(this.env.SLIPSTREAM_DATA, contextId, intent, body, saved.etag);
+        } catch { console.error(JSON.stringify({ message: "Saved night context reference invalidation was not confirmed" })); }
       } catch (error) {
         if (!attempted) {
           try { await coordinator.finishNightContextWrite(day, token); }
@@ -229,14 +243,17 @@ export class NightContextTools {
         throw error;
       }
       try {
+        if (!referenceQueued) throw new Error("Saved night context retains its pending reference claim.");
         const completed = await coordinator.finishNightContextWrite(day, token);
         if (!completed.released) throw new Error("Night context completion was not confirmed.");
       } catch { console.error(JSON.stringify({ message: "Saved night context completion was not confirmed" })); }
       const current = await readNightUserContext(this.env, day);
       return boundedResult({ saved: true as const, wake_date: day, context_id: context.context_id, context,
-        ...current, message: current.view.context_status === "unavailable"
+        ...current, message: !referenceQueued
+          ? "The context is saved; reference refresh remains pending. Retry only the read, not this saved append."
+          : current.view.context_status === "unavailable"
           ? "The context is saved, but its current view is unavailable. Retry only the read, not this saved append."
-          : "The append-only effective night context was saved; existing source and analysis history were preserved." });
+          : "The append-only effective night context was saved; reference refresh was durably queued. Existing source and analysis history were preserved." });
     }));
   }
 }

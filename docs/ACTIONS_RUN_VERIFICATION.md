@@ -2,17 +2,18 @@
 
 The six existing scheduled data workflows use `pipeline.actions_receipt` around
 their existing command entry points. The wrapper records execution evidence; it
-does not schedule, retry, pause, restore or fetch data by itself. Existing cron,
+does not schedule, retry, pause, restore or fetch data by itself. The configured schedules,
 concurrency, permissions, timeouts, source selection and data budgets remain in
 the workflows and commands. The separate local daily archive operator is not
 part of this feature.
 
 ## What a receipt establishes
 
-The version 1 `actions-run-receipt` JSON contains only:
+The version 2 `actions-run-receipt` JSON contains only:
 
 - Fixed schema/kind and one of the six workflow filenames.
-- Validated run ID, attempt, head SHA, event and configured cron expression.
+- Validated run ID, attempt, head SHA, event, configured cron expression and
+  `cron_timezone` (null for a non-scheduled entry).
 - The command's actual UTC start/end, original native exit and controlled
   command/data outcomes, with allowlisted nonnegative aggregate counters.
 - Explicit context availability and the absence of unique trigger evidence.
@@ -24,7 +25,9 @@ runner-temporary file is not durable storage; retain the existing log/summary
 under the installation's normal retention policy when evidence is needed.
 
 The shared executable schema is `pipeline/actions_receipt_schema.py`.
-`scheduled_for`, `occurrence_id` and `job_conclusion` are always null in v1.
+`scheduled_for`, `occurrence_id` and `job_conclusion` remain null. Existing v1
+receipts retain their exact historical UTC contract and have no timezone field;
+the shared validator accepts both versions without reinterpreting old evidence.
 The command cannot observe the final job conclusion before the job ends. A later
 offline audit uses separately supplied run/job observations for that conclusion.
 `trigger_provenance` is `unavailable`: `github.event.schedule` supplies the cron
@@ -57,14 +60,20 @@ GitHub run/job facts; missing receipt is not evidence of successful execution.
 
 ## Fixed workflow mapping
 
-| Workflow | Existing command | Cron (UTC, unchanged) |
+| Workflow | Existing command | Current cron and timezone |
 | --- | --- | --- |
-| `refresh.yml` | `pipeline.refresh --workflow` | `0 */6 * * *` |
-| `activity-refresh.yml` | `pipeline.activity_refresh` | `15 23 * * *` |
-| `scheduled-activity-backfill.yml` | `pipeline.activity_backfill_scheduler` | `30 2,8,14,20 * * *` |
-| `scheduled-health-detail-backfill.yml` | `pipeline.health_detail_backfill` | `15 1,7,13,19 * * *` |
-| `scheduled-hrv-backfill.yml` | `pipeline.hrv_backfill` | `30 4,10,16,22 * * *` |
-| `coach-input-backfill.yml` | `pipeline.coach_backfill` | `40 2,8,14,20 * * *` |
+| `refresh.yml` | `pipeline.refresh --workflow` | `0 8 * * 1-5`, `0 10 * * 0,6`; Europe/Oslo |
+| `activity-refresh.yml` | `pipeline.activity_refresh` | `15 23 * * *`; UTC |
+| `scheduled-activity-backfill.yml` | `pipeline.activity_backfill_scheduler` | `30 2,8,14,20 * * *`; UTC |
+| `scheduled-health-detail-backfill.yml` | `pipeline.health_detail_backfill` | `0 8 * * 1-5`, `0 10 * * 0,6`; Europe/Oslo |
+| `scheduled-hrv-backfill.yml` | `pipeline.hrv_backfill` | `0 8 * * 1-5`, `0 10 * * 0,6`; Europe/Oslo |
+| `coach-input-backfill.yml` | `pipeline.coach_backfill` | `40 2,8,14,20 * * *`; UTC |
+
+Only the three morning workflows change schedule: 08:00 Monday-Friday and
+10:00 Saturday-Sunday in Oslo. Native Actions timezone handling follows DST;
+there is no shell clock guard. Morning refresh retains general scheduled mode,
+including pulse. The local 12:30 task and manual inputs are unchanged. Configured
+time remains a nominal expectation, not proof that GitHub started on time.
 
 The Coach `workflow_run` condition and all manual inputs are preserved. A Coach
 run caused by another workflow is not a Coach cron occurrence. An additional

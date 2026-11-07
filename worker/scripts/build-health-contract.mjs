@@ -84,6 +84,11 @@ execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
   "scripts/build_night_products_contract.py", "worker/test-runtime/generated/night-products-contract.json",
 ], { cwd: root, stdio: "inherit" });
 
+// Actual CLI-produced rolling bytes feed the authenticated JSON/SSE reader tests.
+execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
+  "-B", "-X", "utf8", "worker/test-runtime/rolling-products-builder.py",
+], { cwd: root, stdio: "inherit" });
+
 execFileSync(process.env.SLIPSTREAM_TEST_PYTHON || "python", [
   "scripts/build_night_training_contract.py", "worker/test-runtime/generated/night-training-contract.json",
 ], { cwd: root, stdio: "inherit" });

@@ -7,7 +7,9 @@ def test_all_refresh_modes_use_one_core_with_existing_input_mapping():
     workflow = (ROOT / ".github/workflows/refresh.yml").read_text(encoding="utf-8")
     assert 'python -m pipeline.actions_receipt --workflow refresh.yml --receipt "$RUNNER_TEMP/actions-run-receipt.json" -- --workflow' in workflow
     assert "group: garmin-sync" in workflow
-    assert 'cron: "0 */6 * * *"' in workflow
+    assert 'cron: "0 8 * * 1-5"' in workflow
+    assert 'cron: "0 10 * * 0,6"' in workflow
+    assert workflow.count('timezone: "Europe/Oslo"') == 2
     for name in ("latest_activity_only", "latest_night_only", "include_granular",
                  "sync_request_id", "latest_wake_date", "latest_activity_id",
                  "latest_r2_only", "health_start", "health_end",

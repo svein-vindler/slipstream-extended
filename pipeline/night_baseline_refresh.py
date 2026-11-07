@@ -16,9 +16,11 @@ from urllib.parse import urlsplit
 
 from botocore.exceptions import ClientError
 
+from . import rolling_night_references as rolling
 from .native_night import NativeInputError, NativeNightReader
 from .night_products import baseline, canonical, normalize_args, storage_key
 from .r2_store import R2BudgetError, missing_object
+from .rolling_discovery import discovery_status, drain_discovery
 
 
 def affected_periods(stream: str, day: str) -> dict[str, tuple[str, str]]:
@@ -302,6 +304,8 @@ class _WireBudget:
         self.bodies = []
         self.binding = None
         self.operation = None
+        self.strict_revision_listing = False
+        self.raw_revision_inventory = None
         session = client._endpoint.http_session
         original = session.send
 
@@ -349,6 +353,10 @@ class _WireBudget:
                     if not bounded.complete:
                         require(bounded.read(1) == b"", "Baseline LIST body bound")
                     self.raw_inventory = _raw_inventory(wire)
+                    if self.strict_revision_listing:
+                        from .night_reference_sources import parse_revision_inventory
+
+                        self.raw_revision_inventory = parse_revision_inventory(wire)
                     # This cache is assigned only after the bounded original wire
                     # is fully read/closed/validated, before the SDK parser sees it.
                     response._content = wire
@@ -391,6 +399,7 @@ class _WireBudget:
         self.state["counts"][kind] += 1
         self.operation = kind
         self.raw_inventory = None
+        self.raw_revision_inventory = None
 
     def after(self, http_response, parsed, context=None, **_):
         code = parsed.get("Error", {}).get("Code")
@@ -411,6 +420,17 @@ class _WireBudget:
                     and parsed.get("Prefix") == raw["Prefix"],
                     "Baseline LIST parsed/raw disagreement",
                 )
+                if self.strict_revision_listing:
+                    rows = parsed.get("Contents", [])
+                    revisions = {
+                        _list_sdk_text(item.get("Key"), parsed.get("EncodingType"), context): {
+                            "revision": item.get("ETag"), "size": item.get("Size")
+                        } for item in rows
+                    }
+                    require(self.raw_revision_inventory is not None
+                            and len(revisions) == len(rows)
+                            and revisions == self.raw_revision_inventory,
+                            "Rolling LIST raw revision disagreement")
                 rows = parsed.get("Contents", [])
                 token = parsed.get("NextContinuationToken")
                 valid = (
@@ -568,6 +588,16 @@ class _IO:
         self.before("list")
         return self.store.list_prefix_bounded(prefix, max_keys=max_keys)
 
+    def list_revisions_bounded(self, prefix, *, max_keys):
+        self.before("list")
+        if self.observer is not None:
+            self.observer.strict_revision_listing = True
+        try:
+            return self.store.list_revisions_bounded(prefix, max_keys=max_keys)
+        finally:
+            if self.observer is not None:
+                self.observer.strict_revision_listing = False
+
     def create_with_receipt(self, *args, **kwargs):
         self.before("put")
         return self.store.create_with_receipt(*args, **kwargs)
@@ -618,6 +648,10 @@ def _read_queue(store):
         and len(queue["pending"]) <= MAX_PENDING,
         "Unverified night baseline queue",
     )
+    try:
+        rolling.validate(queue)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise BaselineRefreshStop("Unverified rolling endpoint registry") from error
     for name, item in queue["pending"].items():
         require(
             isinstance(item, dict)
@@ -634,7 +668,11 @@ def _read_queue(store):
         ):
             kind, source_day = _source(key)
             require(
-                name in affected_periods(kind, source_day)
+                (name in affected_periods(kind, source_day)
+                 or "rolling_window" in item and rolling.row_identity(name, item)
+                 and rolling.source_range(kind, source_day, item["rolling_window"])[0]
+                 <= item["end_date"]
+                 <= rolling.source_range(kind, source_day, item["rolling_window"])[1])
                 and isinstance(binding, dict)
                 and binding.get("state") in {"intent", "ready"}
                 and isinstance(binding.get("sha256"), str)
@@ -651,8 +689,10 @@ def _read_queue(store):
                 )
         start, end = item.get("start_date"), item.get("end_date")
         require(
-            name in affected_periods("hrv", start)
-            and affected_periods("hrv", start)[name] == (start, end),
+            ("rolling_window" in item and rolling.row_identity(name, item)
+             and bool(rolling.intersect(queue.get("rolling", {}).get("eligible", []), end, end)))
+            or (name in affected_periods("hrv", start)
+                and affected_periods("hrv", start)[name] == (start, end)),
             "Unverified queued calendar",
         )
     return queue, before
@@ -681,6 +721,7 @@ def _cas(store, key, data, before, *, encoding=None):
 
 
 def _save_queue(store, queue, before):
+    rolling.validate(queue)
     body = canonical(queue).encode()
     require(
         len(body) <= MAX_QUEUE_BYTES and len(queue["pending"]) <= MAX_PENDING,
@@ -848,18 +889,24 @@ def publish_source(store, key, data, content_type, *, encoding=None):
                 row.pop("blocked", None)
                 row["completed"] = {}
                 row.pop("validated_progress", None)
+        committed = copy.deepcopy(queue)
+        if kind == "sleep" and relevant:
+            rolling.register(committed, [day])
+        rolling.invalidate(committed, kind, day)
+        rolling.validate(committed)
+        committed_bytes = len(canonical(committed).encode())
         require(
             store.can_write_group(
                 attempts=3,
                 byte_count=len(data)
-                + 2 * len(canonical(queue).encode())
+                + len(canonical(queue).encode()) + committed_bytes
                 + len(targets) * 2200
                 + 4096,
             ),
             "Canonical source group budget deferred before intent",
         )
         require(
-            len(canonical(queue).encode()) + len(targets) * 2200 <= MAX_QUEUE_BYTES,
+            committed_bytes + len(targets) * 2200 + 4096 <= MAX_QUEUE_BYTES,
             "Committed source queue capacity before intent",
         )
         io.require_capacity("get", 3)
@@ -871,6 +918,9 @@ def publish_source(store, key, data, content_type, *, encoding=None):
                 "state": "ready",
                 "revision": after.revision,
             }
+        if kind == "sleep" and relevant:
+            rolling.register(queue, [day])
+        rolling.invalidate(queue, kind, day)
         _save_queue(io, queue, revision)
         return True
     except BaselineRefreshStop:
@@ -919,9 +969,10 @@ def enqueue_verified_sources(store, sources):
                 "Existing canonical source unverified",
             )
             _validate_source(kind, day, value)
-            selected.append((item, affected_periods(kind, day)))
+            selected.append((item, affected_periods(kind, day), kind, day,
+                             _validate_source(kind, day, value)))
         queue, before = _read_queue(io)
-        for item, periods in selected:
+        for item, periods, kind, day, relevant in selected:
             for name, (first, last) in periods.items():
                 row = queue["pending"].setdefault(
                     name,
@@ -947,6 +998,9 @@ def enqueue_verified_sources(store, sources):
                 row.pop("blocked", None)
                 row["completed"] = {}
                 row.pop("validated_progress", None)
+            if kind == "sleep" and relevant:
+                rolling.register(queue, [day])
+            rolling.invalidate(queue, kind, day)
         require(
             store.can_write_group(attempts=1, byte_count=len(canonical(queue).encode())),
             "Verified enqueue budget deferred",
@@ -960,6 +1014,63 @@ def enqueue_verified_sources(store, sources):
         except Exception:
             if primary is None:
                 raise
+
+
+def register_rolling_endpoints(store, sources, *, today=None):
+    """Activate only endpoints backed by fresh exact, usable stored sleep proofs.
+
+    Re-registering known endpoints is idempotent. Source corrections use the
+    ordinary source hooks, which dirty all affected known later endpoints.
+    """
+    require(isinstance(sources, list) and 1 <= len(sources) <= 14,
+            "Choose1-14 verified endpoint proofs")
+    if today is not None:
+        require(date.fromisoformat(today).isoformat() == today, "Exact endpoint day required")
+    io = _IO(store)
+    try:
+        queue, before = _read_queue(io)
+        days = []
+        for item in sources:
+            require(isinstance(item, dict) and set(item) == {"key", "revision", "sha256"},
+                    "Exact endpoint proof required")
+            kind, day = _source(item["key"])
+            require(kind == "sleep" and (today is None or day <= today),
+                    "Only available sleep endpoints may be registered")
+            require(not any(entries.get(item["key"], {}).get("state") == "intent"
+                            for row in queue["pending"].values() for entries in _source_maps(row)),
+                    "Unknown sleep source cannot activate endpoints")
+            snapshot = _snapshot(io, item["key"], 524288)
+            require(snapshot is not None and snapshot.revision == item["revision"]
+                    and hashlib.sha256(snapshot.data).hexdigest() == item["sha256"],
+                    "Endpoint source proof changed")
+            value = _decode(snapshot.data, 2097152)
+            require(value.get("schema_version") == 1 and value.get("source") == "garmin"
+                    and value.get("date") == day and _validate_source(kind, day, value),
+                    "Endpoint sleep unavailable")
+            days.append(day)
+        rolling.register(queue, days)
+        require(store.can_write_group(attempts=1, byte_count=len(canonical(queue).encode())),
+                "Endpoint registration budget deferred")
+        if before is None or before.data != canonical(queue).encode():
+            _save_queue(io, queue, before)
+        return {"registered_endpoints": len(set(days)),
+                "rolling_remaining": rolling.status(queue, today=today),
+                "pending_periods": len(queue["pending"])}
+    finally:
+        io.close()
+
+
+def rolling_cohort_status(queue, sources=None, *, today=None):
+    """Public compact remaining report for a bounded local source cohort.
+
+    Accept canonical keys, exact proof dictionaries, or (kind, date) pairs.
+    No source list means all admitted endpoint work, including passive drains.
+    """
+    selected = None if sources is None else [
+        _source(item["key"] if isinstance(item, dict) else item) if isinstance(item, (str, dict))
+        else tuple(item) for item in sources
+    ]
+    return rolling.status(queue, today=today, sources=selected)
 
 
 def _proof(reader, requested):
@@ -1103,7 +1214,7 @@ def _prior_input_unavailable(old, values, channel):
 
 def refresh_pending(
     store, *, today=None, timezone=None, max_periods=MAX_PERIODS, reserve_writes=0,
-    snapshot_cache=None, period_names=None,
+    snapshot_cache=None, period_names=None, rolling_sources=None, rolling_endpoints=None,
 ):
     """Bounded stored-only drain with optional verified local calculation inputs.
 
@@ -1118,6 +1229,10 @@ def refresh_pending(
         type(reserve_writes) is int and 0 <= reserve_writes <= 250,
         "Bounded caller checkpoint reservation",
     )
+    require(rolling_endpoints is None or isinstance(rolling_endpoints, (list, tuple))
+            and len(rolling_endpoints) <= 7 and all(
+                isinstance(endpoint, str) and date.fromisoformat(endpoint).isoformat() == endpoint
+                for endpoint in rolling_endpoints), "Choose at most seven exact rolling endpoints")
     timezone = timezone or os.environ.get("HEALTH_TIMEZONE")
     day = today
     io = _IO(store)
@@ -1133,8 +1248,29 @@ def refresh_pending(
     queue = active_row = None
     try:
         queue, revision = _read_queue(io)
-        report["held_periods"] = sum(_held(row) for row in queue["pending"].values())
-        if not queue["pending"]:
+        if rolling_sources != []:
+            from .rolling_context_refresh import reconcile_saved_contexts
+
+            report["saved_contexts"], changed = reconcile_saved_contexts(
+                io, queue, reserve_writes=reserve_writes,
+            )
+            if changed:
+                revision = _save_queue(io, queue, revision)
+        report["held_periods"] = (sum(_held(row) for row in queue["pending"].values())
+                                  + sum(binding["state"] == "intent" for binding in
+                                        queue.get("rolling_context_intents", {}).values()))
+        report["rolling_remaining"] = rolling.status(queue)
+        report["discovery_remaining"] = discovery_status(queue)
+        report["pending"] = (
+            sum(not row.get("rolling_window") for row in queue["pending"].values())
+            + sum(item["count"] for channels in report["rolling_remaining"].values()
+                  for item in channels.values())
+            + report["discovery_remaining"]["count"]
+        )
+        if not queue["pending"] and not queue.get("rolling_context_intents") and not report["discovery_remaining"]["count"] and not any(
+            item["count"] for channels in report["rolling_remaining"].values()
+            for item in channels.values()
+        ):
             return {
                 **report,
                 "status": "complete",
@@ -1148,7 +1284,7 @@ def refresh_pending(
             if zone(timezone) is None:
                 return {
                     **report,
-                    "pending": len(queue["pending"]),
+                    "pending_materialized": len(queue["pending"]),
                     "status": "calendar_timezone_required",
                     "closed_pending": None,
                     "deferred_open": None,
@@ -1156,19 +1292,78 @@ def refresh_pending(
             day = _today(timezone)
         require(date.fromisoformat(day).isoformat() == day, "Exact closure day required")
         report["closure_day"] = day
+        allowed = None if rolling_sources is None else [
+            _source(item["key"] if isinstance(item, dict) else item)
+            if isinstance(item, (str, dict)) else tuple(item) for item in rolling_sources
+        ]
+        if rolling_endpoints is None and rolling_sources != []:
+            discovery_before = copy.deepcopy(queue)
+            snapshot_cache = {} if snapshot_cache is None else snapshot_cache
+            discovery = drain_discovery(io, queue, today=day, snapshot_cache=snapshot_cache,
+                                        allowed_sources=allowed)
+            report["discovery"] = discovery
+            if discovery["changed"]:
+                if not store.can_write_group(attempts=1 + reserve_writes,
+                                             byte_count=len(canonical(queue).encode())):
+                    queue = discovery_before
+                    raise ComponentBudgetDeferred("Discovery checkpoint budget deferred")
+                io.require_capacity("get", 1)
+                io.require_capacity("put", 1)
+                revision = _save_queue(io, queue, revision)
+        before_materialization = copy.deepcopy(queue)
+        calendar_waiting = any(
+            not row.get("rolling_window") and (period_names is None or name in period_names)
+            and is_closed((row["start_date"], row["end_date"]), day)
+            and not row.get("blocked") and not _held(row)
+            for name, row in queue["pending"].items()
+        )
+        if not calendar_waiting and rolling.materialize(queue, today=day, limit=max_periods,
+                               max_pending=MAX_PENDING, allowed_sources=allowed,
+                               allowed_endpoints=rolling_endpoints):
+            if not store.can_write_group(attempts=1 + reserve_writes,
+                                         byte_count=len(canonical(queue).encode())):
+                queue = before_materialization
+                raise ComponentBudgetDeferred("Rolling materialization group deferred")
+            io.require_capacity("get", 1)
+            io.require_capacity("put", 1)
+            revision = _save_queue(io, queue, revision)
         reader = NativeNightReader(io, timezone=timezone, snapshot_cache=snapshot_cache)
         nights = {}
-        selected = [
+        eligible = [
             name
             for name, row in sorted(queue["pending"].items())
-            if (period_names is None or name in period_names)
-            and is_closed((row["start_date"], row["end_date"]), day)
+            if (row.get("rolling_window") and (rolling_endpoints is None or row["end_date"] in rolling_endpoints)
+                and (allowed is None or any(
+                a <= row["end_date"] <= b for kind, source_day in allowed
+                for a, b in [rolling.source_range(kind, source_day, row["rolling_window"])]
+            )) or not row.get("rolling_window") and (period_names is None or name in period_names))
+            and (row["end_date"] <= day if row.get("rolling_window")
+                 else is_closed((row["start_date"], row["end_date"]), day))
             and not row.get("blocked")
             and not _held(row)
-        ][:max_periods]
+        ]
+        # Keep the established closed calendar cohort together. Rolling work
+        # remains durably pending for the next bounded phase when calendars use
+        # this phase; daily source consumers can continue their existing drain.
+        calendars = [name for name in eligible if not queue["pending"][name].get("rolling_window")]
+        selected = (calendars or eligible)[:max_periods]
         for name in selected:
             row = queue["pending"][name]
             active_row = row
+            is_rolling = bool(row.get("rolling_window"))
+            if is_rolling and (any(
+                binding.get("state") == "intent" and
+                rolling.source_range(*_source(key), row["rolling_window"])[0] <= row["end_date"]
+                <= rolling.source_range(*_source(key), row["rolling_window"])[1]
+                for pending_row in queue["pending"].values()
+                for entries in _source_maps(pending_row) for key, binding in entries.items()
+            ) or any(
+                binding["wake_date"] <= row["end_date"] <=
+                rolling.source_range("sleep", binding["wake_date"], row["rolling_window"])[1]
+                for binding in queue.get("rolling_context_intents", {}).values()
+            )):
+                report["held_periods"] += 1
+                continue
             require(
                 not row.get("inflight")
                 and all(source.get("state") == "ready" for source in row["sources"].values()),
@@ -1195,13 +1390,23 @@ def refresh_pending(
                 (first + timedelta(days=i)).isoformat() for i in range((last - first).days + 1)
             ]
             lists_used = io.counts()["list"]
-            if (
-                lists_used + sum(wake not in nights for wake in requested) + 2 * _context_fence_lists(requested)
-                > 100
-            ):
+            if is_rolling:
+                from .night_reference_sources import (
+                    prime_rolling_list_bound,
+                    rolling_fence_list_bound,
+                    validate_rolling_sources,
+                )
+
+                assembly_lists = prime_rolling_list_bound(requested)
+            else:
+                assembly_lists = sum(wake not in nights for wake in requested)
+            if lists_used + assembly_lists + 2 * _context_fence_lists(requested) > 100:
                 report.setdefault("budget_deferred", []).append(name)
                 break
             try:
+                if is_rolling:
+                    reader.prime_rolling_sources(requested)
+                    nights = {}
                 for wake in requested:
                     if wake not in nights:
                         nights[wake] = reader.night(wake)
@@ -1211,7 +1416,8 @@ def refresh_pending(
                 if any(
                     channel["quality"][field]
                     for night in values
-                    for channel in night["channels"].values()
+                    for channel in ([night["channels"][row["channel"]]] if is_rolling
+                                    else night["channels"].values())
                     for field in ("invalid", "ambiguous_time", "conflicting_timestamps")
                 ):
                     raise NativeInputError("Unverified native observations")
@@ -1229,7 +1435,7 @@ def refresh_pending(
                 "Native reference point limit",
             )
             products = []
-            for channel in ("heart_rate", "hrv"):
+            for channel in (row["channel"],) if is_rolling else ("heart_rate", "hrv"):
                 args = normalize_args(
                     start_date=row["start_date"],
                     end_date=row["end_date"],
@@ -1321,7 +1527,7 @@ def refresh_pending(
                 group = pending[:count]
                 reserve = 2 + sum(9 if before is not None else 3 for _, _, before, _ in group)
                 reads = (
-                    2 * len(proof["objects"])
+                    (0 if is_rolling else 2 * len(proof["objects"]))
                     + 2
                     + sum(11 if before is not None else 3 for _, _, before, _ in group)
                 )
@@ -1337,7 +1543,9 @@ def refresh_pending(
                     continue
                 # Admission may have inventoried the bucket inside this observer.
                 # Both fresh context fences must still fit before any intent.
-                if io.counts()["list"] + 2 * _context_fence_lists(requested) > 100:
+                fence_lists = (rolling_fence_list_bound(proof) if is_rolling
+                               else _context_fence_lists(requested))
+                if io.counts()["list"] + 2 * fence_lists > 100:
                     continue
                 chosen = group
                 break
@@ -1348,7 +1556,10 @@ def refresh_pending(
             row["source_proof_sha256"] = proof_hash
             row.pop("validated_progress", None)
             revision = _save_queue(io, queue, revision)
-            _validate_sources(io, proof)
+            if is_rolling:
+                validate_rolling_sources(io, proof)
+            else:
+                _validate_sources(io, proof)
             for key, data, before, _ in chosen:
                 if before is not None:
                     revision = _preserve_reference(io, queue, revision, row, key, before)
@@ -1366,7 +1577,10 @@ def refresh_pending(
                 row.pop("inflight")
                 revision = _save_queue(io, queue, revision)
                 report["products_written"] += 1
-            _validate_sources(io, proof)
+            if is_rolling:
+                validate_rolling_sources(io, proof)
+            else:
+                _validate_sources(io, proof)
             if len(chosen) < len(pending):
                 # This is a known ACK/readback + fresh-post-fence checkpoint, not
                 # an unknown publication. New sources can supersede it normally.
@@ -1379,19 +1593,37 @@ def refresh_pending(
             revision = _save_queue(io, queue, revision)
             report["periods_completed"] += 1
         report["local_snapshot_hits"] = reader.local_snapshot_hits
-        report["pending"] = len(queue["pending"])
-        report["deferred_open"] = sum(
-            not is_closed((row["start_date"], row["end_date"]), day)
-            for row in queue["pending"].values()
+        report["pending_materialized"] = len(queue["pending"])
+        report["rolling_remaining"] = rolling.status(queue)
+        report["rolling_eligible_remaining"] = rolling.status(queue, today=day)
+        report["discovery_remaining"] = discovery_status(queue)
+        report["discovery_eligible_remaining"] = discovery_status(queue, today=day)
+        report["rolling_pending"] = sum(
+            item["count"] for channels in report["rolling_remaining"].values()
+            for item in channels.values()
+        )
+        compact_remaining = sum(
+            item["count"] for channels in report["rolling_eligible_remaining"].values()
+            for item in channels.values()
+        )
+        legacy = [row for row in queue["pending"].values() if not row.get("rolling_window")]
+        report["pending"] = (len(legacy) + report["rolling_pending"]
+                             + report["discovery_remaining"]["count"])
+        report["deferred_open"] = (
+            sum(not is_closed((row["start_date"], row["end_date"]), day) for row in legacy)
+            + report["rolling_pending"] - compact_remaining
+            + report["discovery_remaining"]["count"] - report["discovery_eligible_remaining"]["count"]
         )
         report["closed_pending"] = report["pending"] - report["deferred_open"]
         report["status"] = (
             "complete"
-            if not report["pending"]
+            if not report["pending"] and not report["rolling_pending"] and not queue.get("rolling_context_intents")
             else "held"
             if report["held_periods"]
+            else "bounded_pending"
+            if queue.get("rolling_context_intents")
             else "waiting_until_close"
-            if not report["closed_pending"]
+            if not report["closed_pending"] and not compact_remaining
             else "bounded_pending"
         )
         report["component_operations"] = io.counts()
@@ -1407,6 +1639,16 @@ def refresh_pending(
             closed_pending=None,
             component_operations=io.counts(),
         )
+        if queue is not None:
+            report["rolling_remaining"] = rolling.status(queue)
+            report["discovery_remaining"] = discovery_status(queue)
+            report["pending_materialized"] = len(queue["pending"])
+            report["pending"] = (
+                sum(not row.get("rolling_window") for row in queue["pending"].values())
+                + sum(item["count"] for channels in report["rolling_remaining"].values()
+                      for item in channels.values())
+                + report["discovery_remaining"]["count"]
+            )
         report.setdefault("budget_deferred", []).append("component_capacity")
         return report
     except BaselineRefreshStop:

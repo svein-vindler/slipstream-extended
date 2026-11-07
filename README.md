@@ -172,8 +172,11 @@ index build. Garmin's recorded local times handle travel nights; set
 
 ## Keeping data fresh
 
-The summary workflow runs every six hours. Detailed health and activity jobs
-are staggered and serialized so Garmin is never queried concurrently. Historical
+The summary workflow, detailed-health backfill and HRV backfill run at 08:00 on
+weekdays and 10:00 on weekends in `Europe/Oslo`, with native DST handling. Other
+jobs keep their existing schedules; Garmin jobs are serialized so Garmin is
+never queried concurrently. See
+[workflow schedules](docs/ACTIONS_RUN_VERIFICATION.md#fixed-workflow-mapping). Historical
 backfills skip existing objects, persist progress, pause repeated item failures,
 and quiesce automatically when complete.
 
@@ -184,7 +187,7 @@ older state, but rolling back to an older reader needs preserved compatible
 progress. See [activity backfill](docs/ACTIVITY_BACKFILL.md) for limits,
 reconciliation, compatibility and measured resource tradeoffs.
 
-Each six-hour summary refresh also refreshes the three most recent HRV and
+Each scheduled summary refresh also refreshes the three most recent HRV and
 detailed-sleep dates. A chat-triggered refresh performs the same recent-health
 steps, checks recent activity artifacts and prepares coach input for selected
 new/recent running activities. Unchanged activity files and ready analyses are
@@ -221,7 +224,7 @@ historical imports keep their own scopes. See [fresh-data behavior](docs/FRESH_D
 for the coverage limits and measured request/storage tradeoffs.
 
 Scheduled sleep/HRV index maintenance checks recent calendar months rather than
-scanning all history every six hours. It performs a full R2 repair at startup
+scanning all history on every scheduled run. It performs a full R2 repair at startup
 and when the last successful full check is at least seven days old. Missing or
 failed checks remain due, and immediate manual full repair remains available.
 This repairs indexes from stored data; it does not re-download Garmin history.

@@ -128,7 +128,21 @@ def daily(job, args, *, clock=None):
     # Keep the existing 256-GET allowance for independent destination checks.
     execution_context = {"publication_get_limit": 6000, "round": active_round["round"]}
     reports = [event["report"] for event in round_events if event["type"] == "reference_refresh"]
-    phases = len(reports)
+    totals = reports[-1].get("execution_totals", {}) if reports else {}
+    phases = totals.get("phases", len(reports))
+    invocation_reports = []
+    if totals.get("reference_successor_sha256") is not None:
+        execution_context["reference_successor_sha256"] = totals["reference_successor_sha256"]
+    if (reports and cohort_dates and not reports[-1].get("cohort_complete")
+            and not any(row["status"] in {"ready", "pending"} and row["date"] in cohort_dates
+                        for row in initial["rows"])):
+        from .history_reference_successor import admit, capacity_exhausted
+
+        if capacity_exhausted(totals):
+            execution_context["reference_successor_sha256"] = admit(
+                job, args.plan_sha, active_round["round"], cohort_dates,
+            )
+            phases = 0  # The publisher validates and applies this exact proof before I/O.
     raw_deferred = False
     wait_seconds = 0.0
     next_source = None
@@ -140,9 +154,17 @@ def daily(job, args, *, clock=None):
             execution_context=execution_context, finalize_dates=cohort_dates,
             defer_references=defer_references,
         )
-        phases += 1
+        phases = max(phases + 1, result["baseline_refresh"].get("execution_totals", {}).get("phases", 0))
         reports.append(result["baseline_refresh"])
+        invocation_reports.append(result["baseline_refresh"])
         return result
+
+    def reference_capacity_available():
+        if phases == 0 or not reports:
+            return True
+        from .history_reference_successor import capacity_exhausted
+
+        return not capacity_exhausted(reports[-1]["execution_totals"])
 
     def result_fields():
         closed_dates = {
@@ -151,8 +173,12 @@ def daily(job, args, *, clock=None):
             if frame["event"]["type"] == "date_closed"
         }
         return {
-            "daily_HTTP": http, "daily_publication_phases": phases,
-            "daily_baseline_reports": reports,
+            "daily_HTTP": http, "daily_publication_phases": len(invocation_reports),
+            "daily_publication_phases_total": sum(
+                frame["event"]["type"] == "reference_refresh" for frame in job.events()[0]
+            ),
+            "daily_reference_epoch_phases": phases,
+            "daily_baseline_reports": invocation_reports,
             "daily_new_date_target": active_round["max_dates"],
             "daily_new_dates": len(closed_dates.intersection(source_dates)),
             "daily_stored_dates_reused": len(active_round["stored_dates"]),
@@ -273,7 +299,7 @@ def daily(job, args, *, clock=None):
 
     # A previous report cannot prove today's queue/period closure. This ordinary
     # R2-only phase needs no Garmin credential and respects a source-only pause.
-    if not raw_deferred and phases < phase_limit:
+    if not raw_deferred and phases < phase_limit and reference_capacity_available():
         # Raw chunks deliberately leave assembly for a fresh bounded phase after
         # every selected canonical curve/index has its ACK and exact readback.
         # Even an unknown pending count from a capacity checkpoint cannot consume
@@ -281,7 +307,8 @@ def daily(job, args, *, clock=None):
         publish_phase([])
         while phases < phase_limit:
             reference = reports[-1]
-            progress = reference.get("periods_completed") or reference.get("products_written")
+            progress = (reference.get("periods_completed") or reference.get("products_written")
+                        or reference.get("discovery", {}).get("changed"))
             if (
                 reference.get("cohort_complete")
                 or reference.get("status") not in {"bounded_pending", "held"}
@@ -289,6 +316,7 @@ def daily(job, args, *, clock=None):
                 or reference.get("cohort_held_periods", reference.get("held_periods"))
                 or reference.get("cohort_blocked", reference.get("blocked"))
                 or not progress
+                or not reference_capacity_available()
             ):
                 break  # Known capacity/no progress stays pending, without retry.
             publish_phase([])
@@ -496,6 +524,23 @@ def main(argv=None):
     )
     publish.add_argument("--plan-sha", required=True)
     publish.add_argument("--confirm-r2-write", action="store_true")
+    references = commands.add_parser(
+        "rolling-plan", help="Explicit bounded stored-only reference plan; zero provider calls or R2 writes.",
+    )
+    references.add_argument("--plan-sha", required=True)
+    references.add_argument("--confirm-r2-read", action="store_true")
+    references.add_argument("--endpoint", action="append", required=True)
+    references.add_argument("--today", required=True)
+    references.add_argument("--timezone", required=True)
+    refresh = commands.add_parser(
+        "rolling-refresh", help="One plan-bound reference-only publication phase; zero Garmin calls.",
+    )
+    refresh.add_argument("--plan-sha", required=True)
+    refresh.add_argument("--reference-plan-sha", required=True)
+    refresh.add_argument("--confirm-r2-write", action="store_true")
+    round_choice = refresh.add_mutually_exclusive_group()
+    round_choice.add_argument("--reference-round-sha")
+    round_choice.add_argument("--admit-reference-round", action="store_true")
     source_free = commands.add_parser(
         "publish-source-free", help="Finish one proof-bound stopped daily round; zero Garmin calls."
     )
@@ -588,6 +633,44 @@ def main(argv=None):
                 from .history_publish import publish
 
                 print(json.dumps(publish(job, args.plan_sha, confirm=args.confirm_r2_write)))
+            elif args.command == "rolling-plan":
+                from .rolling_reference_cli import create_plan
+
+                if not args.confirm_r2_read:
+                    raise Stop("explicit_storage_read_required")
+                result = create_plan(job, args.plan_sha, endpoints=args.endpoint,
+                                     today=args.today, timezone=args.timezone)
+                observation = result["plan"]
+                print(json.dumps({
+                    "reference_plan_sha256": result["plan_sha256"],
+                    "requested_endpoints": len(observation["requested_endpoints"]),
+                    "eligible_endpoints": len(observation["eligible_endpoints"]),
+                    "targets": len(observation["targets"]),
+                    "reads": observation["reads"],
+                }))
+            elif args.command == "rolling-refresh":
+                from .rolling_reference_cli import admit_reference_round, refresh_plan
+
+                reference_round = args.reference_round_sha
+                if args.admit_reference_round:
+                    reference_round = admit_reference_round(
+                        job, args.plan_sha, args.reference_plan_sha,
+                        confirm=args.confirm_r2_write,
+                    )["reference_round_sha256"]
+                result = refresh_plan(
+                    job, args.plan_sha, args.reference_plan_sha,
+                    confirm=args.confirm_r2_write, reference_round_sha=reference_round,
+                )
+                print(json.dumps({
+                    "status": result["status"], "reference_plan_sha256": args.reference_plan_sha,
+                    "reference_round_sha256": reference_round,
+                    "publication_phases": result["publication_phases"],
+                    "execution_totals": result["execution_totals"],
+                    "remaining": result["reports"][-1].get("rolling_plan_remaining")
+                    if result["reports"] else None,
+                }))
+                if result["status"] not in {"complete", "no_eligible_endpoints"}:
+                    return 2
             elif args.command == "_date":
                 import sys
 

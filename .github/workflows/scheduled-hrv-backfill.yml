@@ -2,7 +2,10 @@ name: Scheduled Garmin HRV backfill
 
 on:
   schedule:
-    - cron: "30 4,10,16,22 * * *"  # four bounded batches daily, offset from refresh and activity jobs
+    - cron: "0 8 * * 1-5"
+      timezone: "Europe/Oslo"
+    - cron: "0 10 * * 0,6"
+      timezone: "Europe/Oslo"
   workflow_dispatch:
     inputs:
       max_days:

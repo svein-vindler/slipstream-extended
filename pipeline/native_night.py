@@ -432,6 +432,57 @@ class NativeNightReader:
         self.cache_sizes = {}
         self.active_keys, self.active_prefixes = set(), set()
         self.read_bytes = self.decoded_bytes = self.input_points = 0
+        self.rolling_inventory = None
+
+    def prime_rolling_sources(self, days):
+        """Fresh bounded monthly inventory, preserving each night's logical proof.
+
+        Verified shared snapshots save body GETs only while the newly observed
+        canonical revision and size match. Both publication fences remain fresh.
+        """
+        from .night_reference_sources import CONTEXT, rolling_source_prefixes
+
+        days = tuple(days)
+        prefixes = rolling_source_prefixes(days)
+        inventory = {}
+        for prefix, bound in sorted(prefixes.items()):
+            rows = self.store.list_revisions_bounded(prefix, max_keys=bound)
+            require(len(rows) <= bound)
+            for key, binding in rows.items():
+                require(isinstance(key, str) and key.startswith(prefix)
+                        and isinstance(binding, dict)
+                        and isinstance(binding.get("revision"), str)
+                        and type(binding.get("size")) is int and binding["size"] >= 0,
+                        "Rolling source inventory unverified")
+            inventory[prefix] = rows
+        self.rolling_inventory = inventory
+        # A new prime is a new observation epoch, including absence/context.
+        self.cache, self.proof, self.lists, self.dependencies = {}, {}, {}, {}
+        self.cache_sizes = {}
+        for day in days:
+            prefix = f"{CONTEXT}{day[:4]}/{day[5:7]}/{day}/"
+            month = prefix.rsplit("/", 2)[0] + "/"
+            keys = sorted(key for key in inventory[month] if key.startswith(prefix))
+            require(len(keys) <= 100)
+            self.lists[prefix] = keys
+
+    def _rolling_binding(self, key):
+        if self.rolling_inventory is None:
+            return False, None
+        for prefix, rows in self.rolling_inventory.items():
+            if key.startswith(prefix):
+                return True, rows.get(key)
+        # Rare UTC/local boundary dates outside the primed calendar still use
+        # the ordinary bounded GET path and acquire their own fence dependency.
+        return False, None
+
+    def _retain_snapshot(self, key, snapshot):
+        if self.rolling_inventory is None or key in self.snapshot_cache:
+            return
+        if len(self.snapshot_cache) < 512:
+            used = sum(len(value.data) for value in self.snapshot_cache.values())
+            if used + len(snapshot.data) <= 16777216:
+                self.snapshot_cache[key] = snapshot
 
     def read(self, key, stored=524288, decoded=2097152):
         self.active_keys.add(key)
@@ -444,18 +495,31 @@ class NativeNightReader:
                 )
             return self.cache[key]
         try:
-            if key in self.snapshot_cache:
+            inventoried, binding = self._rolling_binding(key)
+            if inventoried and binding is None:
+                self.proof[key] = {"status": "absent"}
+                self.cache[key] = None
+                return None
+            cached = self.snapshot_cache.get(key)
+            if (cached is not None and (self.rolling_inventory is None or inventoried and
+                    cached.revision == binding["revision"] and len(cached.data) == binding["size"])):
                 snapshot = self.snapshot_cache[key]
                 self.local_snapshot_hits += 1
             else:
+                if self.rolling_inventory is not None:
+                    self.snapshot_cache.pop(key, None)
                 snapshot = self.store.get_snapshot(key, max_bytes=stored)
         except ClientError as error:
             if not missing_object(error):
                 raise
+            require(not inventoried, "Rolling source disappeared after inventory")
             self.proof[key] = {"status": "absent"}
             self.cache[key] = None
             return None
         require(snapshot.revision is not None)
+        if inventoried:
+            require(snapshot.revision == binding["revision"] and len(snapshot.data) == binding["size"],
+                    "Rolling source revision changed after inventory")
         data = snapshot.data
         stored_size = len(data)
         require(stored_size <= stored, "Stored source exceeds requested bound")
@@ -466,6 +530,8 @@ class NativeNightReader:
             "revision": snapshot.revision,
             "sha256": hashlib.sha256(data).hexdigest(),
         }
+        if self.rolling_inventory is not None:
+            self.proof[key]["size"] = stored_size
         if data[:2] == b"\x1f\x8b":
             with gzip.GzipFile(fileobj=io.BytesIO(data)) as handle:
                 data = handle.read(decoded + 1)
@@ -484,6 +550,7 @@ class NativeNightReader:
         require(isinstance(value, dict))
         self.cache_sizes[key] = (stored_size, len(data))
         self.cache[key] = (value, snapshot.revision[1:-1])
+        self._retain_snapshot(key, snapshot)
         return self.cache[key]
 
     def source(self, stream, day):
@@ -513,7 +580,8 @@ class NativeNightReader:
     def context(self, day):
         prefix = f"health/night-context/v1/{day[:4]}/{day[5:7]}/{day}/"
         self.active_prefixes.add(prefix)
-        keys = self.store.list_prefix_bounded(prefix, max_keys=101)
+        keys = (self.lists[prefix] if self.rolling_inventory is not None and prefix in self.lists
+                else self.store.list_prefix_bounded(prefix, max_keys=101))
         require(
             len(keys) <= 100
             and all(

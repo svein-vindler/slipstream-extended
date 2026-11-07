@@ -1,5 +1,19 @@
 # User context for a night
 
+A confirmed context append also marks affected rolling 28/30/90 HR/HRV
+references for bounded refresh. The event stays append-only. Unknown writes
+remain held; if the event is confirmed saved but reference invalidation is held,
+retry reading the result rather than appending the same context again. Stored
+reference reads themselves never start synchronization.
+
+A normal publisher overlap records the confirmed event as `saved` with its
+immutable revision and durably queued dirty work. After exact queue CAS/readback,
+the append owner can release its own day claim; rate limits and cooldown still
+apply to the next patch. The consumer verifies the event and recorded publication
+effects at a checkpoint without inflight/source intents before recomputing.
+Unknown append, queue PUT or readback outcomes keep their existing claim/HOLD;
+present bytes and elapsed time alone never release it.
+
 Use the morning `wake_date` to identify a night. `night_of` is the local date on which sleep began. Context is supplied by the user, never inferred from Garmin estimates.
 
 `add_night_context` accepts at least one explicit field: `alcohol`, `late_bedtime`, `travel`, `actual_night_timezone`, `illness`, `sleep_quality`, `morning_condition` or `note`. Boolean fields accept true/false/null. Quality and morning condition use integers 1–5 or null. The optional IANA timezone applies to this night. A note is at most 1000 characters.
