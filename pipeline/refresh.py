@@ -447,7 +447,7 @@ def main():
         request.validate()
         if not args.workflow:
             prepare_environment(args.env_file)
-        run(request, data_dir=args.data_dir, diagnostics_file=args.diagnostics_file,
+        return run(request, data_dir=args.data_dir, diagnostics_file=args.diagnostics_file,
             workflow_context=os.environ if args.workflow else None)
     except (KeyError, ValueError) as exc:
         parser.error(str(exc))

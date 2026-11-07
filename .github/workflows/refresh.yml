@@ -77,6 +77,7 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     env:
+      ACTIONS_CRON_EXPRESSION: ${{ github.event.schedule }}
       GARMIN_PROVIDER: ${{ vars.GARMIN_PROVIDER || 'legacy' }}
       GARMIN_ACCOUNT: ${{ secrets.GARMIN_ACCOUNT }}
       GARMINTOKENS: ${{ (vars.GARMIN_PROVIDER == '' || vars.GARMIN_PROVIDER == 'legacy') && secrets.GARMINTOKENS || '' }}
@@ -116,4 +117,4 @@ jobs:
           ACTIVITY_ONLY: ${{ inputs.latest_activity_only }}
           NIGHT_ONLY: ${{ inputs.latest_night_only }}
           INCLUDE_GRANULAR: ${{ inputs.include_granular }}
-        run: python -m pipeline.refresh --workflow
+        run: python -m pipeline.actions_receipt --workflow refresh.yml --receipt "$RUNNER_TEMP/actions-run-receipt.json" -- --workflow

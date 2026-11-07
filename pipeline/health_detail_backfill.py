@@ -507,7 +507,7 @@ def main():
     parser.add_argument("--skip-sleep", action="store_true")
     args = parser.parse_args()
     try:
-        run(
+        return run(
             max_sleep_days=args.max_sleep_days,
             max_body_days=args.max_body_days,
             retry_failures=args.retry_failures,

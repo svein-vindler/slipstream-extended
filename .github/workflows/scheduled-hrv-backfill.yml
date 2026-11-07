@@ -28,6 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      ACTIONS_CRON_EXPRESSION: ${{ github.event.schedule }}
       GARMIN_PROVIDER: ${{ vars.GARMIN_PROVIDER || 'legacy' }}
       GARMIN_ACCOUNT: ${{ secrets.GARMIN_ACCOUNT }}
       HEALTH_TIMEZONE: ${{ secrets.HEALTH_TIMEZONE }}
@@ -57,4 +58,4 @@ jobs:
           if [[ "$RETRY_FAILURES" == "true" ]]; then
             args+=(--retry-failures)
           fi
-          python -m pipeline.hrv_backfill "${args[@]}"
+          python -m pipeline.actions_receipt --workflow scheduled-hrv-backfill.yml --receipt "$RUNNER_TEMP/actions-run-receipt.json" -- "${args[@]}"

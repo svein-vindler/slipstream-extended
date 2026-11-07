@@ -276,7 +276,7 @@ def main():
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     try:
-        run(
+        return run(
             lookback_days=args.lookback_days,
             max_activities=args.max_activities,
             activity_id=args.activity_id,

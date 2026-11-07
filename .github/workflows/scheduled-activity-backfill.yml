@@ -23,6 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      ACTIONS_CRON_EXPRESSION: ${{ github.event.schedule }}
       GARMIN_PROVIDER: ${{ vars.GARMIN_PROVIDER || 'legacy' }}
       GARMIN_ACCOUNT: ${{ secrets.GARMIN_ACCOUNT }}
       GARMINTOKENS: ${{ (vars.GARMIN_PROVIDER == '' || vars.GARMIN_PROVIDER == 'legacy') && secrets.GARMINTOKENS || '' }}
@@ -44,4 +45,4 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - name: Advance newest unfinished activity range
-        run: python -m pipeline.activity_backfill_scheduler --max-activities "$MAX_ACTIVITIES"
+        run: python -m pipeline.actions_receipt --workflow scheduled-activity-backfill.yml --receipt "$RUNNER_TEMP/actions-run-receipt.json" -- --max-activities "$MAX_ACTIVITIES"

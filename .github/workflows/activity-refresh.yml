@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      ACTIONS_CRON_EXPRESSION: ${{ github.event.schedule }}
       GARMIN_PROVIDER: ${{ vars.GARMIN_PROVIDER || 'legacy' }}
       GARMIN_ACCOUNT: ${{ secrets.GARMIN_ACCOUNT }}
       GARMINTOKENS: ${{ (vars.GARMIN_PROVIDER == '' || vars.GARMIN_PROVIDER == 'legacy') && secrets.GARMINTOKENS || '' }}
@@ -72,4 +73,4 @@ jobs:
             fi
             args+=(--force)
           fi
-          python -m pipeline.activity_refresh "${args[@]}"
+          python -m pipeline.actions_receipt --workflow activity-refresh.yml --receipt "$RUNNER_TEMP/actions-run-receipt.json" -- "${args[@]}"
