@@ -183,13 +183,25 @@ def test_budget_and_corrupt_local_summary_fail_without_new_checks(environment, m
     assert sdk.calls == []
 
 
-def test_no_plan_reads_or_historical_writes(environment):
+def test_no_plan_reads_or_historical_writes(environment, monkeypatch):
     storage, _, _, refresh = environment
     storage.put_object(Key="backfill/private-plan.json", Body=b"preserve")
+    seeded_writes = len(storage.writes)
+    summary_lists = []
+    original_list = storage.list_objects_v2
+    def observe_list(**kwargs):
+        summary_lists.append(kwargs)
+        return original_list(**kwargs)
+    monkeypatch.setattr(storage, "list_objects_v2", observe_list)
     refresh()
     assert storage.objects["backfill/private-plan.json"]["Body"] == b"preserve"
     assert all(not key.startswith("backfill/") for key in storage.reads)
-    assert storage.prefixes == [""]  # Required bucket-budget inventory only.
+    assert all(not key.startswith("backfill/") for key in storage.writes[seeded_writes:])
+    # Verify initial summary absence before fetching and again before publishing;
+    # the final unprefixed LIST is the required bucket-budget inventory.
+    assert summary_lists == [{"Bucket": "synthetic-summary", "Prefix": "summary/", "MaxKeys": 7}] * 2
+    assert storage.prefixes == ["summary/", "summary/", ""]
+    assert storage.counts["list"] == 3
 
 
 def test_due_reconciliation_detects_edit_outside_recent_window(environment):
