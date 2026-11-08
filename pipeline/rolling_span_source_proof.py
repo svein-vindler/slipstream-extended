@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
+import re
+import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -246,3 +250,74 @@ def qualify_raw_floor(job, plan_sha, source_ref, *, manifest, fresh=False):
     if source.get("source_curve_index") is not None:
         pin(source["source_curve_index"])
     return {**result, "observed_day": source["observed_day"], "current_day_delivery": source["observed_day"] == manifest["today"]}
+
+
+def _ordinary_pin(reference):
+    if (type(reference) is not dict or set(reference) != {"path", "bytes", "sha256"}
+            or not isinstance(reference["path"], str)
+            or not isinstance(reference["sha256"], str)
+            or re.fullmatch(r"[a-f0-9]{64}", reference["sha256"]) is None):
+        raise Stop("rolling_span_ordinary_admission_unverified")
+    path = Path(reference["path"])
+    if not path.is_absolute() or path.is_symlink() or path.is_junction():
+        raise Stop("rolling_span_ordinary_admission_unverified")
+    return pin(reference)
+
+
+def qualify_ordinary_admission(job, plan_sha, manifest_ref, admission_ref):
+    """Validate the retained native register intent, never renew floor evidence."""
+    intent = json.loads(_ordinary_pin(admission_ref))
+    stage_ref = intent["stagePlan"]
+    stage = json.loads(_ordinary_pin(stage_ref))
+    index = stage.get("index")
+    stage_path, intent_path = Path(stage_ref["path"]), Path(admission_ref["path"])
+    manifest = json.loads(_ordinary_pin(manifest_ref))
+    plan_body = read(job.folder / "plan.json")
+    plan_ref = {"path": str((job.folder / "plan.json").resolve()),
+                "bytes": len(plan_body), "sha256": digest(plan_body)}
+    binding, caller, invocation = (stage.get(field) for field in
+                                    ("bindingSHA256", "callerPID", "invocation"))
+    if (stage.get("kind") != "KNOWN_ORDINARY_SPAN_STAGE_V1" or stage.get("action") != "register"
+            or type(index) is not int or not 0 <= index < 8192
+            or stage_path.name != f"SPAN-{index:04d}-PLAN.json"
+            or intent_path != stage_path.with_name(f"SPAN-{index:04d}-INTENT.json")
+            or stage.get("job") != str(job.folder) or stage.get("plan") != plan_ref
+            or plan_ref["sha256"] != plan_sha or plan_sha != job.plan_sha
+            or stage.get("spanManifest") != manifest_ref
+            or stage.get("span_sha256") != manifest_ref["sha256"]
+            or stage.get("targetSHA256") != manifest.get("storage_target_sha256")
+            or manifest.get("job_plan_sha256") != plan_sha
+            or not isinstance(binding, str) or re.fullmatch(r"[a-f0-9]{64}", binding) is None
+            or type(caller) is not int or caller <= 0 or not isinstance(invocation, str) or not invocation
+            or intent.get("bindingSHA256") != binding
+            or any(type(intent.get(field)) is not int or intent[field] != 0
+                   for field in ("sourceCalls", "sourceReservations", "archiveReloads"))):
+        raise Stop("rolling_span_ordinary_admission_binding")
+    started, deadline = stage.get("startedMonotonic"), stage.get("deadlineMonotonic")
+    if (type(started) not in (int, float) or type(deadline) not in (int, float)
+            or not math.isfinite(started) or not math.isfinite(deadline)
+            or not 0 <= deadline - started <= 21600 or not started <= time.monotonic() < deadline):
+        raise Stop("rolling_span_ordinary_admission_deadline")
+    _ordinary_pin(stage["interpreter"])
+    _ordinary_pin(stage["spanCliModule"])
+    argv = [stage["interpreter"]["path"], "-B", "-X", "utf8", stage["spanCliModule"]["path"],
+            "--stage-proof", stage_ref["path"], "--stage-sha256", stage_ref["sha256"]]
+    command = digest(encoded(argv))
+    if intent.get("argv") != argv or intent.get("commandSHA256") != command:
+        raise Stop("rolling_span_ordinary_admission_command")
+    # Only the already guarded native entry may use this TTL exception.
+    # public_main(command) preserves that entry's actual process argv; a
+    # direct history CLI cannot substitute mutually consistent supplied files.
+    if (sys.argv != argv[4:]
+            or Path(sys.executable).resolve() != Path(stage["interpreter"]["path"]).resolve()):
+        raise Stop("rolling_span_ordinary_admission_entry")
+    port = json.loads(_ordinary_pin(intent["permission"]))
+    if (port.get("kind") != "ACTUAL_CURRENT_PRODUCT_PORT" or port.get("outcome") != "allowed"
+            or port.get("phase") != "data" or port.get("bindingSHA256") != binding
+            or type(port.get("callerPID")) is not int or port["callerPID"] != caller
+            or port.get("invocation") != invocation or port.get("commandSHA256") != command):
+        raise Stop("rolling_span_ordinary_admission_permission")
+    instant = datetime.fromisoformat(port["observedUTC"].replace("Z", "+00:00"))
+    if instant.tzinfo is None or not 0 <= (datetime.now(UTC) - instant).total_seconds() <= 60:
+        raise Stop("rolling_span_ordinary_admission_stale")
+    return admission_ref

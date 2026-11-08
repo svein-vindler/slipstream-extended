@@ -189,7 +189,7 @@ def _checkpoint(job, span_sha, state, *, expected_tip):
         os.fsync(handle.fileno())
 
 
-def register_span(job, plan_sha, manifest_ref):
+def register_span(job, plan_sha, manifest_ref, *, ordinary_admission_ref=None):
     """Register a finite scope once. No credentials, remote I/O or source actor."""
     job.admission(plan_sha, source=False)
     body, value = _pin(manifest_ref), _json(manifest_ref)
@@ -206,14 +206,17 @@ def register_span(job, plan_sha, manifest_ref):
     calendar_day((lower - timedelta(days=89)).isoformat())
     if lower > upper or upper > today or not 1 <= len(_chunks(value)) <= MAX_CHUNKS:
         raise Stop("rolling_span_bound")
-    from .rolling_span_source_proof import qualify_raw_floor
+    from .rolling_span_source_proof import qualify_ordinary_admission, qualify_raw_floor
 
     sha = digest(body)
     folder = _folder(job, sha)
     registered = folder.exists()
     if registered and read(folder / "MANIFEST.json") != body:
         raise Stop("rolling_span_manifest_changed")
-    qualify_raw_floor(job, plan_sha, value["raw_floor_proof"], manifest=value, fresh=not registered)
+    qualify_raw_floor(job, plan_sha, value["raw_floor_proof"], manifest=value,
+                      fresh=not registered and ordinary_admission_ref is None)
+    if ordinary_admission_ref is not None:
+        qualify_ordinary_admission(job, plan_sha, manifest_ref, ordinary_admission_ref)
     path = job.folder / "storage-target.json"
     if path.exists() and json.loads(read(path)) != {"target_sha256": value["storage_target_sha256"]}:
         raise Stop("storage_target_changed")

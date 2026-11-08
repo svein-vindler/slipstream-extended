@@ -1,6 +1,9 @@
 """Public CLI finite spans over actual SDK storage with synthetic HTTP only."""
 import json
 import os
+import subprocess
+import sys
+import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -347,4 +350,88 @@ def test_registration_still_rejects_stale_new_or_changed_evidence(tmp_path, monk
     assert main(prefix + [sha]) == 2
     output = capsys.readouterr()
     assert "Stored reference span HOLD" in output.err
+
+
+@pytest.mark.parametrize("argument", ["--ordinary-admission", "--ordinary-admission-sha"])
+@pytest.mark.parametrize("registered", [False, True])
+def test_partial_ordinary_admission_holds_without_registration_writes(tmp_path, capsys, argument, registered):
+    job = Job.create(tmp_path / "job", "2026-10-25", "2026-10-25", ["hrv"], "legacy", "synthetic")
+    manifest, sha = span_manifest(job, tmp_path)
+    command = ["--state", str(job.folder), "rolling-span-register", "--plan-sha", job.plan_sha,
+               "--manifest", str(manifest), "--manifest-sha", sha]
+    if registered:
+        assert main(command) == 0
+        capsys.readouterr()
+    source_before = read(job.folder / "events.jsonl")
+    root = job.folder / "rolling-reference-spans"
+    before = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    value = str(manifest) if argument == "--ordinary-admission" else "a" * 64
+    assert main(command + [argument, value]) == 2
+    assert "Stored reference span HOLD" in capsys.readouterr().err
+    assert {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+    assert root.exists() == registered
+    assert read(job.folder / "events.jsonl") == source_before
+
+
+def test_complete_supplied_admission_cannot_register_old_floor_from_direct_cli(tmp_path, monkeypatch):
+    import test_rolling_span_source_proof as source_fixture
+
+    class OldFloor(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(UTC).astimezone(tz) - timedelta(seconds=61)
+
+    job = Job.create(tmp_path / "job", "2026-10-25", "2026-10-25", ["hrv"], "legacy", "synthetic")
+    # The old permission is created once as prior synthetic source evidence.
+    # The complete evidence is frozen before the direct CLI attempt.
+    with monkeypatch.context() as clock:
+        clock.setattr(source_fixture, "datetime", OldFloor)
+        manifest, span_sha = span_manifest(job, tmp_path)
+    supplied = tmp_path / "supplied-ordinary"
+    supplied.mkdir()
+    entry = supplied / "span_cli.py"
+    entry.write_text("# Supplied synthetic module; never executed by this direct CLI.\n", encoding="utf-8")
+    stage_path = supplied / "SPAN-0000-PLAN.json"
+    started = time.monotonic()
+    binding, invocation, caller = "a" * 64, "synthetic-without-retained-native", os.getpid()
+    stage = {"kind": "KNOWN_ORDINARY_SPAN_STAGE_V1", "index": 0, "action": "register",
+        "callerPID": caller, "bindingSHA256": binding, "invocation": invocation,
+        "job": str(job.folder), "plan": proof_ref(job.folder / "plan.json"),
+        "targetSHA256": json.loads(manifest.read_bytes())["storage_target_sha256"],
+        "spanManifest": proof_ref(manifest), "span_sha256": span_sha,
+        "interpreter": proof_ref(Path(sys.executable).resolve()), "spanCliModule": proof_ref(entry),
+        "startedMonotonic": started, "deadlineMonotonic": started + 300}
+    stage_path.write_bytes(encoded(stage))
+    stage_ref = proof_ref(stage_path)
+    argv = [sys.executable, "-B", "-X", "utf8", str(entry),
+            "--stage-proof", str(stage_path), "--stage-sha256", stage_ref["sha256"]]
+    command = digest(encoded(argv))
+    port = supplied / "current-data-port.json"
+    port.write_bytes(encoded({"kind": "ACTUAL_CURRENT_PRODUCT_PORT", "outcome": "allowed",
+        "phase": "data", "observedUTC": datetime.now(UTC).isoformat(), "callerPID": caller,
+        "invocation": invocation, "bindingSHA256": binding, "commandSHA256": command}))
+    intent = supplied / "SPAN-0000-INTENT.json"
+    intent.write_bytes(encoded({"bindingSHA256": binding, "argv": argv, "commandSHA256": command,
+        "permission": proof_ref(port), "stagePlan": stage_ref, "sourceCalls": 0,
+        "sourceReservations": 0, "archiveReloads": 0}))
+    before_source = read(job.folder / "events.jsonl")
+    before_evidence = {str(p): p.read_bytes() for p in [manifest, stage_path, entry, port, intent]}
+    source_folder = tmp_path / "floor-source"
+    before_floor = {str(p): p.read_bytes() for p in source_folder.rglob("*") if p.is_file()}
+    environment = {key: value for key, value in os.environ.items()
+        if not key.upper().startswith(("PYTHON", "GARMIN", "R2_", "CLOUDFLARE", "AWS_"))}
+    environment.update(PYTHONPATH=str(Path(__file__).resolve().parents[1]),
+                       PYTHONDONTWRITEBYTECODE="1", PYTHONNOUSERSITE="1")
+    actual_argv = [sys.executable, "-B", "-X", "utf8", "-m", "pipeline.history_backfill",
+        "--state", str(job.folder), "rolling-span-register", "--plan-sha", job.plan_sha,
+        "--manifest", str(manifest), "--manifest-sha", span_sha,
+        "--ordinary-admission", str(intent), "--ordinary-admission-sha", proof_ref(intent)["sha256"]]
+    result = subprocess.run(actual_argv, cwd=Path(__file__).resolve().parents[1],
+        env=environment, capture_output=True, check=False, timeout=60)
+    assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+    assert b"Stored reference span HOLD" in result.stderr
+    assert not (job.folder / "rolling-reference-spans").exists()
+    assert read(job.folder / "events.jsonl") == before_source
+    assert {str(p): p.read_bytes() for p in [manifest, stage_path, entry, port, intent]} == before_evidence
+    assert {str(p): p.read_bytes() for p in source_folder.rglob("*") if p.is_file()} == before_floor
 
