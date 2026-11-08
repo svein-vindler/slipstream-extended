@@ -65,7 +65,8 @@ def _base(job):
 def _totals(context):
     return {name: context[name] for name in (
         "counts", "body_bytes", "publication_get_limit", "independent_gets", "phases", "round_baseline",
-        "reference_round_sha256"
+        "reference_round_sha256", "source_watermark", "independent_lifetime_gets",
+        "independent_round_used", "independent_meter_prefix",
     ) if name in context}
 
 
@@ -95,12 +96,29 @@ def _merge(context, totals):
         raise Stop("rolling_plan_read_ledger_round_changed")
     if not older_epoch:
         context["phases"] = max(context.get("phases", 0), totals.get("phases", 0))
+    watermark = totals.get("source_watermark")
+    if watermark is not None:
+        current_watermark = context.get("source_watermark")
+        if current_watermark is None or all(watermark["counts"][kind] >= current_watermark["counts"][kind]
+                                            for kind in counts):
+            context["source_watermark"] = watermark
+    if totals.get("independent_lifetime_gets", -1) >= context.get("independent_lifetime_gets", 0):
+        for name in ("independent_lifetime_gets", "independent_round_used", "independent_meter_prefix"):
+            if name in totals:
+                context[name] = totals[name]
 
 
 def _payload(job, sha, target):
     if not isinstance(sha, str) or re.fullmatch(r"[a-f0-9]{64}", sha) is None:
         raise Stop("rolling_reference_plan_sha_required")
     folder = _base(job) / "plans" / sha
+    if not (folder / "PLAN.json").exists():
+        from .rolling_reference_span import plan_folder
+
+        try:
+            folder = plan_folder(job, sha, target)
+        except (OSError, ValueError):
+            raise Stop("rolling_reference_plan_binding_changed") from None
     try:
         body = read(folder / "PLAN.json", 2097152)
         value = json.loads(body)
@@ -124,6 +142,9 @@ def _prior(job, target, context):
             raise Stop("rolling_reference_plan_local_shape")
         value, _ = _payload(job, folder.name, target)
         _merge(context, value["read_execution_totals"])
+    from .rolling_reference_span import merge_prior
+
+    merge_prior(job, target, context)
     return folders
 
 
@@ -137,6 +158,9 @@ def _context(job, plan_sha, store, execution_context=None):
     context["retain_reference_ledger"] = True
     _completed_context(job, state, target, context, None)
     folders = _prior(job, target, context)
+    from .rolling_reference_span import inherit_source_ledger
+
+    inherit_source_ledger(job, target, context)
     context.setdefault("counts", {"get": 0, "list": 0, "put": 0})
     context.setdefault("body_bytes", 0)
     context.setdefault("publication_get_limit", 6000)
@@ -189,12 +213,20 @@ def _load_cache(job, payload, folder):
         if (not isinstance(row, dict) or re.fullmatch(r"[a-f0-9]{64}", row.get("sha256", "")) is None
                 or not isinstance(row.get("key"), str) or row["key"] in cache):
             raise Stop("rolling_reference_cache_unverified")
-        body = read(_base(job) / "objects" / (row["sha256"] + ".bin"), 524288)
+        objects = _base(job) / "objects"
+        try:
+            body = read(objects / (row["sha256"] + ".bin"), 524288)
+        except FileNotFoundError:
+            from .rolling_reference_span import cache_evicted
+
+            if payload.get("span") is not None and cache_evicted(job, row["sha256"]):
+                continue
+            raise Stop("rolling_reference_cache_bytes_changed") from None
         total += len(body)
         if digest(body) != row["sha256"] or len(body) != row["bytes"] or total > 16777216:
             raise Stop("rolling_reference_cache_bytes_changed")
         cache[row["key"]] = R2ObjectSnapshot(body, row["revision"], row["content_type"], row["encoding"])
-    if _cache_index(cache) != index:
+    if _cache_index(cache) != [row for row in index if row["key"] in cache]:
         raise Stop("rolling_reference_cache_unverified")
     return cache
 
@@ -260,13 +292,18 @@ def _validate_input(endpoints, today, timezone):
 
 
 def _create_plan(job, plan_sha, *, store, endpoints, today, timezone,
-                 execution_context=None, close_owned=None):
+                 execution_context=None, close_owned=None, span=None):
     selected = _validate_input(endpoints, today, timezone)
     target, context, prior = _context(job, plan_sha, store, execution_context)
-    if len(prior) >= MAX_PLANS:
+    if span is None and len(prior) >= MAX_PLANS:
         raise Stop("rolling_reference_plan_capacity")
     cache = context.setdefault("snapshot_cache", {})
-    if prior:
+    started_totals = json.loads(json.dumps(_totals(context)))
+    if span is not None:
+        from .rolling_reference_span import prepare_plan
+
+        span_folder = prepare_plan(job, span, target, selected, today, timezone, cache)
+    elif prior:
         # The latest cumulative read ledger owns the newest bounded snapshot cache.
         latest = max(prior, key=lambda p: sum(_payload(job, p.name, target)[0]["read_execution_totals"]["counts"].values()))
         previous, folder = _payload(job, latest.name, target)
@@ -294,8 +331,12 @@ def _create_plan(job, plan_sha, *, store, endpoints, today, timezone,
         index = _cache_index(cache)
         index_bytes = encoded(index)
         objects = _base(job) / "objects"
+        if span is not None:
+            from .rolling_reference_span import prune_cache
+
+            prune_cache(job, span, index)
         _admit_objects(objects, index)
-        objects.mkdir(exist_ok=True)
+        objects.mkdir(parents=True, exist_ok=True)
         for row in index:
             path = objects / (row["sha256"] + ".bin")
             if path.exists():
@@ -308,16 +349,34 @@ def _create_plan(job, plan_sha, *, store, endpoints, today, timezone,
                  "journal_tip": journal_tip, "today": today, "timezone": timezone,
                  "endpoints": selected, "observation": observed,
                  "read_execution_totals": _totals(context), "cache_index_sha256": digest(index_bytes)}
+        if span is not None:
+            value["span"] = span
         body = encoded(value)
         sha = digest(body)
-        folder = _base(job) / "plans" / sha
-        if folder.exists():
+        folder = span_folder if span is not None else _base(job) / "plans" / sha
+        if (folder / "PLAN.json").exists():
             if read(folder / "PLAN.json", 2097152) != body or read(folder / "CACHE.json", 262144) != index_bytes:
                 raise Stop("rolling_reference_plan_binding_changed")
         else:
-            folder.mkdir(parents=True)
+            folder.mkdir(parents=True, exist_ok=True)
             write(folder / "CACHE.json", index_bytes)
             write(folder / "PLAN.json", body)
+        if span is not None:
+            from .rolling_reference_span import record_plan
+
+            write(folder / "READ-RECEIPT.json", {
+                "schema": 1, "kind": "rolling-reference-span-read-receipt", "status": "complete",
+                "job_plan_sha256": plan_sha, "storage_target_sha256": target,
+                "reference_plan_sha256": sha, "span": span, "source_calls": 0,
+                "journal_tip": journal_tip, "plan": {"path": str((folder / "PLAN.json").resolve()),
+                    "bytes": len(body), "sha256": sha},
+                "counts": {kind: context["counts"][kind] - started_totals["counts"][kind]
+                           for kind in context["counts"]},
+                "body_bytes": context["body_bytes"] - started_totals["body_bytes"],
+                "execution_totals": _totals(context), "guard_closed": True,
+                "owned_sdk_closed": close_owned is not None,
+            })
+            record_plan(job, span, sha, value, folder)
         if json.loads(read(job.folder / "OWNER.lock")) != owner:
             raise Stop("owner_binding_changed")
         (job.folder / "OWNER.lock").unlink()
@@ -327,18 +386,20 @@ def _create_plan(job, plan_sha, *, store, endpoints, today, timezone,
             guard.close()
 
 
-def create_plan(job, plan_sha, *, store=None, endpoints, today, timezone, execution_context=None):
+def create_plan(job, plan_sha, *, store=None, endpoints, today, timezone, execution_context=None,
+                span=None):
     """Persist one stored-only plan and charged reads; no Job journal mutation."""
     _validate_input(endpoints, today, timezone)
     job.admission(plan_sha, source=False)
     if store is not None:
         return _create_plan(job, plan_sha, store=store, endpoints=endpoints, today=today,
-                            timezone=timezone, execution_context=execution_context)
+                            timezone=timezone, execution_context=execution_context, span=span)
     owned, close = _open_store()
     primary = False
     try:
         return _create_plan(job, plan_sha, store=owned, endpoints=endpoints, today=today,
-                            timezone=timezone, execution_context=execution_context, close_owned=close)
+                            timezone=timezone, execution_context=execution_context, close_owned=close,
+                            span=span)
     except BaseException:
         primary = True
         raise
@@ -460,6 +521,12 @@ def admit_reference_round(job, plan_sha, reference_plan_sha, *, store=None, conf
 def apply_reference_round(job, plan_sha, reference_plan_sha, reference_round_sha, *,
                            target_sha, execution_context, latest_receipt, journal_tip):
     """Publisher hook: apply a fresh explicit epoch once, or restore its usage."""
+    from .rolling_reference_span import apply_epoch, epoch_path
+
+    if epoch_path(job, reference_round_sha).is_file():
+        return apply_epoch(job, reference_round_sha, target_sha=target_sha,
+                           execution_context=execution_context, latest_receipt=latest_receipt,
+                           journal_tip=journal_tip)
     path = _round_path(job, reference_plan_sha, reference_round_sha)
     try:
         body = read(path, 65536)

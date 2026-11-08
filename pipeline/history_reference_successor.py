@@ -7,6 +7,7 @@ from .history_state import Stop, digest, encoded, read, write
 
 LIMITS = {"phases": 14, "get": 6000, "total_get": 6256,
           "independent_get": 256, "class_a": 1000, "body_bytes": 10485760}
+_LIVE_SPAN_USAGE = object()
 
 
 def capacity_exhausted(totals):
@@ -37,7 +38,7 @@ def _path(job, sha):
     return job.folder / "reference-successors" / (sha + ".json")
 
 
-def _eligible(job, receipt, round_id, cohort):
+def _eligible(job, receipt, round_id, cohort, *, span_account_usage=_LIVE_SPAN_USAGE):
     reference = receipt.get("baseline_refresh", {})
     totals = reference.get("execution_totals", {})
     state = job.snapshot()
@@ -50,7 +51,11 @@ def _eligible(job, receipt, round_id, cohort):
             or any(row["status"] in {"ready", "pending"} and row["date"] in cohort
                    for row in state["rows"])):
         raise Stop("reference_successor_cohort_unverified")
-    if not capacity_exhausted(totals):
+    from .rolling_reference_span import effective_source_totals
+
+    effective = (effective_source_totals(job, totals) if span_account_usage is _LIVE_SPAN_USAGE
+                 else effective_source_totals(job, totals, annotation=span_account_usage))
+    if not capacity_exhausted(effective):
         raise Stop("reference_successor_capacity_remains")
     # Another finite epoch is useful only after proven progress in its predecessor.
     # The first may follow successful canonical source delivery without references.
@@ -90,6 +95,11 @@ def admit(job, plan_sha, round_id, cohort):
              "prior_run": end["run"], "journal_tip": tip, "prior_totals": totals,
              "baseline": {"counts": dict(totals["counts"]), "body_bytes": totals["body_bytes"]},
              "limits": LIMITS}
+    from .rolling_reference_span import shared_span_usage, source_epoch_key
+
+    annotation = shared_span_usage(job, source_epoch_key(totals))
+    if annotation is not None:
+        proof["span_account_usage"] = annotation
     encoded_proof = encoded(proof)
     sha = digest(encoded_proof)
     path = _path(job, sha)
@@ -117,7 +127,7 @@ def apply(job, sha, *, target_sha, context, latest, journal_tip, cohort):
         if totals.get("round_baseline") != proof["baseline"]:
             raise Stop("reference_successor_replay_changed")
         return  # _completed_context already restored cumulative usage and phases.
-    _eligible(job, latest, context["round"], proof["cohort"])
+    _eligible(job, latest, context["round"], proof["cohort"], span_account_usage=proof.get("span_account_usage"))
     if (digest(encoded(latest)) != proof["prior_receipt_sha256"] or latest.get("run") != proof["prior_run"]
             or journal_tip != proof["journal_tip"] or totals != proof["prior_totals"]
             or context.get("counts") != proof["baseline"]["counts"]

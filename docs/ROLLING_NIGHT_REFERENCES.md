@@ -78,6 +78,58 @@ range. No enum, method, units, quantile definition, key format or read schema
 changes. Week/month products, old history and unknown-outcome safeguards remain
 compatible. A missing product stays missing until explicitly published.
 
+## Finite stored-source spans
+
+An independent full span uses an immutable `rolling-reference-span` manifest,
+not a fabricated daily source cohort or a replacement source job. The manifest
+pins the existing source plan and storage target, local calendar, descending
+endpoint range, chunks of at most seven dates, and a verified raw-floor proof.
+The floor is the earliest explicitly delivered and independently verified raw
+date. Planned dates, adjacent signals and missing source dates cannot extend it.
+A historical provisional floor is explicit; extending it requires a new proof
+and a child manifest, retaining the original.
+
+The public `rolling-span-register`, `rolling-span-status`, `rolling-span-next`,
+`rolling-span-refresh`, `rolling-span-ack`, and `rolling-span-admit-epoch`
+commands operate on the same existing source job and a permanent, source-free
+reference execution namespace. Source events, quotas and daily cohorts remain
+separate. Completed legacy plans are retained; the original 32-plan limit still
+applies to that original planner. A finite indexed span supports at least 64
+bounded chunks without deleting earlier plans or creating a quota per chunk.
+
+Re-registering the exact stored manifest revalidates its immutable source-floor
+and checkpoint bindings without requiring its original floor port to be fresh
+again. First registration still requires fresh qualification. This distinction
+does not replace the current permission required for every ordinary phase.
+
+Each phase retains its exact producer/read receipts and normalized product
+targets. A published checkpoint remains unverified until actual independent SDK
+bytes/revision and the normal connected custom-span reader both match every
+captured product. Only the hash-pinned, qualified ACK advances the verified
+cursor. A metadata-only planning phase is acknowledged separately; observed
+source gaps remain gaps and are never counted as verified products or full
+90-night coverage. Known retries resume the same plan/checkpoint without
+republishing accepted work. Unknown owner, transport, write, read or cleanup
+outcomes remain HOLD.
+
+The namespace inherits the standing publication ledger and imports later source
+costs. The source path also accounts for reference costs without treating them
+as source progress. Independent verification uses one durable, source-linked
+meter across all chunks and manifests; actual prior usage is retained. A new
+manifest or code release creates no new 256-GET allowance. Explicit epoch
+admission needs known clean progress, the exact last ACK/read or publication
+receipt, actual exhausted capacity (including the bounded next verification
+reserve), and qualified account headroom. The initial publication carry alone
+does not reset the independent pool. All phase/epoch caps above remain unchanged.
+
+The private ordinary caller admits only the explicit stored-span mode, current
+Root permission and retained RootLease, exact cloud idle/pause/restore, reviewed
+runtime/reader and actual source-meter linkage. One admitted session has one
+21600-second deadline. Account headroom includes all its real planning,
+publication and independent read costs across epochs. A bound leaves an honest
+remainder for a later newly qualified session. Daily30, archive reload/HTTP
+limits, source timing and the existing daily schedule are unchanged.
+
 Rollback is a coordinated code rollback only. Keep immutable source and product
 history, existing configuration, queued checkpoints and private job evidence.
 Older code must not consume a queue containing the additive rolling protocol;

@@ -65,6 +65,9 @@ class StorageGuard:
         self.baseline = self.execution_context.setdefault("round_baseline", {
             "counts": {"get": 0, "list": 0, "put": 0}, "body_bytes": 0,
         })
+        attribution = self.execution_context.get("span_account_usage")
+        self.shared_cost = (attribution["source_pool"] if attribution is not None else {
+            "counts": dict.fromkeys(("get", "list", "put"), 0), "body_bytes": 0, "publication_phases": 0})
         independent = self.execution_context.setdefault("independent_gets", 0)
         if (type(independent) is not int or not 0 <= independent <= 256
                 or any(type(self.execution_context["counts"].get(k)) is not int
@@ -223,9 +226,9 @@ class StorageGuard:
                 raise Stop("storage_list_prefix")
         totals = self.execution_context["counts"]
         if (
-            totals["get"] - self.baseline["counts"]["get"] + (kind == "get") > self.execution_context["publication_get_limit"]
-            or totals["get"] - self.baseline["counts"]["get"] + (kind == "get") + self.execution_context["independent_gets"] > 6256
-            or totals["list"] + totals["put"] - self.baseline["counts"]["list"] - self.baseline["counts"]["put"] + (kind in {"list", "put"}) > 1000
+            totals["get"] - self.baseline["counts"]["get"] + self.shared_cost["counts"]["get"] + (kind == "get") > self.execution_context["publication_get_limit"]
+            or totals["get"] - self.baseline["counts"]["get"] + self.shared_cost["counts"]["get"] + (kind == "get") + self.execution_context["independent_gets"] > 6256
+            or totals["list"] + totals["put"] - self.baseline["counts"]["list"] - self.baseline["counts"]["put"] + sum(self.shared_cost["counts"][item] for item in ("list", "put")) + (kind in {"list", "put"}) > 1000
         ):
             self.failed = True
             raise Stop("storage_execution_budget")
@@ -258,7 +261,7 @@ class StorageGuard:
             if (
                 length < 0
                 or self.body_bytes + length > 2097152
-                or self.execution_context["body_bytes"] - self.baseline["body_bytes"] + length > 10485760
+                or self.execution_context["body_bytes"] - self.baseline["body_bytes"] + self.shared_cost["body_bytes"] + length > 10485760
             ):
                 raise Stop("storage_bytes")
             self.body_bytes += length
@@ -780,6 +783,12 @@ def _completed_context(job, state, target_sha, execution_context, finalize_dates
 
         apply(job, successor, target_sha=target_sha, context=execution_context,
               latest=latest, journal_tip=journal_tip, cohort=finalize_dates)
+    from .rolling_reference_span import StoredReferenceJob, shared_span_usage, source_epoch_key
+
+    if not isinstance(job, StoredReferenceJob):
+        annotation = shared_span_usage(job, source_epoch_key(execution_context))
+        if annotation is not None:
+            execution_context["span_account_usage"] = annotation
     return journal_tip
 
 
@@ -1219,7 +1228,8 @@ def _publish_store(
             execution_context["body_bytes"], continuation["prior_usage"]["body_bytes"]
         )
     phases = execution_context.get("phases", 0)
-    if type(phases) is not int or not 0 <= phases < 14:
+    shared_phases = execution_context.get("span_account_usage", {}).get("source_pool", {}).get("publication_phases", 0)
+    if type(phases) is not int or not 0 <= phases or phases + shared_phases >= 14:
         raise Stop("storage_execution_phase_budget")
     execution_context["phases"] = phases + 1
     run = uuid.uuid4().hex
@@ -1622,6 +1632,8 @@ def _publish_store(
                        if execution_context.get("reference_round_sha256") else {}),
                     **({"reference_successor_sha256": execution_context["reference_successor_sha256"]}
                        if execution_context.get("reference_successor_sha256") else {}),
+                    **({"span_account_usage": execution_context["span_account_usage"]}
+                       if execution_context.get("span_account_usage") is not None else {}),
                 },
                 "sources_queued": queued,
                 "source_targets_deferred": selected_count - len(done),

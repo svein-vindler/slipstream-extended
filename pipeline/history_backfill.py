@@ -137,8 +137,9 @@ def daily(job, args, *, clock=None):
             and not any(row["status"] in {"ready", "pending"} and row["date"] in cohort_dates
                         for row in initial["rows"])):
         from .history_reference_successor import admit, capacity_exhausted
+        from .rolling_reference_span import effective_source_totals
 
-        if capacity_exhausted(totals):
+        if capacity_exhausted(effective_source_totals(job, totals)):
             execution_context["reference_successor_sha256"] = admit(
                 job, args.plan_sha, active_round["round"], cohort_dates,
             )
@@ -163,8 +164,9 @@ def daily(job, args, *, clock=None):
         if phases == 0 or not reports:
             return True
         from .history_reference_successor import capacity_exhausted
+        from .rolling_reference_span import effective_source_totals
 
-        return not capacity_exhausted(reports[-1]["execution_totals"])
+        return not capacity_exhausted(effective_source_totals(job, reports[-1]["execution_totals"]))
 
     def result_fields():
         closed_dates = {
@@ -541,6 +543,24 @@ def main(argv=None):
     round_choice = refresh.add_mutually_exclusive_group()
     round_choice.add_argument("--reference-round-sha")
     round_choice.add_argument("--admit-reference-round", action="store_true")
+    for action in ("register", "status", "next", "refresh", "ack", "admit-epoch"):
+        span_command = commands.add_parser("rolling-span-" + action,
+                                          help="Explicit finite stored-only reference span.")
+        span_command.add_argument("--plan-sha", required=True)
+        if action == "register":
+            span_command.add_argument("--manifest", type=Path, required=True)
+            span_command.add_argument("--manifest-sha", required=True)
+        else:
+            span_command.add_argument("--span-sha", required=True)
+        if action == "next":
+            span_command.add_argument("--confirm-r2-read", action="store_true")
+        if action in {"refresh", "admit-epoch"}:
+            span_command.add_argument("--confirm-r2-write", action="store_true")
+        if action in {"next", "refresh"}:
+            span_command.add_argument("--reference-round-sha")
+        if action in {"ack", "admit-epoch"}:
+            span_command.add_argument("--proof", type=Path, required=True)
+            span_command.add_argument("--proof-sha", required=True)
     source_free = commands.add_parser(
         "publish-source-free", help="Finish one proof-bound stopped daily round; zero Garmin calls."
     )
@@ -633,6 +653,37 @@ def main(argv=None):
                 from .history_publish import publish
 
                 print(json.dumps(publish(job, args.plan_sha, confirm=args.confirm_r2_write)))
+            elif args.command.startswith("rolling-span-"):
+                from . import rolling_reference_span as span
+
+                action = args.command.removeprefix("rolling-span-")
+                if action == "register":
+                    proof = span._ref(args.manifest)
+                    if proof["sha256"] != args.manifest_sha:
+                        raise Stop("rolling_span_proof_changed")
+                    result = span.register_span(job, args.plan_sha, proof)
+                elif action == "status":
+                    result = span.span_status(job, args.plan_sha, args.span_sha)
+                elif action == "next":
+                    if not args.confirm_r2_read:
+                        raise Stop("explicit_storage_read_required")
+                    result = span.next_plan(job, args.plan_sha, args.span_sha,
+                                            reference_round_sha=args.reference_round_sha)
+                elif action == "refresh":
+                    result = span.refresh_span(job, args.plan_sha, args.span_sha,
+                        confirm=args.confirm_r2_write, reference_round_sha=args.reference_round_sha)
+                else:
+                    proof = span._ref(args.proof)
+                    if proof["sha256"] != args.proof_sha:
+                        raise Stop("rolling_span_proof_changed")
+                    if action == "ack":
+                        result = span.acknowledge_span(job, args.plan_sha, args.span_sha, proof)
+                    else:
+                        result = span.admit_span_epoch(job, args.plan_sha, args.span_sha, proof,
+                                                       confirm=args.confirm_r2_write)
+                print(json.dumps(result))
+                if result.get("status") in {"epoch_required", "blocked_unknown"}:
+                    return 2
             elif args.command == "rolling-plan":
                 from .rolling_reference_cli import create_plan
 
@@ -689,12 +740,18 @@ def main(argv=None):
                 print(output.getvalue(), end="")
         return 0
     except (DurabilityError, OSError) as error:
+        if args.command.startswith("rolling-span-"):
+            print("Stored reference span persistence HOLD.", file=__import__("sys").stderr)
+            return 3
         from .failure_diagnostics import log_failure
 
         log_failure(error, stage="history_backfill", force=True)
         print("Local history persistence HOLD.", file=__import__("sys").stderr)
         return 3
     except BaseException as error:
+        if args.command.startswith("rolling-span-"):
+            print("Stored reference span HOLD. No automatic retry.", file=__import__("sys").stderr)
+            return 2
         from .failure_diagnostics import log_failure
 
         log_failure(error, stage="history_backfill", force=True)
