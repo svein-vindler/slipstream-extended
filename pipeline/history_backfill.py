@@ -550,6 +550,8 @@ def main(argv=None):
         if action == "register":
             span_command.add_argument("--manifest", type=Path, required=True)
             span_command.add_argument("--manifest-sha", required=True)
+            span_command.add_argument("--ordinary-admission", type=Path)
+            span_command.add_argument("--ordinary-admission-sha")
         else:
             span_command.add_argument("--span-sha", required=True)
         if action == "next":
@@ -661,7 +663,15 @@ def main(argv=None):
                     proof = span._ref(args.manifest)
                     if proof["sha256"] != args.manifest_sha:
                         raise Stop("rolling_span_proof_changed")
-                    result = span.register_span(job, args.plan_sha, proof)
+                    admission = None
+                    if (args.ordinary_admission is None) != (args.ordinary_admission_sha is None):
+                        raise Stop("rolling_span_ordinary_admission_required")
+                    if args.ordinary_admission is not None:
+                        admission = span._ref(args.ordinary_admission)
+                        if admission["sha256"] != args.ordinary_admission_sha:
+                            raise Stop("rolling_span_ordinary_admission_changed")
+                    result = span.register_span(job, args.plan_sha, proof,
+                                                ordinary_admission_ref=admission)
                 elif action == "status":
                     result = span.span_status(job, args.plan_sha, args.span_sha)
                 elif action == "next":

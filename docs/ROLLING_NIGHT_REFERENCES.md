@@ -102,6 +102,12 @@ and checkpoint bindings without requiring its original floor port to be fresh
 again. First registration still requires fresh qualification. This distinction
 does not replace the current permission required for every ordinary phase.
 
+For a first registration through the retained ordinary native caller, its exact
+register-stage intent and fresh data permission can qualify current admission
+after a long release/catalog preflight. The immutable delivered-floor evidence
+and scope are still fully checked and never renewed. A direct registration
+without that bound admission retains the original fresh-floor requirement.
+
 Each phase retains its exact producer/read receipts and normalized product
 targets. A published checkpoint remains unverified until actual independent SDK
 bytes/revision and the normal connected custom-span reader both match every
