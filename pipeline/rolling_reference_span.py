@@ -443,7 +443,14 @@ def record_plan(job, binding, plan_sha, payload, folder):
 
 
 def next_plan(job, plan_sha, span_sha, *, store=None, reference_round_sha=None):
-    from .rolling_reference_cli import _context, _descriptor, _payload, _round_capacity, create_plan
+    from .rolling_reference_cli import (
+        _context,
+        _descriptor,
+        _payload,
+        _round_capacity,
+        create_plan,
+        load_plan,
+    )
 
     current = span_status(job, plan_sha, span_sha)
     if not current["remaining_chunks"]:
@@ -452,6 +459,17 @@ def next_plan(job, plan_sha, span_sha, *, store=None, reference_round_sha=None):
     reference_round_sha = _current_epoch(execution, current, reference_round_sha)
     if current["plan_sha256"] is not None:
         payload, folder = _payload(execution, current["plan_sha256"], current["manifest"]["storage_target_sha256"])
+        if reference_round_sha is not None and reference_round_sha != current["reference_round_sha256"]:
+            # An admitted epoch must be applied even when the immutable plan
+            # already exists. Persist its checked cumulative totals before
+            # returning, so the caller and a restart cannot see the old epoch.
+            _, _, context, _ = load_plan(execution, plan_sha, current["plan_sha256"],
+                store=store if store is not None else _descriptor(), reference_round_sha=reference_round_sha)
+            state, tip, _ = _read_state(job, span_sha)
+            if tip != current["checkpoint_sha256"]:
+                raise Stop("rolling_span_checkpoint_changed")
+            _checkpoint(job, span_sha, {**state, "execution_totals": context_totals(context)}, expected_tip=tip)
+            current = span_status(job, plan_sha, span_sha)
         return {**current, "plan": payload["observation"], "reference_plan_ref": _ref(folder / "PLAN.json"),
                 "producer_receipt": current["producer_receipt"]}
     context = {"reference_round_sha256": reference_round_sha} if reference_round_sha else {}
