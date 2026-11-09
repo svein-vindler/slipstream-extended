@@ -1023,11 +1023,13 @@ def enqueue_verified_sources(store, sources):
                 raise
 
 
-def register_rolling_endpoints(store, sources, *, today=None, prepared_manifest=None):
+def register_rolling_endpoints(store, sources, *, today=None, prepared_manifest=None,
+                               prepared_target_keys=None):
     """Activate only endpoints backed by fresh exact, usable stored sleep proofs.
 
-    Re-registering known endpoints is idempotent. Source corrections use the
-    ordinary source hooks, which dirty all affected known later endpoints.
+    Ordinary re-registration is idempotent. A sealed bulk caller can request
+    exact still-unpublished slots even on previously clean known endpoints.
+    Source corrections retain the ordinary hooks for later affected endpoints.
     """
     require(isinstance(sources, list) and 1 <= len(sources) <= 14,
             "Choose1-14 verified endpoint proofs")
@@ -1036,6 +1038,7 @@ def register_rolling_endpoints(store, sources, *, today=None, prepared_manifest=
     if prepared_manifest is not None:
         _sealed_preparation(prepared_manifest)
         require(len(sources) <= 7, "Choose at most seven prepared endpoints")
+    selected_targets = _selected_prepared_targets(prepared_manifest, prepared_target_keys)
     local = prepared_manifest.reader_store() if prepared_manifest is not None else None
     io = _IO(store)
     try:
@@ -1081,7 +1084,11 @@ def register_rolling_endpoints(store, sources, *, today=None, prepared_manifest=
         if prepared_manifest is None:
             rolling.register(queue, days)
         else:
-            _register_prepared_endpoints(queue, days, prepared_manifest.targets)
+            require(prepared_target_keys is None or all(
+                target["endpoint"] in days for target in selected_targets),
+                "Prepared targets outside registered endpoints")
+            _register_prepared_endpoints(queue, days, selected_targets,
+                                         include_existing=prepared_target_keys is not None)
         require(store.can_write_group(attempts=1, byte_count=len(canonical(queue).encode())),
                 "Endpoint registration budget deferred")
         if before is None or before.data != canonical(queue).encode():
@@ -1093,19 +1100,38 @@ def register_rolling_endpoints(store, sources, *, today=None, prepared_manifest=
         io.close()
 
 
-def _register_prepared_endpoints(queue, days, targets):
-    """Reuse endpoint admission, retaining only declared new dirty slots."""
+def _selected_prepared_targets(prepared_manifest, prepared_target_keys):
+    if prepared_target_keys is None:
+        return prepared_manifest.targets if prepared_manifest is not None else None
+    require(prepared_manifest is not None
+            and isinstance(prepared_target_keys, (set, frozenset))
+            and 1 <= len(prepared_target_keys) <= 42
+            and all(isinstance(key, str) for key in prepared_target_keys),
+            "Exact prepared target keys required")
+    targets = [target for target in prepared_manifest.targets if target["key"] in prepared_target_keys]
+    require({target["key"] for target in targets} == prepared_target_keys,
+            "Prepared targets outside sealed scope")
+    return targets
+
+
+def _register_prepared_endpoints(queue, days, targets, *, include_existing=False):
+    """Admit declared slots, preserving prior dirty ranges and pending ownership."""
     previous = copy.deepcopy(queue.get("rolling"))
     rolling.register(queue, days)
     value = queue["rolling"]
     new_days = {day for day in days if previous is None
                 or not rolling.intersect(previous["eligible"], day, day)}
+    pending_targets = {(row.get("rolling_window"), row.get("channel"), row["end_date"])
+                       for row in queue["pending"].values()}
     for n in rolling.WINDOWS:
         for channel in rolling.CHANNELS:
             prior = previous["dirty"][str(n)][channel] if previous else []
             added = [[target["endpoint"], target["endpoint"]] for target in targets
-                     if target["endpoint"] in new_days and target["window_days"] == n
-                     and target["channel"] == channel]
+                     if target["endpoint"] in (set(days) if include_existing else new_days)
+                     and target["window_days"] == n
+                     and target["channel"] == channel
+                     and (not include_existing
+                          or (n, channel, target["endpoint"]) not in pending_targets)]
             value["dirty"][str(n)][channel] = rolling.merge([*prior, *added])
 
 
@@ -1531,7 +1557,7 @@ def publish_prepared_rows(io, queue, revision, rows, *, report, reserve_writes=0
 def refresh_pending(
     store, *, today=None, timezone=None, max_periods=MAX_PERIODS, reserve_writes=0,
     snapshot_cache=None, period_names=None, rolling_sources=None, rolling_endpoints=None,
-    prepared_manifest=None,
+    prepared_manifest=None, prepared_target_keys=None,
 ):
     """Bounded stored-only drain with optional verified local calculation inputs.
 
@@ -1553,7 +1579,10 @@ def refresh_pending(
     timezone = timezone or os.environ.get("HEALTH_TIMEZONE")
     day = today
     seal = _sealed_preparation(prepared_manifest) if prepared_manifest is not None else None
-    prepared_targets = prepared_manifest.targets if prepared_manifest is not None else None
+    prepared_targets = _selected_prepared_targets(prepared_manifest, prepared_target_keys)
+    require(prepared_target_keys is None or rolling_endpoints is not None and all(
+        target["endpoint"] in rolling_endpoints for target in prepared_targets),
+        "Prepared targets outside refresh endpoints")
     prepared_keys = {target["key"] for target in prepared_targets} if prepared_targets is not None else None
     io = _IO(store)
     report = {
