@@ -1023,7 +1023,7 @@ def enqueue_verified_sources(store, sources):
                 raise
 
 
-def register_rolling_endpoints(store, sources, *, today=None):
+def register_rolling_endpoints(store, sources, *, today=None, prepared_manifest=None):
     """Activate only endpoints backed by fresh exact, usable stored sleep proofs.
 
     Re-registering known endpoints is idempotent. Source corrections use the
@@ -1033,10 +1033,15 @@ def register_rolling_endpoints(store, sources, *, today=None):
             "Choose1-14 verified endpoint proofs")
     if today is not None:
         require(date.fromisoformat(today).isoformat() == today, "Exact endpoint day required")
+    if prepared_manifest is not None:
+        _sealed_preparation(prepared_manifest)
+        require(len(sources) <= 7, "Choose at most seven prepared endpoints")
+    local = prepared_manifest.reader_store() if prepared_manifest is not None else None
     io = _IO(store)
     try:
         queue, before = _read_queue(io)
         days = []
+        prepared_proofs = []
         for item in sources:
             require(isinstance(item, dict) and set(item) == {"key", "revision", "sha256"},
                     "Exact endpoint proof required")
@@ -1046,7 +1051,8 @@ def register_rolling_endpoints(store, sources, *, today=None):
             require(not any(entries.get(item["key"], {}).get("state") == "intent"
                             for row in queue["pending"].values() for entries in _source_maps(row)),
                     "Unknown sleep source cannot activate endpoints")
-            snapshot = _snapshot(io, item["key"], 524288)
+            snapshot = (_snapshot(io, item["key"], 524288) if local is None
+                        else local.get_snapshot(item["key"], max_bytes=524288))
             require(snapshot is not None and snapshot.revision == item["revision"]
                     and hashlib.sha256(snapshot.data).hexdigest() == item["sha256"],
                     "Endpoint source proof changed")
@@ -1054,8 +1060,28 @@ def register_rolling_endpoints(store, sources, *, today=None):
             require(value.get("schema_version") == 1 and value.get("source") == "garmin"
                     and value.get("date") == day and _validate_source(kind, day, value),
                     "Endpoint sleep unavailable")
+            if prepared_manifest is not None:
+                target = max((target for target in prepared_manifest.targets
+                    if target["endpoint"] == day), key=lambda target: target["window_days"], default=None)
+                require(target is not None, "Prepared endpoint outside sealed scope")
+                artifact = prepared_manifest.product_for(target["key"])
+                _, _, proof = _prepared_value(artifact, {"start_date": target["args"]["start_date"],
+                    "end_date": day, "rolling_window": target["window_days"],
+                    "channel": target["channel"]})
+                binding = proof["objects"].get(item["key"], {})
+                require(binding.get("status") == "present" and binding.get("revision") == snapshot.revision
+                        and binding.get("size") == len(snapshot.data)
+                        and binding.get("sha256") == item["sha256"], "Prepared endpoint proof changed")
+                prepared_proofs.append({"proof": proof})
             days.append(day)
-        rolling.register(queue, days)
+        if prepared_proofs:
+            from .night_reference_sources import validate_rolling_sources
+
+            validate_rolling_sources(io, _combined_reference_proof(prepared_proofs))
+        if prepared_manifest is None:
+            rolling.register(queue, days)
+        else:
+            _register_prepared_endpoints(queue, days, prepared_manifest.targets)
         require(store.can_write_group(attempts=1, byte_count=len(canonical(queue).encode())),
                 "Endpoint registration budget deferred")
         if before is None or before.data != canonical(queue).encode():
@@ -1065,6 +1091,45 @@ def register_rolling_endpoints(store, sources, *, today=None):
                 "pending_periods": len(queue["pending"])}
     finally:
         io.close()
+
+
+def _register_prepared_endpoints(queue, days, targets):
+    """Reuse endpoint admission, retaining only declared new dirty slots."""
+    previous = copy.deepcopy(queue.get("rolling"))
+    rolling.register(queue, days)
+    value = queue["rolling"]
+    new_days = {day for day in days if previous is None
+                or not rolling.intersect(previous["eligible"], day, day)}
+    for n in rolling.WINDOWS:
+        for channel in rolling.CHANNELS:
+            prior = previous["dirty"][str(n)][channel] if previous else []
+            added = [[target["endpoint"], target["endpoint"]] for target in targets
+                     if target["endpoint"] in new_days and target["window_days"] == n
+                     and target["channel"] == channel]
+            value["dirty"][str(n)][channel] = rolling.merge([*prior, *added])
+
+
+def _materialize_prepared(queue, targets, **kwargs):
+    """Run the common scheduler on declared dirty slots, preserving other work."""
+    view = copy.deepcopy(queue)
+    if "rolling" not in view:
+        return False
+    for n in rolling.WINDOWS:
+        for channel in rolling.CHANNELS:
+            ranges = view["rolling"]["dirty"][str(n)][channel]
+            view["rolling"]["dirty"][str(n)][channel] = rolling.merge([
+                interval for target in targets
+                if target["window_days"] == n and target["channel"] == channel
+                for interval in rolling.intersect(ranges, target["endpoint"], target["endpoint"])
+            ])
+    if not rolling.materialize(view, **kwargs):
+        return False
+    for name, row in view["pending"].items():
+        if name not in queue["pending"]:
+            queue["pending"][name] = row
+            channels = queue["rolling"]["dirty"][str(row["rolling_window"])]
+            channels[row["channel"]] = rolling.remove_day(channels[row["channel"]], row["end_date"])
+    return True
 
 
 def rolling_cohort_status(queue, sources=None, *, today=None):
@@ -1189,39 +1254,284 @@ def _preserve_reference(store, queue, queue_revision, row, key, before):
     return queue_revision
 
 
-def _prior_input_unavailable(old, values, channel):
-    excluded = old.get("excluded")
-    require(
-        isinstance(excluded, list)
-        and all(
-            isinstance(row, dict) and isinstance(row.get("wake_date"), str) for row in excluded
-        ),
-        "Previous reference exclusions unverified",
-    )
-    skipped = {row["wake_date"] for row in excluded}
-    prior = {
-        row["wake_date"]: row for row in old["source_manifest"] if row["wake_date"] not in skipped
-    }
+def prepare_reference(values, args, proof):
+    """Build the same bounded baseline without any storage or queue operation."""
+    require(type(values) is list and 1 <= len(values) <= 90, "Native reference window bound")
+    args = normalize_args(period="custom", **args)
+    for night in values:
+        observed = night["channels"][args["channel"]]
+        if any(observed["quality"][field] for field in
+               ("invalid", "ambiguous_time", "conflicting_timestamps")):
+            raise NativeInputError("Unverified native observations")
+    input_bytes = len(canonical(values).encode())
+    input_points = sum(len(channel["points"]) for night in values
+                       for channel in night["channels"].values())
+    require(input_bytes <= 16777216, "Native reference input byte limit")
+    require(input_points <= 200000, "Native reference point limit")
+    value = baseline(values, args, input_bytes=input_bytes, input_points=input_points)["product"]
+    body = canonical(value)
+    require(len(body.encode()) <= 262144, "Reference product bound")
+    require(type(proof) is dict and set(proof) == {"objects", "lists"}
+            and all(type(proof[kind]) is dict for kind in proof), "Native reference proof bound")
+    return {"schema": 1, "kind": "prepared-night-baseline", "method_version": "night-baseline-v1",
+        "args": args, "key": storage_key(args), "body": body,
+        "sha256": hashlib.sha256(body.encode()).hexdigest(),
+        "source_identity": value["source_identity"], "source_proof": copy.deepcopy(proof),
+        "source_proof_sha256": hashlib.sha256(canonical(proof).encode()).hexdigest(),
+        "prior_inputs": [{"wake_date": night["wake_date"], "status": night["status"],
+            "channel_status": night["channels"][args["channel"]]["status"],
+            "source_dates": copy.deepcopy(night["channels"][args["channel"]]["source_dates"]),
+            "source_revisions": copy.deepcopy(night["channels"][args["channel"]]["source_revisions"])}
+            for night in values]}
+
+
+_ORDINARY_PREPARATION = object()
+
+
+def _sealed_preparation(workset):
+    require(workset is not None, "Sealed reference workset required")
+    from .reference_workset import ReferenceWorkset
+
+    require(type(workset) is ReferenceWorkset, "Sealed reference workset required")
+    return workset.assert_sealed()
+
+
+def _prepared_value(artifact, row):
+    require(type(artifact) is dict and artifact.get("schema") == 1
+            and artifact.get("kind") == "prepared-night-baseline"
+            and artifact.get("method_version") == "night-baseline-v1",
+            "Prepared reference schema unverified")
+    args = artifact["args"]
+    require(args == normalize_args(period="custom", **args)
+            and args["start_date"] == row["start_date"] and args["end_date"] == row["end_date"]
+            and (not row.get("rolling_window") or args["channel"] == row["channel"])
+            and artifact["key"] == storage_key(args), "Prepared reference arguments changed")
+    body = artifact["body"]
+    require(type(body) is str and len(body.encode()) <= 262144
+            and hashlib.sha256(body.encode()).hexdigest() == artifact["sha256"],
+            "Prepared reference bytes changed")
+    value = _decode(body.encode())
+    require(value.get("kind") == "night-baseline" and value.get("method_version") == "night-baseline-v1"
+            and value.get("args") == args
+            and value.get("args_sha256") == hashlib.sha256(canonical(args).encode()).hexdigest()
+            and isinstance(value.get("source_manifest"), list)
+            and value.get("source_identity") == artifact["source_identity"]
+            == hashlib.sha256(canonical(value["source_manifest"]).encode()).hexdigest()
+            and canonical(value) == body, "Prepared reference provenance changed")
+    proof = artifact["source_proof"]
+    require(type(proof) is dict and set(proof) == {"objects", "lists"}
+            and all(type(proof[kind]) is dict for kind in proof)
+            and hashlib.sha256(canonical(proof).encode()).hexdigest() == artifact["source_proof_sha256"],
+            "Prepared reference proof changed")
+    inputs = artifact["prior_inputs"]
+    require(type(inputs) is list and 1 <= len(inputs) <= 90
+            and all(type(item) is dict and set(item) == {
+                "wake_date", "status", "channel_status", "source_dates", "source_revisions"}
+                and type(item["source_dates"]) is list and type(item["source_revisions"]) is list
+                for item in inputs), "Prepared reference availability changed")
+    return value, body.encode(), proof
+
+
+def _prior_prepared_input_unavailable(old, inputs):
+    skipped = {item["wake_date"] for item in old["excluded"]}
+    prior = {item["wake_date"]: item for item in old["source_manifest"]
+             if item["wake_date"] not in skipped}
     require(len(prior) == old["contributing_nights"], "Previous contributor evidence unverified")
-    current = {row["wake_date"]: row for row in values}
+    current = {item["wake_date"]: item for item in inputs}
     for day, proof in prior.items():
         night = current.get(day)
-        if night is None or night.get("status") not in {"available", "partial"}:
+        if night is None or night["status"] not in {"available", "partial"}:
             return True
-        observed = night["channels"][channel]
-        if observed["status"] not in {"available", "no_data"}:
+        if night["channel_status"] not in {"available", "no_data"}:
             return True
-        previous_dates = {row["date"] for row in proof["source_revisions"]}
-        available_dates = {row["date"] for row in observed["source_revisions"]}
-        still_needed = set(observed["source_dates"])
-        if (previous_dates & still_needed) - available_dates:
+        previous = {item["date"] for item in proof["source_revisions"]}
+        available = {item["date"] for item in night["source_revisions"]}
+        if (previous & set(night["source_dates"])) - available:
             return True
     return False
+
+
+def _combined_reference_proof(records):
+    proof = {"objects": {}, "lists": {}}
+    for record in records:
+        for kind in proof:
+            for key, value in record["proof"][kind].items():
+                require(key not in proof[kind] or proof[kind][key] == value,
+                        "Reference batch source proof conflict")
+                proof[kind][key] = value
+    return proof
+
+
+def publish_prepared_rows(io, queue, revision, rows, *, report, reserve_writes=0,
+                          prepared_manifest=None, _ordinary_gate=None):
+    """Publish a bounded sealed group with the established intent/CAS protocol.
+
+    The ordinary refresh supplies one freshly assembled row through its private
+    gate. Bulk publication always requires the whole-workset seal, not a list of
+    the products that happened to finish preparation first.
+    """
+    if _ordinary_gate is not _ORDINARY_PREPARATION:
+        _sealed_preparation(prepared_manifest)
+    else:
+        require(len(rows) == 1, "Ordinary reference row bound")
+    require(type(rows) is list and 1 <= len(rows) <= MAX_LOCAL_PERIODS,
+            "Choose one to eight prepared rows")
+    records = []
+    for name, artifacts in rows:
+        row = queue["pending"][name]
+        require(not row.get("inflight") and not _held(row)
+                and all(item.get("state") == "ready" for item in row["sources"].values()),
+                "Unresolved previous source/product write; no automatic adoption")
+        require(type(artifacts) is list and len(artifacts) == (1 if row.get("rolling_window") else 2),
+                "Prepared reference channel group changed")
+        expected = {row["channel"]} if row.get("rolling_window") else {"heart_rate", "hrv"}
+        require({item["args"]["channel"] for item in artifacts} == expected,
+                "Prepared reference channel group changed")
+        proof = artifacts[0]["source_proof"]
+        proof_hash = artifacts[0]["source_proof_sha256"]
+        pending = []
+        for artifact in artifacts:
+            value, data, checked_proof = _prepared_value(artifact, row)
+            require(checked_proof == proof and artifact["source_proof_sha256"] == proof_hash,
+                    "Prepared reference row proof conflict")
+            for key, binding in row["sources"].items():
+                observed = proof["objects"].get(key, {})
+                require(observed.get("status") == "present"
+                        and observed.get("revision") == binding["revision"]
+                        and observed.get("sha256") == binding["sha256"], "Dirty canonical source proof changed")
+            key = artifact["key"]
+            before = _snapshot(io, key)
+            old = _decode(before.data) if before else None
+            if old is not None:
+                require(old.get("kind") == "night-baseline" and old.get("method_version") == "night-baseline-v1"
+                        and old.get("args") == artifact["args"]
+                        and old.get("args_sha256") == hashlib.sha256(canonical(artifact["args"]).encode()).hexdigest()
+                        and isinstance(old.get("source_manifest"), list)
+                        and old.get("source_identity") == hashlib.sha256(canonical(old["source_manifest"]).encode()).hexdigest()
+                        and old.get("unit") == value["unit"] and type(old.get("contributing_nights")) is int
+                        and 0 <= old["contributing_nights"] <= old.get("nights_requested", -1),
+                        "Existing reference unverified")
+                require(isinstance(old.get("excluded"), list) and all(
+                    isinstance(item, dict) and isinstance(item.get("wake_date"), str)
+                    for item in old["excluded"]), "Previous reference exclusions unverified")
+                if _prior_prepared_input_unavailable(old, artifact["prior_inputs"]):
+                    row["blocked"] = "prior_contributing_input_unavailable"
+                elif old["contributing_nights"] > 0 and value["contributing_nights"] == 0:
+                    row["blocked"] = "empty_does_not_replace_good"
+                if row.get("blocked"):
+                    report["blocked"].append(name)
+                    break
+            value_sem, old_sem = dict(value), dict(old) if old else None
+            value_sem.pop("resources", None)
+            if old_sem is not None:
+                old_sem.pop("resources", None)
+            unchanged = old_sem == value_sem
+            complete = row.get("completed", {}).get(key)
+            if complete:
+                require(before is not None and before.revision == complete["revision"]
+                        and hashlib.sha256(before.data).hexdigest() == complete["sha256"]
+                        and (unchanged or artifact["sha256"] == complete["sha256"]),
+                        "Known completed reference changed")
+            if complete or unchanged:
+                report["products_unchanged"] += 1
+            else:
+                pending.append((key, data, before, False))
+        if row.get("blocked"):
+            revision = _save_queue(io, queue, revision)
+            continue
+        if row["phase"] == "publishing":
+            require(row.get("source_proof_sha256") == proof_hash, "Interrupted reference source binding changed")
+        if row.get("validated_progress"):
+            require(row["validated_progress"] == proof_hash, "Known bounded progress source binding changed")
+        records.append({"name": name, "row": row, "proof": proof, "proof_hash": proof_hash,
+                        "pending": pending, "chosen": pending})
+    chosen = []
+
+    def fits(group):
+        if any(not item["row"].get("rolling_window") for item in group) and len(group) != 1:
+            return False
+        proof = _combined_reference_proof(group)
+        products = [product for item in group for product in item["chosen"]]
+        rolling_group = bool(group[0]["row"].get("rolling_window"))
+        reserve = 2 * len(group) + sum(9 if before else 3 for _, _, before, _ in products)
+        reads = (0 if rolling_group else 2 * len(proof["objects"])) + 2 * len(group)
+        reads += sum(11 if before else 3 for _, _, before, _ in products)
+        if io.counts()["get"] + reads > 400:
+            return False
+        estimated = sum(len(data) + (2 * len(before.data) + 2048 if before else 0)
+                        for _, data, before, _ in products)
+        estimated += (reserve + 1) * min(MAX_QUEUE_BYTES, len(canonical(queue).encode()) + 65536)
+        if not io.can_write_group(attempts=reserve + reserve_writes, byte_count=estimated):
+            return False
+        from .night_reference_sources import rolling_fence_list_bound
+
+        lists = rolling_fence_list_bound(proof) if rolling_group else 4 * len(_context_months(proof["lists"]))
+        return io.counts()["list"] + 2 * lists <= 100
+
+    for record in records:
+        accepted = False
+        for count in range(len(record["pending"]), -1, -1):
+            if record["pending"] and count == 0:
+                continue
+            record["chosen"] = record["pending"][:count]
+            if fits(chosen + [record]):
+                chosen.append(record)
+                accepted = True
+                break
+        if not accepted or len(record["chosen"]) < len(record["pending"]):
+            break
+    if not chosen:
+        if records:
+            report.setdefault("budget_deferred", []).append(records[0]["name"])
+        return {"queue_revision": revision, "completed": [], "deferred": bool(records)}
+    proof = _combined_reference_proof(chosen)
+    rolling_group = bool(chosen[0]["row"].get("rolling_window"))
+    for record in chosen:
+        record["row"]["phase"] = "publishing"
+        record["row"]["source_proof_sha256"] = record["proof_hash"]
+        record["row"].pop("validated_progress", None)
+    revision = _save_queue(io, queue, revision)
+    from .night_reference_sources import validate_rolling_sources
+
+    validate = validate_rolling_sources if rolling_group else _validate_sources
+    validate(io, proof)
+    for record in chosen:
+        row = record["row"]
+        for key, data, before, _ in record["chosen"]:
+            if before is not None:
+                revision = _preserve_reference(io, queue, revision, row, key, before)
+            row["inflight"] = {"key": key, "sha256": hashlib.sha256(data).hexdigest(),
+                               "revision": before.revision if before else None}
+            revision = _save_queue(io, queue, revision)
+            after = _cas(io, key, data, before)
+            row.setdefault("completed", {})[key] = {"revision": after.revision,
+                "sha256": hashlib.sha256(data).hexdigest()}
+            row.pop("inflight")
+            revision = _save_queue(io, queue, revision)
+            report["products_written"] += 1
+    validate(io, proof)
+    completed = []
+    for record in chosen:
+        if len(record["chosen"]) < len(record["pending"]):
+            record["row"]["phase"] = "dirty"
+            record["row"]["validated_progress"] = record["proof_hash"]
+            report.setdefault("budget_deferred", []).append(record["name"])
+        else:
+            del queue["pending"][record["name"]]
+            completed.append(record["name"])
+            report["periods_completed"] += 1
+    revision = _save_queue(io, queue, revision)
+    deferred = len(chosen) < len(records) or any(
+        len(item["chosen"]) < len(item["pending"]) for item in chosen)
+    if len(chosen) < len(records):
+        report.setdefault("budget_deferred", []).append(records[len(chosen)]["name"])
+    return {"queue_revision": revision, "completed": completed, "deferred": deferred}
 
 
 def refresh_pending(
     store, *, today=None, timezone=None, max_periods=MAX_PERIODS, reserve_writes=0,
     snapshot_cache=None, period_names=None, rolling_sources=None, rolling_endpoints=None,
+    prepared_manifest=None,
 ):
     """Bounded stored-only drain with optional verified local calculation inputs.
 
@@ -1242,6 +1552,9 @@ def refresh_pending(
                 for endpoint in rolling_endpoints), "Choose at most seven exact rolling endpoints")
     timezone = timezone or os.environ.get("HEALTH_TIMEZONE")
     day = today
+    seal = _sealed_preparation(prepared_manifest) if prepared_manifest is not None else None
+    prepared_targets = prepared_manifest.targets if prepared_manifest is not None else None
+    prepared_keys = {target["key"] for target in prepared_targets} if prepared_targets is not None else None
     io = _IO(store)
     report = {
         "periods_completed": 0,
@@ -1252,7 +1565,9 @@ def refresh_pending(
         "held_periods": 0,
         "pending": 0,
     }
-    queue = active_row = None
+    queue = None
+    if seal is not None:
+        report["prepared_build_seal"] = seal
     try:
         queue, revision = _read_queue(io)
         if rolling_sources != []:
@@ -1303,7 +1618,7 @@ def refresh_pending(
             _source(item["key"] if isinstance(item, dict) else item)
             if isinstance(item, (str, dict)) else tuple(item) for item in rolling_sources
         ]
-        if rolling_endpoints is None and rolling_sources != []:
+        if prepared_targets is None and rolling_endpoints is None and rolling_sources != []:
             discovery_before = copy.deepcopy(queue)
             snapshot_cache = {} if snapshot_cache is None else snapshot_cache
             discovery = drain_discovery(io, queue, today=day, snapshot_cache=snapshot_cache,
@@ -1318,15 +1633,18 @@ def refresh_pending(
                 io.require_capacity("put", 1)
                 revision = _save_queue(io, queue, revision)
         before_materialization = copy.deepcopy(queue)
-        calendar_waiting = any(
+        calendar_waiting = prepared_targets is None and any(
             not row.get("rolling_window") and (period_names is None or name in period_names)
             and is_closed((row["start_date"], row["end_date"]), day)
             and not row.get("blocked") and not _held(row)
             for name, row in queue["pending"].items()
         )
-        if not calendar_waiting and rolling.materialize(queue, today=day, limit=max_periods,
-                               max_pending=MAX_PENDING, allowed_sources=allowed,
-                               allowed_endpoints=rolling_endpoints):
+        materialize_args = {"today": day, "limit": max_periods, "max_pending": MAX_PENDING,
+                            "allowed_sources": allowed, "allowed_endpoints": rolling_endpoints}
+        if not calendar_waiting and (
+            rolling.materialize(queue, **materialize_args) if prepared_targets is None
+            else _materialize_prepared(queue, prepared_targets, **materialize_args)
+        ):
             if not store.can_write_group(attempts=1 + reserve_writes,
                                          byte_count=len(canonical(queue).encode())):
                 queue = before_materialization
@@ -1348,15 +1666,18 @@ def refresh_pending(
                  else is_closed((row["start_date"], row["end_date"]), day))
             and not row.get("blocked")
             and not _held(row)
+            and (prepared_keys is None or row.get("rolling_window") and storage_key(normalize_args(
+                start_date=row["start_date"], end_date=row["end_date"], period="custom",
+                channel=row["channel"])) in prepared_keys)
         ]
         # Keep the established closed calendar cohort together. Rolling work
         # remains durably pending for the next bounded phase when calendars use
         # this phase; daily source consumers can continue their existing drain.
         calendars = [name for name in eligible if not queue["pending"][name].get("rolling_window")]
         selected = (calendars or eligible)[:max_periods]
+        staged_rows = []
         for name in selected:
             row = queue["pending"][name]
-            active_row = row
             is_rolling = bool(row.get("rolling_window"))
             if is_rolling and (any(
                 binding.get("state") == "intent" and
@@ -1376,6 +1697,13 @@ def refresh_pending(
                 and all(source.get("state") == "ready" for source in row["sources"].values()),
                 "Unresolved previous source/product write; no automatic adoption",
             )
+            if prepared_manifest is not None:
+                artifacts = [prepared_manifest.product_for(storage_key(normalize_args(
+                    start_date=row["start_date"], end_date=row["end_date"], period="custom",
+                    channel=channel)))
+                    for channel in ((row["channel"],) if is_rolling else ("heart_rate", "hrv"))]
+                staged_rows.append((name, artifacts))
+                continue
             for key, binding in row["sources"].items():
                 # Capture once through the same reader used for native assembly.
                 # Pre/post publication fences below still perform fresh storage reads.
@@ -1400,8 +1728,6 @@ def refresh_pending(
             if is_rolling:
                 from .night_reference_sources import (
                     prime_rolling_list_bound,
-                    rolling_fence_list_bound,
-                    validate_rolling_sources,
                 )
 
                 assembly_lists = prime_rolling_list_bound(requested)
@@ -1441,164 +1767,22 @@ def refresh_pending(
                 <= 200000,
                 "Native reference point limit",
             )
-            products = []
-            for channel in (row["channel"],) if is_rolling else ("heart_rate", "hrv"):
-                args = normalize_args(
-                    start_date=row["start_date"],
-                    end_date=row["end_date"],
-                    period="custom",
-                    channel=channel,
-                )
-                value = baseline(
-                    values,
-                    args,
-                    input_bytes=len(canonical(values).encode()),
-                    input_points=sum(
-                        len(ch["points"]) for night in values for ch in night["channels"].values()
-                    ),
-                )["product"]
-                key = storage_key(args)
-                before = _snapshot(io, key)
-                old = _decode(before.data) if before else None
-                if old is not None:
-                    require(
-                        old.get("kind") == "night-baseline"
-                        and old.get("method_version") == "night-baseline-v1"
-                        and old.get("args") == args
-                        and old.get("args_sha256")
-                        == hashlib.sha256(canonical(args).encode()).hexdigest()
-                        and isinstance(old.get("source_manifest"), list)
-                        and old.get("source_identity")
-                        == hashlib.sha256(canonical(old["source_manifest"]).encode()).hexdigest()
-                        and old.get("unit") == value["unit"]
-                        and type(old.get("contributing_nights")) is int
-                        and 0 <= old["contributing_nights"] <= old.get("nights_requested", -1),
-                        "Existing reference unverified",
-                    )
-                    if _prior_input_unavailable(old, values, channel):
-                        row["blocked"] = "prior_contributing_input_unavailable"
-                        report["blocked"].append(name)
-                        break
-                    if old.get("contributing_nights", 0) > 0 and value["contributing_nights"] == 0:
-                        row["blocked"] = "empty_does_not_replace_good"
-                        report["blocked"].append(name)
-                        break
-                value_sem = dict(value)
-                value_sem.pop("resources", None)
-                old_sem = dict(old) if old else None
-                if old_sem is not None:
-                    old_sem.pop("resources", None)
-                data = canonical(value).encode()
-                require(len(data) <= 262144, "Reference product bound")
-                products.append((key, data, before, old_sem == value_sem))
-            if row.get("blocked"):
-                revision = _save_queue(io, queue, revision)
-                continue
             proof = _proof(reader, requested)
             for key in row["sources"]:
                 proof["objects"][key] = copy.deepcopy(reader.proof[key])
-            proof_hash = hashlib.sha256(canonical(proof).encode()).hexdigest()
-            if row["phase"] == "publishing":
-                require(
-                    row.get("source_proof_sha256") == proof_hash,
-                    "Interrupted reference source binding changed",
-                )
-            if row.get("validated_progress"):
-                require(
-                    row["validated_progress"] == proof_hash,
-                    "Known bounded progress source binding changed",
-                )
-            pending = []
-            for product in products:
-                key, data, before, unchanged = product
-                complete = row.get("completed", {}).get(key)
-                if complete:
-                    require(
-                        before is not None
-                        and before.revision == complete["revision"]
-                        and hashlib.sha256(before.data).hexdigest() == complete["sha256"]
-                        and (unchanged or hashlib.sha256(data).hexdigest() == complete["sha256"]),
-                        "Known completed reference changed",
-                    )
-                    report["products_unchanged"] += 1
-                elif unchanged:
-                    report["products_unchanged"] += 1
-                else:
-                    pending.append(product)
-            chosen = []
-            # Both fresh fences and all history/control/current readbacks must fit
-            # before entering publication. Smaller known groups retain progress.
-            for count in range(len(pending), -1, -1):
-                if pending and count == 0:
-                    continue
-                group = pending[:count]
-                reserve = 2 + sum(9 if before is not None else 3 for _, _, before, _ in group)
-                reads = (
-                    (0 if is_rolling else 2 * len(proof["objects"]))
-                    + 2
-                    + sum(11 if before is not None else 3 for _, _, before, _ in group)
-                )
-                if io.counts()["get"] + reads > 400:
-                    continue
-                estimated = sum(
-                    len(data) + (2 * len(before.data) + 2048 if before else 0)
-                    for _, data, before, _ in group
-                ) + (reserve + 1) * min(MAX_QUEUE_BYTES, len(canonical(queue).encode()) + 65536)
-                if not store.can_write_group(
-                    attempts=reserve + reserve_writes, byte_count=estimated
-                ):
-                    continue
-                # Admission may have inventoried the bucket inside this observer.
-                # Both fresh context fences must still fit before any intent.
-                fence_lists = (rolling_fence_list_bound(proof) if is_rolling
-                               else _context_fence_lists(requested))
-                if io.counts()["list"] + 2 * fence_lists > 100:
-                    continue
-                chosen = group
+            artifacts = [prepare_reference(values, normalize_args(
+                start_date=row["start_date"], end_date=row["end_date"], period="custom",
+                channel=channel), proof)
+                for channel in ((row["channel"],) if is_rolling else ("heart_rate", "hrv"))]
+            published = publish_prepared_rows(io, queue, revision, [(name, artifacts)],
+                report=report, reserve_writes=reserve_writes, _ordinary_gate=_ORDINARY_PREPARATION)
+            revision = published["queue_revision"]
+            if published["deferred"]:
                 break
-            else:
-                report.setdefault("budget_deferred", []).append(name)
-                break
-            row["phase"] = "publishing"
-            row["source_proof_sha256"] = proof_hash
-            row.pop("validated_progress", None)
-            revision = _save_queue(io, queue, revision)
-            if is_rolling:
-                validate_rolling_sources(io, proof)
-            else:
-                _validate_sources(io, proof)
-            for key, data, before, _ in chosen:
-                if before is not None:
-                    revision = _preserve_reference(io, queue, revision, row, key, before)
-                row["inflight"] = {
-                    "key": key,
-                    "sha256": hashlib.sha256(data).hexdigest(),
-                    "revision": before.revision if before else None,
-                }
-                revision = _save_queue(io, queue, revision)
-                after = _cas(io, key, data, before)
-                row.setdefault("completed", {})[key] = {
-                    "revision": after.revision,
-                    "sha256": hashlib.sha256(data).hexdigest(),
-                }
-                row.pop("inflight")
-                revision = _save_queue(io, queue, revision)
-                report["products_written"] += 1
-            if is_rolling:
-                validate_rolling_sources(io, proof)
-            else:
-                _validate_sources(io, proof)
-            if len(chosen) < len(pending):
-                # This is a known ACK/readback + fresh-post-fence checkpoint, not
-                # an unknown publication. New sources can supersede it normally.
-                row["phase"] = "dirty"
-                row["validated_progress"] = proof_hash
-                revision = _save_queue(io, queue, revision)
-                report.setdefault("budget_deferred", []).append(name)
-                break
-            del queue["pending"][name]
-            revision = _save_queue(io, queue, revision)
-            report["periods_completed"] += 1
+        if staged_rows:
+            published = publish_prepared_rows(io, queue, revision, staged_rows,
+                report=report, reserve_writes=reserve_writes, prepared_manifest=prepared_manifest)
+            revision = published["queue_revision"]
         report["local_snapshot_hits"] = reader.local_snapshot_hits
         report["pending_materialized"] = len(queue["pending"])
         report["rolling_remaining"] = rolling.status(queue)
@@ -1636,7 +1820,7 @@ def refresh_pending(
         report["component_operations"] = io.counts()
         return report
     except ComponentBudgetDeferred:
-        if active_row is not None and active_row.get("inflight"):
+        if queue is not None and any(row.get("inflight") for row in queue["pending"].values()):
             raise
         report.update(
             status="bounded_pending",
