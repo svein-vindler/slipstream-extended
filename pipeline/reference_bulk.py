@@ -562,6 +562,9 @@ def _publication_result(workset, account, resource_plan_ref, state):
             "complete" if len(state["verified"]) == summary["product_count"] else "bounded_pending",
         "build_seal": summary["build_seal"], "resource_plan_ref": resource_plan_ref,
         "generated_targets": pending, "publication_receipts": receipts,
+        "total_products": summary["product_count"],
+        "unpublished_products": summary["product_count"] - len(state["published"]),
+        "publication_complete": len(state["published"]) == summary["product_count"],
         "published_products": len(state["published"]), "verified_products": len(state["verified"]),
         "remaining_products": summary["product_count"] - len(state["verified"]),
         "known_gap_targets": summary["known_gap_count"], "source_calls": 0, "usage": account.snapshot()}
@@ -569,7 +572,7 @@ def _publication_result(workset, account, resource_plan_ref, state):
 
 def publish_bulk(job, plan_sha, scope_ref, folder, *, resource_plan_ref, carried,
                  store_factory=None, max_batches=2436):
-    """Publish only globally sealed products with one client and bounded stage views."""
+    """Publish sealed outstanding slots; unverified output alone is not scope completion."""
     from .history_publish import StorageGuard, _ReferenceStore
     from .night_baseline_refresh import refresh_pending, register_rolling_endpoints
     from .reference_bulk_budget import BulkAccount
@@ -626,6 +629,8 @@ def publish_bulk(job, plan_sha, scope_ref, folder, *, resource_plan_ref, carried
             group_index = next(index for index, group in enumerate(groups)
                 if any(target["endpoint"] in group and target["key"] in remaining for target in targets))
             group = groups[group_index]
+            group_keys = {target["key"] for target in targets
+                          if target["endpoint"] in group and target["key"] in remaining}
             batch = command / f"batch-{ordinal:04d}"
             batch.mkdir()
             guard = StorageGuard(root_store.new_stage(), set(), batch,
@@ -642,10 +647,12 @@ def publish_bulk(job, plan_sha, scope_ref, folder, *, resource_plan_ref, carried
                             key += ".gz"
                         snapshot = local.get_snapshot(key, max_bytes=524288)
                         sleep.append({"key": key, "revision": snapshot.revision, "sha256": digest(snapshot.data)})
-                    register_rolling_endpoints(capture, sleep, today=scope["today"], prepared_manifest=workset)
+                    register_rolling_endpoints(capture, sleep, today=scope["today"],
+                        prepared_manifest=workset, prepared_target_keys=group_keys)
                     registered.add(group_index)
                 report = refresh_pending(capture, today=scope["today"], timezone=scope["timezone"],
-                    max_periods=8, period_names=set(), rolling_endpoints=group, prepared_manifest=workset)
+                    max_periods=8, period_names=set(), rolling_endpoints=group,
+                    prepared_manifest=workset, prepared_target_keys=group_keys)
                 if report.get("held_periods") or report.get("blocked"):
                     raise Stop("reference_bulk_publication_held")
                 generated = [value for key, value in capture.observed.items()
@@ -657,6 +664,7 @@ def publish_bulk(job, plan_sha, scope_ref, folder, *, resource_plan_ref, carried
                 batches.append(batch)
                 observed.update({value["key"]: (value, batch) for value in generated})
                 if not generated:
+                    _require(report.get("budget_deferred"), "reference_bulk_publication_no_progress")
                     break
             except BaseException as error:
                 batch_primary = error
@@ -704,7 +712,9 @@ def publish_bulk(job, plan_sha, scope_ref, folder, *, resource_plan_ref, carried
                  for target in targets if target["key"] in observed]
     terminal = {"schema": 1, "kind": "reference-bulk-stage-terminal",
         "scope_sha256": workset.scope_sha256, "phase": "publication", "resource_plan_ref": resource_plan_ref,
-        "status": "hold" if primary is not None or cleanup is not None else "complete",
+        "status": "hold" if primary is not None or cleanup is not None else
+            "complete" if len(state["published"]) + len(generated) == summary["total_products"]
+            else "bounded_pending",
         "counts": {key: value - before_counts[key] for key, value in account.execution_context["counts"].items()},
         "body_bytes": account.execution_context["body_bytes"] - before_bytes,
         "componentCleanupConfirmed": cleanup is None and sdk_closed, "ownedSDKClosed": sdk_closed,
