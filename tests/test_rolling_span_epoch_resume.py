@@ -18,6 +18,100 @@ from pipeline.r2_store import R2Store
 from pipeline.rolling_reference_span import StoredReferenceJob, apply_epoch
 
 
+def test_retained_partial_plan_applies_epoch_before_next_and_restart(tmp_path, monkeypatch, capsys):
+    import boto3
+
+    server, _ = seeded("2026-10-25", 1)
+    actual_client = boto3.client
+
+    def client(*args, **kwargs):
+        result = actual_client(*args, **kwargs)
+        result._endpoint.http_session.send = server.send
+        return result
+
+    monkeypatch.setattr(boto3, "client", client)
+    for key, value in {"CLOUDFLARE_ACCOUNT_ID": ACCOUNT, "R2_BUCKET": BUCKET,
+                      "R2_ACCESS_KEY_ID": "synthetic", "R2_SECRET_ACCESS_KEY": "synthetic"}.items():
+        monkeypatch.setenv(key, value)
+    job = Job.create(tmp_path / "job", "2026-10-25", "2026-10-25", ["hrv"], "legacy", "synthetic")
+    manifest, span_sha = span_manifest(job, tmp_path)
+    source_prefix = read(job.folder / "events.jsonl")
+    epoch = None
+
+    def cli(action, *extra):
+        command = ["--state", str(job.folder), "rolling-span-" + action, "--plan-sha", job.plan_sha]
+        if action != "register":
+            command += ["--span-sha", span_sha]
+        if epoch and action in {"next", "refresh"}:
+            command += ["--reference-round-sha", epoch]
+        native = main(command + list(extra))
+        output = capsys.readouterr()
+        assert native == 0, (native, output.err, output.out)
+        return json.loads(output.out)
+
+    cli("register", "--manifest", str(manifest), "--manifest-sha", span_sha)
+    cli("next", "--confirm-r2-read")
+    first = cli("refresh", "--confirm-r2-write")
+    delivered = {item["key"]: server.objects[item["key"]] for item in first["generated_targets"]}
+    assert len(delivered) == 2
+    ack = external_product_ack(tmp_path / "first-ack", first, server)
+    prior = cli("ack", "--proof", str(ack), "--proof-sha", digest(read(ack)))
+    assert prior["status"] == "planned" and prior["plan_sha256"] is not None
+    parent_dir = tmp_path / "external-parent"
+    parent_dir.mkdir()
+    meter = parent_dir / "meter.jsonl"
+    tip = None
+    verifier = R2Store()
+    try:
+        frames = []
+        for count in range(251):
+            kinds = ("initial",) if count == 0 else ("attempt", "known")
+            for kind in kinds:
+                if kind == "attempt":
+                    verifier.get_snapshot(next(iter(delivered)), max_bytes=262144)
+                body = encoded({"sequence": len(frames), "previous": tip, "kind": kind, "count": count})
+                frames.append(body)
+                tip = digest(body)
+        meter.write_bytes(b"".join(frames))
+    finally:
+        verifier.client.close()
+    link = parent_dir / "meter-link.json"
+    link.write_bytes(encoded({"kind": "ACTUAL_SPAN_METER_LINK_V1", "meter_prefix": proof_ref(meter),
+        "used": 250, "round_baseline": 0, "initial": 0, "current_round_id": None,
+        "next_readback_reserve": 12}))
+    native, permission = parent_dir / "native.json", parent_dir / "permission.json"
+    native.write_bytes(encoded({"actualNative": 0, "allNativeDescendantsTerminal": True}))
+    permission.write_bytes(encoded({"kind": "ACTUAL_CURRENT_PRODUCT_PORT", "phase": "data", "outcome": "allowed"}))
+    parent = parent_dir / "parent.json"
+    parent.write_bytes(encoded({"schema": 1, "kind": "QUALIFIED_STORED_SPAN_EPOCH_PARENT_V1",
+        "span_sha256": span_sha, "chunk_index": prior["chunk_index"], "checkpoint_sha256": prior["checkpoint_sha256"],
+        "ack_ref": prior["last_ack_ref"], "terminal_receipt_ref": prior["producer_receipt"],
+        "native_terminal": proof_ref(native), "source_meter_link": proof_ref(link), "qualification_ref": proof_ref(permission)}))
+    admitted = cli("admit-epoch", "--proof", str(parent), "--proof-sha", digest(read(parent)), "--confirm-r2-write")
+    epoch = admitted["reference_round_sha256"]
+    calls_before_repair = len(server.calls)
+    next_status = cli("next", "--confirm-r2-read")
+    assert len(server.calls) == calls_before_repair
+    assert next_status["reference_round_sha256"] == epoch
+    assert next_status["execution_totals"]["round_baseline"] == admitted["proof"]["new_round_baseline"]
+    assert next_status["execution_totals"]["phases"] == 0
+    assert next_status["plan_sha256"] == prior["plan_sha256"]
+    assert next_status["acknowledged_targets"] == prior["acknowledged_targets"]
+    # No in-memory epoch remains in this simulated restarted CLI caller.
+    epoch = None
+    resumed = cli("register", "--manifest", str(manifest), "--manifest-sha", span_sha)
+    assert resumed["reference_round_sha256"] == admitted["reference_round_sha256"]
+    repeated = cli("next", "--confirm-r2-read")
+    assert repeated["checkpoint_sha256"] == resumed["checkpoint_sha256"]
+    puts_before = list(server.puts)
+    advanced = cli("refresh", "--confirm-r2-write")
+    assert advanced["reference_round_sha256"] == admitted["reference_round_sha256"]
+    assert {item["key"] for item in advanced["generated_targets"]}.isdisjoint(delivered)
+    assert {key: server.objects[key] for key in delivered} == delivered
+    assert not [key for key in server.puts[len(puts_before):] if key in delivered]
+    assert read(job.folder / "events.jsonl") == source_prefix
+
+
 @pytest.mark.parametrize("source_interleave", [False, True])
 def test_actual_cli_pub_then_qualified_epoch_two_read_only_chunks_and_restart(
         tmp_path, monkeypatch, capsys, source_interleave):

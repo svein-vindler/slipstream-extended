@@ -108,6 +108,31 @@ after a long release/catalog preflight. The immutable delivered-floor evidence
 and scope are still fully checked and never renewed. A direct registration
 without that bound admission retains the original fresh-floor requirement.
 
+When a new qualified epoch is admitted while a chunk plan is retained, the next
+phase applies that epoch through the existing ledger validation and appends its
+checked cumulative totals before returning the plan. A later restart after this
+checkpoint retains the active epoch without rewriting prior receipts or ACKs.
+An older stopped caller with an already advanced meter requires qualified
+checkpoint recovery before ordinary restart; release-identity adoption is a
+separate gate. This path provides no automatic retry or ledger migration.
+
+A qualified private ordinary release handoff can repair that exact already
+admitted epoch before register or counter construction and append one explicit
+release-identity segment in the same permanent span meter. Historical frames,
+counts, baselines and ACK prefixes remain immutable. Portable replay validates
+the closed handoff and checkpoint/admission graph before accepting the identity
+change. It does not infer a new allowance from a release or accept an arbitrary
+identity switch. An enclosing control failure remains a failure even when its
+data children are physically closed and all generated products were verified.
+
+Settled reference usage after the last genuine ordinary postcheck can be
+qualified separately for daily source release admission. The historical
+postcheck retains its original count and bytes; current imported usage is proved
+by its append-only suffix. Source work need not wait for every reference
+endpoint to finish. Source and span identities, current watermarks and
+historical qualifications remain distinct, and unresolved sessions still block
+admission. Product and reader payload schemas are unchanged.
+
 Each phase retains its exact producer/read receipts and normalized product
 targets. A published checkpoint remains unverified until actual independent SDK
 bytes/revision and the normal connected custom-span reader both match every
