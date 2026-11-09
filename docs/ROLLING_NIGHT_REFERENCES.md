@@ -1,5 +1,8 @@
 # Bounded stored-only rolling references
 
+For the explicit durable collect-all/build-all flow and daily affected-target
+mode, see [Local bulk night references](LOCAL_REFERENCE_BULK.md).
+
 The existing `pipeline.history_backfill` job can plan historical 28/30/90-date
 HR/HRV products and publish them through its existing queue and owner protocol.
 The explicit planning commands below support selected stored-only work. Routine

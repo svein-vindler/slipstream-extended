@@ -55,13 +55,37 @@ def _inventory_projection(body):
 
 
 class StorageGuard:
-    def __init__(self, store, keys, folder, execution_context=None):
+    def __init__(self, store, keys, folder, execution_context=None, *, bulk_account=None,
+                 deadline_account=None):
+        self.bulk_account = bulk_account
+        self.deadline_account = bulk_account if bulk_account is not None else deadline_account
+        if deadline_account is not None:
+            from .reference_bulk_budget import BulkAccount
+
+            if (type(deadline_account) is not BulkAccount or deadline_account.plan is None
+                    or bulk_account is not None and deadline_account is not bulk_account):
+                raise Stop("bulk_resource_guard_binding")
+            deadline_account.check_deadline()
+        if bulk_account is not None:
+            from .reference_bulk_budget import BulkAccount
+
+            if (type(bulk_account) is not BulkAccount or bulk_account.plan is None
+                    or execution_context is not bulk_account.execution_context):
+                raise Stop("bulk_resource_guard_binding")
+            bulk_account.check_deadline()
+            bulk_account.start_stage()
+        caps = bulk_account.plan["limits"] if bulk_account is not None else None
+        self.total_get_limit = caps["total_get"] if caps else 6256
+        self.class_a_limit = caps["class_a"] if caps else 1000
+        self.write_byte_limit = caps["write_bytes"] if caps else 10485760
+        independent_limit = caps["independent_get"] if caps else 256
+        publication_limit = caps["publication_get"] if caps else 6000
         self.store, self.keys, self.folder = store, keys, folder
         self.execution_context = execution_context if execution_context is not None else {}
         self.execution_context.setdefault("counts", {"get": 0, "list": 0, "put": 0})
         self.execution_context.setdefault("body_bytes", 0)
         limit = self.execution_context.setdefault("publication_get_limit", 6000)
-        if type(limit) is not int or not 0 <= limit <= 6000:
+        if type(limit) is not int or not 0 <= limit <= publication_limit:
             raise Stop("storage_execution_budget")
         self.baseline = self.execution_context.setdefault("round_baseline", {
             "counts": {"get": 0, "list": 0, "put": 0}, "body_bytes": 0,
@@ -70,7 +94,7 @@ class StorageGuard:
         self.shared_cost = (attribution["source_pool"] if attribution is not None else {
             "counts": dict.fromkeys(("get", "list", "put"), 0), "body_bytes": 0, "publication_phases": 0})
         independent = self.execution_context.setdefault("independent_gets", 0)
-        if (type(independent) is not int or not 0 <= independent <= 256
+        if (type(independent) is not int or not 0 <= independent <= independent_limit
                 or any(type(self.execution_context["counts"].get(k)) is not int
                        or type(self.baseline.get("counts", {}).get(k)) is not int
                        or not 0 <= self.baseline["counts"][k] <= self.execution_context["counts"][k]
@@ -119,6 +143,8 @@ class StorageGuard:
             primary = False
             try:
                 for part in response.raw.stream(8192, decode_content=False):
+                    if self.deadline_account is not None:
+                        self.deadline_account.check_deadline()
                     body.extend(part)
                     self.raw_bytes += len(part)
                     if (
@@ -186,6 +212,8 @@ class StorageGuard:
             raise
 
     def before(self, request, **kwargs):
+        if self.deadline_account is not None:
+            self.deadline_account.check_deadline()
         if self.failed or time.monotonic() - self.started > 900:
             raise Stop("storage_already_stopped_or_deadline")
         request.stream_output = True
@@ -228,8 +256,8 @@ class StorageGuard:
         totals = self.execution_context["counts"]
         if (
             totals["get"] - self.baseline["counts"]["get"] + self.shared_cost["counts"]["get"] + (kind == "get") > self.execution_context["publication_get_limit"]
-            or totals["get"] - self.baseline["counts"]["get"] + self.shared_cost["counts"]["get"] + (kind == "get") + self.execution_context["independent_gets"] > 6256
-            or totals["list"] + totals["put"] - self.baseline["counts"]["list"] - self.baseline["counts"]["put"] + sum(self.shared_cost["counts"][item] for item in ("list", "put")) + (kind in {"list", "put"}) > 1000
+            or totals["get"] - self.baseline["counts"]["get"] + self.shared_cost["counts"]["get"] + (kind == "get") + self.execution_context["independent_gets"] > self.total_get_limit
+            or totals["list"] + totals["put"] - self.baseline["counts"]["list"] - self.baseline["counts"]["put"] + sum(self.shared_cost["counts"][item] for item in ("list", "put")) + (kind in {"list", "put"}) > self.class_a_limit
         ):
             self.failed = True
             raise Stop("storage_execution_budget")
@@ -262,13 +290,19 @@ class StorageGuard:
             if (
                 length < 0
                 or self.body_bytes + length > 2097152
-                or self.execution_context["body_bytes"] - self.baseline["body_bytes"] + self.shared_cost["body_bytes"] + length > 10485760
+                or self.execution_context["body_bytes"] - self.baseline["body_bytes"] + self.shared_cost["body_bytes"] + length > self.write_byte_limit
             ):
                 raise Stop("storage_bytes")
+            if self.bulk_account is not None:
+                self.bulk_account.admit(kind, byte_count=length)
             self.body_bytes += length
             self.execution_context["body_bytes"] += length
+        if self.bulk_account is not None and kind != "put":
+            self.bulk_account.admit(kind)
         self.counts[kind] += 1
         totals[kind] += 1
+        if self.bulk_account is not None:
+            self.bulk_account.start_wire(kind, length if kind == "put" else 0)
         write(
             self.folder / f"wire-{sum(self.counts.values()):04d}.json",
             {"kind": kind, "key_sha256": digest(object_key.encode()), "counts": self.counts},
@@ -285,6 +319,8 @@ class StorageGuard:
             and status == 404
             and parsed.get("Error", {}).get("Code") in {"404", "NoSuchKey", "NotFound"}
         ):
+            if self.bulk_account is not None:
+                self.bulk_account.finish_wire()
             return
         if status not in {200, 201, 204} or (operation == "PutObject" and not parsed.get("ETag")):
             self.failed = True
@@ -369,6 +405,8 @@ class StorageGuard:
             parsed["Contents"] = contents
         if operation == "PutObject":
             self.acks.append(parsed["ETag"].strip('"'))
+        if self.bulk_account is not None:
+            self.bulk_account.finish_wire()
 
     def close(self):
         self.store.client._endpoint.http_session.send = self.original_send
@@ -376,6 +414,8 @@ class StorageGuard:
             lambda: self.store.client.meta.events.unregister("before-send.s3", self.before),
             lambda: self.store.client.meta.events.unregister("after-call.s3", self.after),
         )
+        if self.bulk_account is not None and self.failed:
+            self.bulk_account.mark_failed("unknown_storage_transport")
 
 
 class _ReferenceStore:
@@ -738,7 +778,14 @@ def _completed_context(job, state, target_sha, execution_context, finalize_dates
                 raise Stop("publication_checkpoint_unverified")
             new_round = requested_round is not None and totals.get("round") != requested_round
             joining_round = new_round and not complete and totals.get("round") is None and limit == 6000
-            if new_round and ((not complete and not joining_round) or round_start["sequence"] <= latest_end_sequence):
+            typed_cohort_closed = False
+            if new_round and not complete and not joining_round:
+                from .reference_bulk import validate_closed_source_cohort
+
+                typed_cohort_closed = validate_closed_source_cohort(job, job.plan_sha, totals.get("round"),
+                    before_sequence=round_start["sequence"])
+            if new_round and ((not complete and not joining_round and not typed_cohort_closed)
+                              or round_start["sequence"] <= latest_end_sequence):
                 raise Stop("unfinished_publication_round_requires_continuation")
             if joining_round and not set(reference.get("finalize_dates", [])) <= set(finalize_dates or []):
                 raise Stop("unfinished_publication_cohort_changed")
@@ -1121,8 +1168,18 @@ def publication_store(store=None):
 def publish(
     job, plan_sha, *, confirm=False, store=None, target_dates=None, execution_context=None,
     finalize_dates=None, defer_references=False, continuation_sha256=None, source_free_proof=None,
-    reference_max_periods=2,
+    reference_max_periods=2, calendar_slice=None,
 ):
+    if calendar_slice is not None:
+        from .reference_bulk import CalendarSlice
+
+        if type(calendar_slice) is not CalendarSlice:
+            raise Stop("calendar_slice_unqualified")
+        calendar_slice.revalidate(job, plan_sha)
+        if (target_dates != [] or finalize_dates != calendar_slice.dates or defer_references
+                or continuation_sha256 is not None or source_free_proof is not None
+                or execution_context is None or execution_context.get("round") != calendar_slice.round):
+            raise Stop("calendar_slice_unqualified")
     if type(reference_max_periods) is not int or not 1 <= reference_max_periods <= 8:
         raise Stop("reference_batch_limit")
     if not confirm:
@@ -1203,6 +1260,7 @@ def publish(
             execution_context=execution_context, finalize_dates=finalize_dates,
             defer_references=defer_references, close_owned=close_owned,
             source_free_proof=source_free_proof, reference_max_periods=reference_max_periods,
+            calendar_slice=calendar_slice,
         )
     except BaseException:
         primary = True
@@ -1214,7 +1272,7 @@ def publish(
 
 def _publish_store(
     job, plan_sha, state, ready, *, store, execution_context,
-    finalize_dates, defer_references, close_owned, source_free_proof=None, reference_max_periods=2,
+    finalize_dates, defer_references, close_owned, source_free_proof=None, reference_max_periods=2, calendar_slice=None,
 ):
     selected_count = len(ready)
     target_sha = digest((store.client.meta.endpoint_url + "\0" + store.bucket).encode())
@@ -1282,7 +1340,8 @@ def _publish_store(
             key("hrv", month + f"-{day:02d}")
             for day in range(1, calendar.monthrange(int(month[:4]), int(month[5:]))[1] + 1)
         )
-    guard = StorageGuard(store, keys, folder, execution_context)
+    guard = StorageGuard(store, keys, folder, execution_context,
+                         deadline_account=calendar_slice.deadline_account if calendar_slice else None)
     guard.prefixes = {f"health/hrv/{m[:4]}/{m[5:]}/" for m in months}
     staged, done, changed_months = [], [], set()
     snapshot_files = {}
@@ -1513,6 +1572,8 @@ def _publish_store(
                     ))
         if continuation is not None:
             period_names = set(continuation["period_names"])
+        if calendar_slice is not None:
+            period_names = set(calendar_slice.period_names)
         raw_destinations = [
             {
                 "date": r["date"], "stream": r["stream"], "key": k, "revision": rev, "sha256": sha,
@@ -1533,11 +1594,11 @@ def _publish_store(
         })
         baseline_report = refresh_pending(
             reference_store, snapshot_cache=snapshot_cache, max_periods=reference_max_periods,
-            today=rolling_plan["today"] if rolling_plan else None,
-            timezone=rolling_plan["timezone"] if rolling_plan else None,
+            today=rolling_plan["today"] if rolling_plan else calendar_slice.today if calendar_slice else None,
+            timezone=rolling_plan["timezone"] if rolling_plan else calendar_slice.timezone if calendar_slice else None,
             period_names=set() if defer_references or rolling_plan is not None else period_names,
             rolling_endpoints=rolling_plan["endpoints"] if rolling_plan is not None else None,
-            rolling_sources=[] if defer_references else (
+            rolling_sources=[] if defer_references or calendar_slice is not None else (
                 [("signals" if row["stream"] == "hr" else "hrv", row["date"])
                  for row in state["rows"] if row["date"] in finalize_dates]
                 if finalize_dates is not None else None
@@ -1552,6 +1613,8 @@ def _publish_store(
             )
         if defer_references:
             baseline_report["reference_work_deferred"] = True
+        if calendar_slice is not None:
+            baseline_report.update(calendar_only=True, calendar_period_names=list(calendar_slice.period_names))
         if rolling_plan is not None:
             from . import rolling_night_references as rolling
 

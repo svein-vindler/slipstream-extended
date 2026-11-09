@@ -332,7 +332,8 @@ def _daily(job, args, *, clock=None, reference_max_periods=2, publication_owner=
 
     # A previous report cannot prove today's queue/period closure. This ordinary
     # R2-only phase needs no Garmin credential and respects a source-only pause.
-    if not raw_deferred and phases < phase_limit and reference_capacity_available():
+    if (not getattr(args, "defer_reference_build_to_bulk", False)
+            and not raw_deferred and phases < phase_limit and reference_capacity_available()):
         # Raw chunks deliberately leave assembly for a fresh bounded phase after
         # every selected canonical curve/index has its ACK and exact readback.
         # Even an unknown pending count from a capacity checkpoint cannot consume
@@ -568,6 +569,8 @@ def main(argv=None):
         )
         if command == "daily":
             run.add_argument("--confirm-r2-write", action="store_true")
+            run.add_argument("--defer-reference-build-to-bulk", action="store_true",
+                             help="Leave reference assembly pending for the explicit sealed bulk lifecycle.")
             run.add_argument("--reference-max-periods", type=int, choices=range(1, 9), default=2,
                              help="Explicit local row ceiling; original phase budgets still apply.")
             run.add_argument("--resume", action="store_true")
@@ -617,6 +620,24 @@ def main(argv=None):
         if action in {"ack", "admit-epoch"}:
             span_command.add_argument("--proof", type=Path, required=True)
             span_command.add_argument("--proof-sha", required=True)
+    bulk = commands.add_parser(
+        "rolling-bulk", help="Explicit whole-scope stored-only reference workset."
+    )
+    bulk.add_argument("--phase", choices=["prepare", "inventory", "collect", "build", "publication", "calendar", "ack"],
+                      required=True)
+    bulk.add_argument("--plan-sha", required=True)
+    bulk.add_argument("--scope", type=Path, required=True)
+    bulk.add_argument("--scope-sha", required=True)
+    bulk.add_argument("--workset", type=Path, required=True)
+    bulk.add_argument("--resource-plan", type=Path)
+    bulk.add_argument("--resource-plan-sha")
+    bulk.add_argument("--carried", type=Path)
+    bulk.add_argument("--carried-sha")
+    bulk.add_argument("--proof", type=Path)
+    bulk.add_argument("--proof-sha")
+    bulk.add_argument("--max-items", type=int, default=400)
+    bulk.add_argument("--max-targets", type=int, default=2436)
+    bulk.add_argument("--max-batches", type=int, default=2436)
     source_free = commands.add_parser(
         "publish-source-free", help="Finish one proof-bound stopped daily round; zero Garmin calls."
     )
@@ -749,6 +770,10 @@ def main(argv=None):
                 print(json.dumps(result))
                 if result.get("status") in {"epoch_required", "blocked_unknown"}:
                     return 2
+            elif args.command == "rolling-bulk":
+                from .reference_bulk import run_command
+
+                print(json.dumps(run_command(job, args)))
             elif args.command == "rolling-plan":
                 from .rolling_reference_cli import create_plan
 
@@ -806,6 +831,12 @@ def main(argv=None):
                 print(output.getvalue(), end="")
         return 0
     except (DurabilityError, OSError) as error:
+        if args.command == "rolling-bulk":
+            from .reference_bulk import failure_result
+
+            print(json.dumps(failure_result(locals().get("job"), args, error)))
+            print("Stored reference bulk persistence HOLD.", file=__import__("sys").stderr)
+            return 3
         if args.command.startswith("rolling-span-"):
             print("Stored reference span persistence HOLD.", file=__import__("sys").stderr)
             return 3
@@ -815,6 +846,12 @@ def main(argv=None):
         print("Local history persistence HOLD.", file=__import__("sys").stderr)
         return 3
     except BaseException as error:
+        if args.command == "rolling-bulk":
+            from .reference_bulk import failure_result
+
+            print(json.dumps(failure_result(locals().get("job"), args, error)))
+            print("Stored reference bulk HOLD. No automatic retry.", file=__import__("sys").stderr)
+            return 2
         if args.command.startswith("rolling-span-"):
             print("Stored reference span HOLD. No automatic retry.", file=__import__("sys").stderr)
             return 2
