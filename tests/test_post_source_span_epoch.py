@@ -4,12 +4,13 @@ import json
 import sys
 
 from history_storage_fixture import ACCOUNT, BUCKET
+from test_rolling_reference_sources import seeded
+from test_rolling_reference_span import external_product_ack, proof_ref, span_manifest
+
 from pipeline.history_backfill import main
 from pipeline.history_publish import publish
 from pipeline.history_state import Job, Stop, digest, encoded, read
 from pipeline.r2_store import R2Store
-from test_rolling_reference_sources import seeded
-from test_rolling_reference_span import external_product_ack, proof_ref, span_manifest
 
 
 def test_cli_admits_next_epoch_after_repaired_checkpoint_and_source_append(
