@@ -51,6 +51,7 @@ QUEUE_KEY = "health/night-products/v1/refresh-queue.json"
 MAX_PENDING = 128
 MAX_QUEUE_BYTES = 262144
 MAX_PERIODS = 2
+MAX_LOCAL_PERIODS = 8
 
 
 class BaselineRefreshStop(R2BudgetError):
@@ -286,20 +287,26 @@ def _inventory_for_sdk(raw, encoding, context):
 class _WireBudget:
     """Scoped hooks; counters span only this component on the shared client."""
 
-    def __init__(self, client):
+    def __init__(self, client, *, budget_owner=None):
         require(
             not getattr(client, "_night_baseline_observer_active", False),
             "Nested baseline observer",
         )
         self.client = client
-        self.state = getattr(client, "_night_baseline_budget_state", None)
+        # A fresh serial stage gets fresh component limits. The client retains
+        # the previous failure latch so new_stage cannot clear an unknown send.
+        previous = getattr(client, "_night_baseline_budget_state", None)
+        require(previous is None or not previous["failed"], "Prior component transport failure")
+        owner = client if budget_owner is None else budget_owner
+        self.state = getattr(owner, "_night_baseline_budget_state", None)
         if self.state is None:
             self.state = {
                 "counts": {"get": 0, "list": 0, "put": 0},
                 "failed": False,
                 "read_bytes": 0,
             }
-            client._night_baseline_budget_state = self.state
+            owner._night_baseline_budget_state = self.state
+        client._night_baseline_budget_state = self.state
         self.deadline = time.monotonic() + 900
         self.bodies = []
         self.binding = None
@@ -500,7 +507,7 @@ class _IO:
         self.store, self.bytes, self.closed = store, 0, False
         client = getattr(store, "client", None)
         self.observer = (
-            _WireBudget(client)
+            _WireBudget(client, budget_owner=store)
             if client is not None and getattr(client, "meta", None) is not None
             else None
         )
@@ -1222,8 +1229,8 @@ def refresh_pending(
     A period filter limits work; pending/open counts still describe the full queue.
     """
     require(
-        type(max_periods) is int and 1 <= max_periods <= MAX_PERIODS,
-        "Choose one or two pending periods",
+        type(max_periods) is int and 1 <= max_periods <= MAX_LOCAL_PERIODS,
+        "Choose one to eight pending periods",
     )
     require(
         type(reserve_writes) is int and 0 <= reserve_writes <= 250,

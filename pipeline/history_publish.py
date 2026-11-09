@@ -7,6 +7,7 @@ import json
 import re
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -1053,10 +1054,77 @@ def source_free_binding(job, plan_sha, proof_path, proof_sha, *, owner=None):
     return proof, active
 
 
+def _open_publication_store():
+    import os
+
+    import boto3
+    from botocore.config import Config
+
+    from .r2_store import R2Store
+
+    account = os.environ["CLOUDFLARE_ACCOUNT_ID"]
+    if not re.fullmatch(r"[0-9a-f]{32}", account):
+        raise Stop("storage_account")
+    client = boto3.client(
+        "s3",
+        endpoint_url="https://" + account + ".r2.cloudflarestorage.com",
+        aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+        region_name="auto",
+        config=Config(
+            request_checksum_calculation="when_required",
+            connect_timeout=5,
+            read_timeout=20,
+            retries={"total_max_attempts": 1},
+            s3={"addressing_style": "path"},
+        ),
+    )
+    closed = False
+
+    def close_owned():
+        # Close before terminal proof; never retry a failed close.
+        nonlocal closed
+        if not closed:
+            closed = True
+            client.close()
+
+    try:
+        store = R2Store(client=client)
+    except BaseException:
+        _cleanup(close_owned, primary=True)
+        raise
+    return store, close_owned
+
+
+@contextmanager
+def publication_store(store=None):
+    """Own one serial local command client, preserving its primary failure.
+
+    Each new command opens a fresh root inventory. Child stages share only the
+    existing bucket budget; source/context observations remain phase-local.
+    Passing a store explicitly transfers client cleanup to this context.
+    """
+    if store is None:
+        store, close = _open_publication_store()
+    else:
+        close = store.client.close
+    primary = False
+    try:
+        yield store
+    except BaseException:
+        primary = True
+        raise
+    finally:
+        _cleanup(close, primary=primary)
+
+
 def publish(
     job, plan_sha, *, confirm=False, store=None, target_dates=None, execution_context=None,
     finalize_dates=None, defer_references=False, continuation_sha256=None, source_free_proof=None,
+    reference_max_periods=2,
 ):
+    if type(reference_max_periods) is not int or not 1 <= reference_max_periods <= 8:
+        raise Stop("reference_batch_limit")
     if not confirm:
         raise Stop("explicit_storage_phase_required")
     if execution_context and execution_context.get("reference_successor_sha256") is not None and (
@@ -1129,45 +1197,12 @@ def publish(
     primary = False
     try:
         if store is None:
-            import os
-
-            import boto3
-            from botocore.config import Config
-
-            from .r2_store import R2Store
-
-            account = os.environ["CLOUDFLARE_ACCOUNT_ID"]
-            if not re.fullmatch(r"[0-9a-f]{32}", account):
-                raise Stop("storage_account")
-            client = boto3.client(
-                "s3",
-                endpoint_url="https://" + account + ".r2.cloudflarestorage.com",
-                aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
-                aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
-                region_name="auto",
-                config=Config(
-                    request_checksum_calculation="when_required",
-                    connect_timeout=5,
-                    read_timeout=20,
-                    retries={"total_max_attempts": 1},
-                    s3={"addressing_style": "path"},
-                ),
-            )
-            closed = False
-
-            def close_owned():
-                # Close before terminal proof; never retry a failed close.
-                nonlocal closed
-                if not closed:
-                    closed = True
-                    client.close()
-
-            store = R2Store(client=client)
+            store, close_owned = _open_publication_store()
         return _publish_store(
             job, plan_sha, state, ready, store=store,
             execution_context=execution_context, finalize_dates=finalize_dates,
             defer_references=defer_references, close_owned=close_owned,
-            source_free_proof=source_free_proof,
+            source_free_proof=source_free_proof, reference_max_periods=reference_max_periods,
         )
     except BaseException:
         primary = True
@@ -1179,7 +1214,7 @@ def publish(
 
 def _publish_store(
     job, plan_sha, state, ready, *, store, execution_context,
-    finalize_dates, defer_references, close_owned, source_free_proof=None,
+    finalize_dates, defer_references, close_owned, source_free_proof=None, reference_max_periods=2,
 ):
     selected_count = len(ready)
     target_sha = digest((store.client.meta.endpoint_url + "\0" + store.bucket).encode())
@@ -1497,7 +1532,7 @@ def _publish_store(
             "body_bytes": guard.body_bytes,
         })
         baseline_report = refresh_pending(
-            reference_store, snapshot_cache=snapshot_cache,
+            reference_store, snapshot_cache=snapshot_cache, max_periods=reference_max_periods,
             today=rolling_plan["today"] if rolling_plan else None,
             timezone=rolling_plan["timezone"] if rolling_plan else None,
             period_names=set() if defer_references or rolling_plan is not None else period_names,

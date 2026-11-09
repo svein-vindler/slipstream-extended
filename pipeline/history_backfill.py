@@ -8,13 +8,35 @@ import io
 import json
 import logging
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 
 from .history_state import DurabilityError, Job, Stop, write
 from .output_privacy import SafeArgumentParser
 
 
+def _reference_batch_selection(args):
+    selected = getattr(args, "reference_max_periods", 2)
+    if type(selected) is not int or not 1 <= selected <= 8:
+        raise Stop("reference_batch_limit")
+    return selected
+
+
 def daily(job, args, *, clock=None):
+    """Run the explicit local batch choice without changing other callers."""
+    selected = _reference_batch_selection(args)
+    if selected == 2:
+        return _daily(job, args, clock=clock)
+    with ExitStack() as publication_owner:
+        result = _daily(job, args, clock=clock, reference_max_periods=selected,
+                        publication_owner=publication_owner)
+    # Command-owned cleanup must succeed before this durable terminal event.
+    if result["daily_status"] == "bounded_complete":
+        job.append({"type": "daily_round_finished", "round": result["daily_round"]})
+    return result
+
+
+def _daily(job, args, *, clock=None, reference_max_periods=2, publication_owner=None):
     """A bounded serial source/publication run, including closed references."""
     if job.plan.get("quota_experiment") is not None:
         raise Stop("experiment_requires_single_date_collect")
@@ -148,12 +170,21 @@ def daily(job, args, *, clock=None):
     wait_seconds = 0.0
     next_source = None
 
+    publication_root = None
+
     def publish_phase(target_dates=None, *, defer_references=False):
-        nonlocal phases
+        nonlocal phases, publication_root
+        kwargs = {}
+        if publication_owner is not None:
+            from .history_publish import publication_store
+
+            if publication_root is None:
+                publication_root = publication_owner.enter_context(publication_store())
+            kwargs["store"] = publication_root.new_stage()
         result = publish(
             job, args.plan_sha, confirm=True, target_dates=target_dates,
             execution_context=execution_context, finalize_dates=cohort_dates,
-            defer_references=defer_references,
+            defer_references=defer_references, reference_max_periods=reference_max_periods, **kwargs,
         )
         phases = max(phases + 1, result["baseline_refresh"].get("execution_totals", {}).get("phases", 0))
         reports.append(result["baseline_refresh"])
@@ -336,7 +367,7 @@ def daily(job, args, *, clock=None):
     references_complete = (
         reference.get("cohort_complete", global_complete) if cohort_dates else global_complete
     )
-    if source_stop is None and not raw_deferred and references_complete:
+    if publication_owner is None and source_stop is None and not raw_deferred and references_complete:
         job.append({"type": "daily_round_finished", "round": active_round["round"]})
     return {
         **result,
@@ -348,6 +379,15 @@ def daily(job, args, *, clock=None):
 
 
 def publish_source_free(job, args):
+    selected = _reference_batch_selection(args)
+    if selected == 2:
+        return _publish_source_free(job, args)
+    with ExitStack() as publication_owner:
+        return _publish_source_free(job, args, reference_max_periods=selected,
+                                    publication_owner=publication_owner)
+
+
+def _publish_source_free(job, args, *, reference_max_periods=2, publication_owner=None):
     """Finish only saved positive work from one physically closed source stage."""
     from .history_publish import publish, source_free_binding
 
@@ -366,12 +406,22 @@ def publish_source_free(job, args):
     reports = [event["report"] for event in events if event["type"] == "reference_refresh"]
     phases = len(reports)
 
+    publication_root = None
+
     def phase(raw):
-        nonlocal phases
+        nonlocal phases, publication_root
+        kwargs = {}
+        if publication_owner is not None:
+            from .history_publish import publication_store
+
+            if publication_root is None:
+                publication_root = publication_owner.enter_context(publication_store())
+            kwargs["store"] = publication_root.new_stage()
         result = publish(
             job, args.plan_sha, confirm=True, target_dates=active["dates"] if raw else [],
             finalize_dates=active["finalize_dates"], execution_context=context,
             defer_references=raw, source_free_proof=admission,
+            reference_max_periods=reference_max_periods, **kwargs,
         )
         phases += 1
         reports.append(result["baseline_refresh"])
@@ -518,6 +568,8 @@ def main(argv=None):
         )
         if command == "daily":
             run.add_argument("--confirm-r2-write", action="store_true")
+            run.add_argument("--reference-max-periods", type=int, choices=range(1, 9), default=2,
+                             help="Explicit local row ceiling; original phase budgets still apply.")
             run.add_argument("--resume", action="store_true")
             run.add_argument("--max-wait-seconds", type=int, default=3600,
                              help="Wait only for validated rolling-source expiry; 0..21600 seconds.")
@@ -540,6 +592,8 @@ def main(argv=None):
     refresh.add_argument("--plan-sha", required=True)
     refresh.add_argument("--reference-plan-sha", required=True)
     refresh.add_argument("--confirm-r2-write", action="store_true")
+    refresh.add_argument("--reference-max-periods", type=int, choices=range(1, 9), default=2,
+                         help="Opt-in local row ceiling; original phase budgets still apply.")
     round_choice = refresh.add_mutually_exclusive_group()
     round_choice.add_argument("--reference-round-sha")
     round_choice.add_argument("--admit-reference-round", action="store_true")
@@ -568,6 +622,7 @@ def main(argv=None):
     )
     source_free.add_argument("--plan-sha", required=True)
     source_free.add_argument("--confirm-r2-write", action="store_true")
+    source_free.add_argument("--reference-max-periods", type=int, choices=range(1, 9), default=2)
     source_free.add_argument("--source-proof", type=Path, required=True)
     source_free.add_argument("--source-proof-sha", required=True)
     continuation = commands.add_parser(
@@ -721,6 +776,7 @@ def main(argv=None):
                 result = refresh_plan(
                     job, args.plan_sha, args.reference_plan_sha,
                     confirm=args.confirm_r2_write, reference_round_sha=reference_round,
+                    reference_max_periods=args.reference_max_periods,
                 )
                 print(json.dumps({
                     "status": result["status"], "reference_plan_sha256": args.reference_plan_sha,

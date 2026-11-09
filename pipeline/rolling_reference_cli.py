@@ -576,7 +576,7 @@ def apply_reference_round(job, plan_sha, reference_plan_sha, reference_round_sha
 
 
 def refresh_plan(job, plan_sha, reference_plan_sha, *, store=None, confirm=False, max_phases=1,
-                 reference_round_sha=None):
+                 reference_round_sha=None, reference_max_periods=2):
     """Delegate bounded reference-only progress to the same owner/CAS publisher."""
     if not confirm:
         raise Stop("explicit_storage_phase_required")
@@ -596,7 +596,8 @@ def refresh_plan(job, plan_sha, reference_plan_sha, *, store=None, confirm=False
                 "execution_totals": _totals(context)}
     for _ in range(min(max_phases, 14 - context["phases"])):
         result = publish(job, plan_sha, confirm=True, store=store, target_dates=[],
-                         execution_context=context, finalize_dates=None)
+                         execution_context=context, finalize_dates=None,
+                         reference_max_periods=reference_max_periods)
         report = result["baseline_refresh"]
         reports.append(report)
         if (report.get("rolling_plan_complete") is True
