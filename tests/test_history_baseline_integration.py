@@ -35,7 +35,7 @@ def test_canonical_hr_preparation_stays_offline_with_merged_importer():
 def memory_job(monkeypatch, targets):
     from datetime import datetime, timezone
 
-    from pipeline import night_baseline_refresh
+    from pipeline import night_baseline_refresh, reference_bulk
 
     class Calendar(datetime):
         @classmethod
@@ -92,6 +92,10 @@ def memory_job(monkeypatch, targets):
     monkeypatch.setattr(history_publish, "read", read)
     monkeypatch.setattr(history_publish, "write", write)
     monkeypatch.setattr(history_state, "read", read)
+    # Import before patching shared state, then scope both aliases explicitly.
+    # A first lazy consumer import inside the fixture must not retain fake I/O.
+    monkeypatch.setattr(reference_bulk, "read", read)
+    monkeypatch.setattr(reference_bulk, "write", write)
     job = MemoryJob.__new__(MemoryJob)
     job.folder = MemoryPath("job")
     job.plan = {"targets": targets}
@@ -151,6 +155,21 @@ def memory_job(monkeypatch, targets):
             }
         )
     return job, files
+
+
+def test_memory_fixture_does_not_leak_into_later_disk_artifact_reads(tmp_path):
+    from pytest import MonkeyPatch
+
+    with MonkeyPatch.context() as patch:
+        memory_job(patch, [])
+        # Import at the same point as the typed-cohort continuation path.
+        from pipeline import reference_bulk
+
+    body = b"synthetic-disk-artifact"
+    path = tmp_path / "scope.json"
+    path.write_bytes(body)
+    reference = {"path": str(path.resolve()), "bytes": len(body), "sha256": digest(body)}
+    assert reference_bulk._pin(reference) == body
 
 
 class BaselineServer(Server):
