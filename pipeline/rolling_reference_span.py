@@ -1118,6 +1118,8 @@ def admit_span_epoch(job, plan_sha, span_sha, qualified_parent_ref, *, confirm=F
     execution = StoredReferenceJob(job, current["manifest"]["storage_target_sha256"])
     admission_context = ({"rolling_plan": {"reference_plan_sha256": current["plan_sha256"]}}
                          if current["plan_sha256"] is not None else {})
+    if current["reference_round_sha256"] is not None:
+        admission_context["reference_round_sha256"] = current["reference_round_sha256"]
     target, context, _ = _context(execution, plan_sha, _descriptor(), admission_context)
     parent = _json(qualified_parent_ref)
     anchor, anchor_ref, remote, initial = _known_anchor(job, current)

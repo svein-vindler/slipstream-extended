@@ -501,6 +501,29 @@ with the existing 5 GiB / 100,000 object bucket ceiling (or lower configured lim
 Responses remain bounded (64 KiB error/PUT,512 KiB GET,1 MiB LIST), with 16 MiB
 raw / 32 MiB decoded totals, 1 MiB decoded objects and a 900 second job deadline.
 One R2Store shares its cached inventory throughout each publication phase.
+A serial local ordinary reference command can own one `publication_store()` and
+pass a fresh `new_stage()` to each publication. Those stages share the existing
+bucket inventory and conservative bucket charges while retaining separate
+component counters. The command closes its client once before reporting terminal
+success; a failed/unknown transport remains latched across stages. A new command
+or native child opens a new root store and inventories current storage again.
+
+The local `rolling-refresh`, `daily` and proof-bound `publish-source-free` commands
+accept `--reference-max-periods 1..8`;
+its default remains two queued rows. This is an explicit row ceiling, not an
+extra request or byte allowance. Fresh source/context pre/post fences, CAS,
+ACK/readback, per-phase and cumulative execution limits still apply, and capacity
+can defer a row before intent. Larger batches can write larger queue checkpoints;
+fewer phases do not imply lower bytes or live elapsed time. Scheduled callers and
+ordinary operator bindings without a selection retain the existing two-row default.
+For the ordinary operator, an explicit `referenceMaxPeriods: 8` release-binding
+field is captured before its immutable binding/command hashes. The selected value
+travels through daily argv and each pinned reference successor plan/argv to the
+publisher. Invalid or changed selections stop before admission/storage. This
+command choice can finish an existing published cohort without changing its
+historical source-round journal or refetching canonical data. Opt-in local daily
+and proof-bound source-free finishing own one serial client/inventory, opened
+only when the first publication is necessary and closed before terminal success.
 Each invocation/reference budget epoch keeps a fourteen-phase ceiling, including
 reference-only completion. All phases share monotonic physical execution counters across
 restart, with a round allowance of at most 1000 class A operations (LIST+PUT),
@@ -512,8 +535,8 @@ and known progress. Logical references may remain pending across those epochs;
 only their completion releases the source round for the next normal selection.
 Independent checks remain explicitly metered operator
 work, not an extra unbounded allowance or a claim about arbitrary clients.
-Every phase keeps the original limits and freshly
-inventories the bucket. Earlier live/controller consumption still belongs to the
+Every phase keeps the original limits; each new command freshly
+inventories the bucket. Serial child stages may share that command inventory. Earlier live/controller consumption still belongs to the
 operator's standing budget; starting this command does not reset that journal. The source's rolling 30/240 ceiling
 is shared across all chunks; a new publication phase never resets it.
 Valid S3 URL-encoded LIST keys and prefixes are compared with the SDK's

@@ -269,9 +269,313 @@ def _closed_session_postchecks(closure_ref):
         {"verifiedPostchecks": references}, prepared)
 
 
+def _failed_metadata_archive(proof, original, old, failed):
+    closure = _json(proof["failedMetadataClosure"])
+    _need(closure.get("kind") == "FAILED_METADATA_NO_SOURCE_CLOSURE_V1"
+          and closure.get("policyVersion") == 2
+          and type(closure.get("actualOuterNative")) is int and closure["actualOuterNative"] == 1
+          and all(closure.get(key) is False for key in
+                  ("adoptionCompleted", "registerAttempted", "newSourceSessionStarted", "failedOwnerRootLeaseHeld"))
+          and all(closure.get(key) is True for key in ("originalPartialHold", "allOwnerProcessesTerminal",
+                  "noDataNativeConstructed", "all14Restored", "AApplicationHoldPreserved"))
+          and type(closure.get("sourceCalls")) is int and closure["sourceCalls"] == 0
+          and closure.get("sourceMeterUsed") == original["expectedMeterState"]["count"]
+          and closure.get("failedBinding") == original["newBinding"]
+          and closure.get("spanReleaseTransition") == proof["originalTransition"]
+          and closure.get("sourceMeter") == original["sourceMeterPrefix"]
+          and closure.get("spanMeter") == original["spanMeterPrefix"])
+    archive = _json(closure["ownerArchive"])
+    request = _json(archive["request"])
+    before = _json(archive["stateBefore"])
+    row = before.get("currentLiveExecutor", {})
+    _need(archive.get("kind") == "ROOT_EXACT_FAILED_METADATA_OWNER_ARCHIVE_V1"
+          and type(archive.get("actualOuterNative")) is int and archive["actualOuterNative"] == 1
+          and archive.get("adoptionCompleted") is False
+          and archive.get("registerAttempted") is False and archive.get("originalPartialHold") is True
+          and archive.get("stateBefore") == closure["stateBefore"]
+          and _pin(archive["stateBefore"]) == _pin(request["controlBefore"])
+          and archive.get("originalExecutor") == row == _json(archive["originalExecutorRef"])
+          and row.get("owner") == "Root" and row.get("invocation") == failed["invocation"]
+          and row.get("bindingSHA256") == digest(encoded(failed)) and row.get("phase") == "cloud_pause"
+          and type(row.get("callerPID")) is int and row["callerPID"] > 0
+          and row.get("running") is True and row.get("terminalObserved") is False
+          and row.get("resolved") is not True
+          and before.get("sourceRunning") is False and before.get("R2Running") is False
+          and request.get("failedBinding") == original["newBinding"]
+          and request.get("transition") == proof["originalTransition"]
+          and request.get("ownerClosure") == closure["ownerClosure"]
+          and request.get("restore") == closure["independentRestore"]
+          and request.get("sourceMeter") == original["sourceMeterPrefix"]
+          and request.get("spanMeter") == original["spanMeterPrefix"])
+    for key in ("ownerClosure", "restore", "restoreLeaseClosed", "transition", "partialAdmission", "rootClaim"):
+        _need(_pin(archive["preserved"][key]) == _pin(request[key]))
+    physical = _json(request["ownerClosure"])
+    partial = _json(request["partialAdmission"])
+    _need(physical.get("kind") == "ROOT_ACTUAL_METADATA_ADOPTION_PRE_DATA_FAILURE_PHYSICALLY_TERMINAL"
+          and type(physical.get("actualOuterNative")) is int and physical["actualOuterNative"] == 1
+          and type(physical.get("rootPID")) is int and physical["rootPID"] == row["callerPID"]
+          and all(physical.get(key) is False for key in
+                  ("rootPresent", "sourceNativeConstructed", "dataIntentPresent"))
+          and physical.get("noDataPermissionRequested") is True
+          and physical.get("checkpointRepairAndPartialAdmissionHeld") is True
+          and all(type(physical.get(key)) is int and physical[key] == 0 for key in ("sourceCalls", "R2S3Calls"))
+          and physical.get("partialAdmission") == request["partialAdmission"]
+          and physical.get("sourceMeter") == original["sourceMeterPrefix"]
+          and physical.get("spanMeter") == original["spanMeterPrefix"]
+          and partial.get("rootClaim") == request["rootClaim"]
+          and partial.get("leasePID") == row.get("callerPID"))
+    claim = _json(request["rootClaim"])
+    _need(all(claim.get("currentLiveExecutor", {}).get(key) == row.get(key)
+              for key in ("owner", "callerPID", "invocation", "bindingSHA256", "phase"))
+          and claim.get("sourceRunning") is False and claim.get("R2Running") is False)
+    validate_span_release_frame(proof["originalTransition"], request["partialAdmission"],
+        _release_identity(old), _release_identity(failed), original["spanMeterPrefix"]["path"],
+        original["expectedMeterState"])
+    restored, lease = _json(request["restore"]), _json(request["restoreLeaseClosed"])
+    _need(restored.get("kind") == "ROOT_INDEPENDENT_EXACT14_RESTORE_AFTER_KNOWN_PRE_DATA_OWNER_EXIT"
+          and restored.get("all14StatesMatchOriginal") is True and restored.get("originalOwnerNative") == 1
+          and all(restored.get(key) is True for key in ("originalHoldPreserved", "noSourceOrR2Calls", "meterUnchanged"))
+          and restored.get("previousClosure") == request["ownerClosure"]
+          and restored.get("baseline") == request["baseline"]
+          and _workflow_states(_json(request["baseline"])) == _workflow_states(restored["states"])
+          and lease.get("held") is False and lease.get("noDataProcessesConstructed") is True
+          and lease.get("PID") == restored.get("PID")
+          and _json(closure["handoffOwnerLeaseClosed"]).get("held") is False)
+    return closure, archive, partial
+
+
+def _post_source_reader_pins(postcheck, binding):
+    from .history_state import read
+
+    _need(postcheck.get("readerObservations") and postcheck.get("readbacks"))
+    sdk_hashes = set()
+    for row in postcheck["readbacks"]:
+        body = _pin(row["body"])
+        sdk_hashes.add(digest(body))
+    for reference in postcheck["readerObservations"]:
+        observation = _semantic_load(_pin(reference))
+        path = Path(reference["path"])
+        stem = path.name.removesuffix(".observation.json")
+        intent = _semantic_load(read(path.with_name(stem + ".intent.json")))
+        receipt = _semantic_load(read(path.with_name(stem + ".execution-receipt.json")))
+        response = read(path.with_name(stem + ".response"))
+        _need(observation.get("status") == "matched" and observation.get("reason") is None
+              and intent.get("invocation") == binding["invocation"]
+              and intent.get("tool") == binding["normalReader"]["tool"]
+              and _semantic_same(intent.get("binding"), binding["normalReader"]["binding"])
+              and 1 <= len(intent["sdk_product_sha256"]) <= 2
+              and set(intent["sdk_product_sha256"]) <= sdk_hashes
+              and receipt.get("schema_version") == 2
+              and receipt.get("kind") == "ROOT_NIGHT_BASELINE_OUTER_OBSERVATION_V2"
+              and receipt.get("terminal_state") == "response"
+              and receipt.get("cleanup") == "terminal_shared_connector_retained"
+              and receipt.get("observation_source") == "root_connected_tool_invocation"
+              and receipt.get("transport_replay") == "unobserved"
+              and receipt.get("response_sha256") == digest(response) and receipt.get("response_bytes") == len(response)
+              and all(_semantic_same(receipt.get(key), intent[key]) for key in ("intent_id", "nonce", "episode",
+                  "invocation", "round_id", "plan_sha256", "binding_sha256", "binding", "arguments", "tool",
+                  "sdk_product_sha256")))
+        result = _reader_result(response, receipt)
+        _need(_semantic_same({key: result[key] for key in intent["expected"]}, intent["expected"])
+              and _semantic_same(result["resources"], observation["resources"])
+              and result["resources"]["r2_get_attempts"] <= intent["reserved_gets"] <= 2)
+
+
+def _known_partial_daily_closure(closure, daily, terminal, restored, outcome, lease, state):
+    """Join closed Root evidence; enclosing failure is never a success claim."""
+    completion = _json(closure["rootCompletion"])
+    _need(completion.get("kind") == "ROOT_SOURCE05_RAW_DELIVERED_REFERENCE_PENDING_EXACT14_RESTORED"
+          and all(type(completion.get(key)) is int and completion[key] == native for key, native in (
+              ("sourceRootOuterNative", 1), ("managedDataNative", 2), ("lastManagedReferenceNative", 2),
+              ("restoreOwnOuterNative", 0), ("controlFinalizerOwnNative", 0)))
+          and all(completion.get(key) is True for key in ("all14Restored", "allLiveProcessesTerminal",
+              "primaryHoldCauseUnobserved", "oldFullSpanHoldPreserved", "newGarminForbiddenThisRun"))
+          and all(completion.get(key) is False for key in ("sourceFailed", "wholeReferenceComplete",
+              "fullHistoryComplete", "dataOrRootRerunPerformed"))
+          and type(completion.get("referenceCohortRemaining")) is int
+          and completion["referenceCohortRemaining"] > 0
+          and completion.get("lastPostcheck") == closure["postcheck"]
+          and completion.get("restoreResult") == closure["restore"]
+          and completion.get("controlFinalizerLeaseClosed") == closure["leaseClosed"])
+    physical = _json(completion["physicalClosure"])
+    finalizer = _json(completion["controlFinalization"])
+    disposition = _json(finalizer["disposition"])
+    restore_lease = _json(completion["restoreLeaseClosed"])
+    raw = _json(completion["rawDelivery"])
+    _need(physical.get("kind") == "ROOT_ACTUAL_SOURCE05_POST_VERIFIED_REFERENCE_EXIT_PHYSICALLY_TERMINAL"
+          and physical.get("binding") == closure["binding"]
+          and physical.get("baseline") == closure["baseline"]
+          and physical.get("lastPostcheck") == closure["postcheck"]
+          and type(physical.get("actualOuterNative")) is int and physical["actualOuterNative"] == 1
+          and type(physical.get("historicalPrimarySourceNative")) is int
+          and physical["historicalPrimarySourceNative"] == 2
+          and physical.get("primaryExceptionType") == "Hold"
+          and all(physical.get(key) is True for key in ("allNativeTreesPhysicallyTerminal",
+              "rootProcessTerminalObservedThroughOwnTool", "lastPostcheckComponentCleanupConfirmed",
+              "primaryControlledReasonUnobserved", "raw60DestinationVerified"))
+          and all(physical.get(key) is False for key in ("rootPresent", "sourceFailed", "wholeReferenceComplete"))
+          and physical.get("remainingReferenceCohort") == completion["referenceCohortRemaining"]
+          and physical.get("rootPID") == state.get("currentLiveExecutor", {}).get("callerPID")
+          and type(outcome.get("normalCLIStatus")) is dict
+          and outcome["normalCLIStatus"].get("daily_status") == "baselines_pending"
+          and outcome.get("successClaimed") is False)
+    trees = physical.get("nativeTrees")
+    _need(type(trees) is list and 1 <= len(trees) <= 65
+          and len({encoded(row["proof"]) for row in trees}) == len(trees)
+          and closure["terminal"] in [row["proof"] for row in trees])
+    total = 0
+    for row in trees:
+        native = _json(row["proof"])
+        _need(native.get("bindingSHA256") == digest(encoded(daily))
+              and native.get("allNativeDescendantsTerminal") is True
+              and native.get("parentPhysicallyTerminal") is True
+              and type(native.get("activeNativeProcesses")) is int and native["activeNativeProcesses"] == 0
+              and type(native.get("actualNative")) is int and native["actualNative"] in (0, 2)
+              and native["actualNative"] == row.get("actualNative")
+              and type(native.get("parentPID")) is int and native["parentPID"] > 0
+              and native["parentPID"] == row.get("parentPID")
+              and type(native.get("totalNativeProcesses")) is int and native["totalNativeProcesses"] > 0
+              and native["totalNativeProcesses"] == row.get("totalNativeProcesses"))
+        total += native["totalNativeProcesses"]
+    _need(type(physical.get("totalNativeProcesses")) is int and physical["totalNativeProcesses"] == total
+          and terminal.get("actualNative") == 2
+          and restored.get("kind") == "ROOT_SOURCE05_INDEPENDENT_EXACT14_RESTORE"
+          and restored.get("closure") == completion["physicalClosure"]
+          and restored.get("baseline") == closure["baseline"]
+          and restored.get("originalOwnerOuterNative") == 1
+          and restored.get("originalNative2AndUnobservedHoldReasonPreserved") is True
+          and restored.get("wholeReferenceComplete") is False and restored.get("noSourceOrR2Calls") is True
+          and type(restored.get("PID")) is int and restored["PID"] > 0
+          and restore_lease.get("PID") == restored["PID"] and restore_lease.get("held") is False
+          and all(restore_lease.get(key) is True for key in ("leaseAcquired", "noDataProcessesConstructed",
+              "noLockRemovalOrTakeover")))
+    _need(disposition.get("kind") == "ROOT_KNOWN_MANAGED_DAILY_PENDING_AFTER_CONTROLLER_EXIT"
+          and disposition.get("closure") == completion["physicalClosure"]
+          and disposition.get("restore") == closure["restore"]
+          and disposition.get("restoreLeaseClosed") == completion["restoreLeaseClosed"]
+          and disposition.get("stateBefore") == finalizer.get("before")
+          and disposition.get("rootControllerOuterNative") == 1
+          and disposition.get("managedDataNative") == disposition.get("latestManagedReferenceNative") == 2
+          and disposition.get("referenceCohortRemaining") == completion["referenceCohortRemaining"]
+          and all(disposition.get(key) is True for key in ("raw60Verified", "originalFailureNotReclassified",
+              "originalHoldCauseUnobserved", "controlOnlyPhysicalDispositionResolved", "noRootOrDataRerun"))
+          and disposition.get("sourceFailed") is False and disposition.get("wholeReferenceComplete") is False
+          and finalizer.get("kind") == "ROOT_CONTROL_KNOWN_PARTIAL_FINALIZED"
+          and finalizer.get("noDataOrNetworkCalls") is True
+          and finalizer.get("oldController1AndManaged2Preserved") is True
+          and type(finalizer.get("PID")) is int and finalizer["PID"] > 0
+          and lease.get("PID") == finalizer["PID"] and lease.get("noDataCalls") is True)
+    # The finalizer's after ref names mutable CONTROL. Its historical content is
+    # not replayed: currentState has its own immutable pin and ordinary CAS gate.
+    before_owner = _json(finalizer["before"]).get("currentLiveExecutor", {})
+    _need(before_owner.get("owner") == "Root"
+          and before_owner.get("invocation") == daily["invocation"]
+          and before_owner.get("bindingSHA256") == digest(encoded(daily))
+          and type(before_owner.get("callerPID")) is int
+          and before_owner["callerPID"] == physical["rootPID"])
+    _need(raw.get("kind") == "ROOT_RAW60_DESTINATION_VERIFIED_REFERENCE_WORK_STILL_PENDING"
+          and raw.get("invocation") == daily["invocation"]
+          and raw.get("dataActualNative") == 2 and raw.get("dataStatus") == "baselines_pending"
+          and raw.get("sourceFailed") is False and raw.get("referencePackageComplete") is False
+          and all(raw.get(key) is True for key in ("all60RawDestinationVerified",
+              "all63DataNativeProcessesTerminal", "noMoreGarminFromThisRun"))
+          and raw.get("physicalDataTerminal") in [row["proof"] for row in trees])
+    raw_postcheck = _json(raw["postcheck"])
+    _need(raw_postcheck.get("bindingSHA256") == digest(encoded(daily))
+          and all(raw_postcheck.get(key) is True for key in ("rawVerified",
+              "publishedDestinationsVerified", "componentCleanupConfirmed")))
+    return raw
+
+
+def _post_source_span_release(proof):
+    from .history_state import Job
+    from .rolling_span_source_proof import observed_raw_delivery
+
+    extras = {"originalTransition", "failedMetadataClosure", "laterDailyClosure", "currentState",
+              "currentSourceMeterPrefix", "laterSourceLink"}
+    original = _json(proof["originalTransition"])
+    _need(original.get("kind") == "ROOT_CLOSED_SPAN_RELEASE_TRANSITION_V1"
+          and set(proof) == set(original) | extras
+          and all(proof[key] == value for key, value in original.items()
+                  if key not in {"kind", "schema", "newBinding", "stateSHA256"}))
+    original, old, failed = validate_span_release_transition(proof["originalTransition"])
+    new = _json(proof["newBinding"])
+    _released(new)
+    _need(_release_identity(old) != _release_identity(new)
+          and all(new[key] == old[key] == failed[key] for key in
+                  ("job", "plan", "accountSHA256", "targetSHA256", "spanManifest")))
+    failed_closure, archive, _ = _failed_metadata_archive(proof, original, old, failed)
+    closure = _json(proof["laterDailyClosure"])
+    partial = closure.get("kind") == "ROOT_KNOWN_PARTIAL_DAILY_FOR_POST_SOURCE_SPAN_V1"
+    fields = {"kind", "binding", "postcheck", "terminal", "restore", "baseline", "outcome",
+              "leaseClosed", "rootTerminal", "actualOuterNative", "dataNative"}
+    _need(set(closure) == fields | ({"rootCompletion"} if partial else set())
+          and (partial or closure.get("kind") == "ROOT_CLOSED_DAILY_FOR_POST_SOURCE_SPAN_V1")
+          and type(closure.get("actualOuterNative")) is int
+          and closure["actualOuterNative"] in ((1,) if partial else (0, 2))
+          and type(closure.get("dataNative")) is int and closure["dataNative"] in (0, 2)
+          and closure.get("rootTerminal") == proof["currentState"]
+          and proof["currentState"]["sha256"] == proof["stateSHA256"])
+    daily, postcheck, terminal, restored, outcome, lease, state = (
+        _json(closure[key]) for key in ("binding", "postcheck", "terminal", "restore", "outcome", "leaseClosed", "rootTerminal"))
+    _released(daily, operation="daily")
+    daily_sha = digest(encoded(daily))
+    _need(all(daily[key] == new[key] for key in ("job", "plan", "accountSHA256", "targetSHA256"))
+          and all(item.get("bindingSHA256") == daily_sha for item in (
+              (postcheck, terminal, outcome) if partial else (postcheck, terminal, restored, outcome, lease)))
+          and outcome.get("sourceFailed") is False and type(outcome.get("actualNative")) is int
+          and outcome["actualNative"] == closure["dataNative"]
+          and terminal.get("allNativeDescendantsTerminal") is True and terminal.get("parentPhysicallyTerminal") is True
+          and terminal.get("activeNativeProcesses") == 0
+          and type(terminal.get("actualNative")) is int and terminal["actualNative"] in (0, 2)
+          and restored.get("all14StatesMatchOriginal") is True
+          and _workflow_states(_json(closure["baseline"])) == _workflow_states(restored["states"])
+          and lease.get("held") is False and type(lease.get("PID")) is int and lease["PID"] > 0
+          and all(postcheck.get(key) is True for key in ("rawVerified", "publishedDestinationsVerified",
+                  "sdkAndNormalReaderVerified", "componentCleanupConfirmed")))
+    current = state.get("currentLiveExecutor", {})
+    _need(state.get("sourceRunning") is False and state.get("R2Running") is False
+          and current.get("owner") == "Root" and current.get("invocation") == daily["invocation"]
+          and current.get("bindingSHA256") == daily_sha and current.get("running") is False
+          and current.get("terminalObserved") is True and current.get("physicalTreeKnownStopped") is True
+          and type(current.get("actualNative")) is int and current["actualNative"] == terminal["actualNative"]
+          and type(current.get("callerPID")) is int and current["callerPID"] > 0
+          and any(row.get("ownerArchive") == failed_closure["ownerArchive"]
+                  and row.get("originalExecutor") == archive["originalExecutor"]
+                  and type(row.get("actualOuterNative")) is int and row["actualOuterNative"] == 1
+                  and row.get("originalPartialHold") is True
+                  for row in state.get("sourceFirstOwnerHandoffs", [])))
+    raw = _known_partial_daily_closure(closure, daily, terminal, restored, outcome, lease, state) if partial else None
+    replay = _Replay()
+    source_link, source_binding = replay.source_link(proof["laterSourceLink"])
+    _need(source_binding == daily and source_link["source_binding_ref"] == closure["binding"]
+          and source_link["source_postcheck_ref"] == closure["postcheck"]
+          and source_link["source_prefix"] == proof["currentSourceMeterPrefix"]
+          and Path(proof["currentSourceMeterPrefix"]["path"]).resolve()
+              == Path(original["sourceMeterPrefix"]["path"]).resolve())
+    historical = _pin(original["sourceMeterPrefix"], prefix=True)
+    current_body = _pin(proof["currentSourceMeterPrefix"], prefix=True)
+    _need(len(current_body) > len(historical) and current_body.startswith(historical))
+    current_source = replay.scan(proof["currentSourceMeterPrefix"], span=False)
+    _need(not current_source["sessions"] and current_source["count"] >= original["expectedMeterState"]["count"]
+          and current_source["initial"] == original["expectedMeterState"]["initial"]
+          and current_source["identity"] == _release_identity(daily))
+    delivery = observed_raw_delivery(Job(daily["job"]), closure["binding"], closure["postcheck"],
+                                     target_sha=daily["targetSHA256"])
+    _need(delivery["destinations"] and all(row["source_failure"] is False for row in delivery["stage_facts"]))
+    if partial:
+        _need(closure["dataNative"] == 2 and current.get("sourceFailed") is False
+              and any(row["postcheck"] == raw["postcheck"] for row in delivery["destinations"]))
+    _post_source_reader_pins(postcheck, daily)
+    return proof, old, new
+
+
 def validate_span_release_transition(reference):
     """Replay the immutable closed-span graph; never grant or mutate anything."""
     proof = _json(reference)
+    if (type(proof) is dict and proof.get("kind") == "ROOT_POST_SOURCE_SPAN_RELEASE_TRANSITION_V1"
+            and proof.get("schema") == 1):
+        return _post_source_span_release(proof)
     _need(type(proof) is dict and set(proof) == {
         "kind", "schema", "oldBinding", "newBinding", "oldClosure", "oldExecutor", "stateSHA256",
         "originalBaseline", "spanMeterPrefix", "sourceMeterPrefix", "sourceSessionClosed",
