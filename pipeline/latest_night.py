@@ -108,7 +108,8 @@ def refresh_references(store, wake_dates):
         if name in tail:
             report[name] = tail[name]
     report["closed_remaining"] = tail.get("closed_pending")
-    report["held_periods"] = max(report.get("held_periods", 0), tail.get("held_periods", 0))
+    held = (report.get("held_periods", 0), tail.get("held_periods", 0))
+    report["held_periods"] = None if None in held else max(held)
     report["blocked"] = sorted(set(report.get("blocked", []) + tail.get("blocked", [])))
     if tail.get("status") in {"held", "calendar_timezone_required"}:
         report["status"] = tail["status"]
