@@ -5,7 +5,7 @@ import argparse
 import json
 import sys
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 
@@ -109,6 +109,9 @@ class SyntheticGarmin:
             if isinstance(value, Exception):
                 raise value
             return value
+        if stream == "heart_rate":
+            stamp = int(datetime.fromisoformat(day).replace(tzinfo=UTC).timestamp() * 1000)
+            return {"calendarDate": day, "heartRateValues": [[stamp, 55]]}
         if stream == "sleep":
             return {"dailySleepDTO": {"calendarDate": day, "sleepTimeSeconds": 25200,
                                      "sleepStartTimestampGMT": f"{day}T00:00:00Z",
@@ -126,6 +129,9 @@ class SyntheticGarmin:
 
     def get_hrv_data(self, day):
         return self._fetch("hrv", day)
+
+    def get_heart_rates(self, day):
+        return self._fetch("heart_rate", day)
 
 
 def baseline(store, garmin, today, days):

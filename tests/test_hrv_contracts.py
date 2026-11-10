@@ -9,7 +9,7 @@ from night_store_protocol import NightStoreProtocol
 
 from pipeline import hrv_backfill
 from pipeline.health_history_index import summarize_hrv_payload
-from pipeline.health_sync import HealthNotReady, store_day
+from pipeline.health_sync import HealthNotReady, finalize_days, store_day
 from pipeline.latest_night import run as run_night
 from pipeline.r2_store import R2BudgetError
 from pipeline.sources.garmin_policy import GarminReadOnlyViolation
@@ -215,6 +215,14 @@ def test_actual_targeted_night_distinguishes_confirmed_empty_from_unverified_sou
             return cls(2020, 1, 2)
     monkeypatch.setattr("pipeline.freshness.date", Clock)
     class NightGarmin(GarminReplies):
+        def __init__(self, reply):
+            super().__init__(reply)
+            self.heart_rate_calls = []
+
+        def get_heart_rates(self, day):
+            self.heart_rate_calls.append(day)
+            return {"calendarDate": day, "heartRateValues": []}
+
         def get_sleep_data(self, day):
             return {"dailySleepDTO": {"calendarDate": day, "sleepTimeSeconds": 25200,
                     "sleepStartTimestampGMT": "2020-01-01T22:00:00Z",
@@ -222,10 +230,17 @@ def test_actual_targeted_night_distinguishes_confirmed_empty_from_unverified_sou
                     "sleepLevels": [{"startGMT": "2020-01-01T22:00:00Z",
                                      "endGMT": "2020-01-02T05:00:00Z", "activityLevel": 1}]}
     check_key = f"refresh/checks/v1/health/hrv/{DAY}.json"
-    old = b"synthetic earlier successful HRV source check"
-    store = MemoryStore({hrv_backfill.hrv_key(DAY): b"synthetic good old HRV", check_key: old})
-    report = run_night(run_id="9", wake_date=DAY, store=store, garmin=NightGarmin(raw))
+    store = MemoryStore()
+    record = store_day(store, "hrv", DAY, detailed())
+    finalize_days(store, "hrv", [record])
+    good = store.objects[hrv_backfill.hrv_key(DAY)]
+    old = store.objects[check_key]
+    provider = NightGarmin(raw)
+    report = run_night(run_id="9", wake_date=DAY, store=store, garmin=provider)
     assert report["hrv_status"] == status and report["source_checked"] is checked
     assert report["status"] == "pending"
-    assert store.objects[hrv_backfill.hrv_key(DAY)] == b"synthetic good old HRV"
+    assert report["heart_rate_status"] == "garmin_not_ready"
+    assert provider.calls == [DAY]
+    assert provider.heart_rate_calls == ["2020-01-01", DAY]
+    assert store.objects[hrv_backfill.hrv_key(DAY)] == good
     assert store.objects[check_key] == old

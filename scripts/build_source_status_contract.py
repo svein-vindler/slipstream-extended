@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import io
 import json
+import os
 import sys
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from datetime import date, datetime, timezone
@@ -44,12 +45,14 @@ class Instant(datetime):
 def build_case(mode, outcome, number):
     client, garmin = HealthClient(), SyntheticGarmin()
     night_source = garmin
-    summary_case = outcome.startswith("summary_") or outcome in {"full_valid", "fatal_activity_transport"}
+    summary_case = (outcome.startswith("summary_") or outcome in {"full_valid", "fatal_activity_transport"}
+                    or mode == "general" and outcome.startswith("heart_rate_"))
     if summary_case:
         night_source, garmin = garmin, SummaryGarmin()
         garmin.failures["synthetic-activities"] = []
         garmin.get_sleep_data = night_source.get_sleep_data
         garmin.get_hrv_data = night_source.get_hrv_data
+        garmin.get_heart_rates = night_source.get_heart_rates
     body_enabled = outcome.startswith("body_") or outcome in {"both_errors", "mixed_pending", "fatal_body_transport", "full_valid"}
     fatal = outcome.startswith("fatal_") or outcome == "summary_transport"
     body_source = SyntheticBodyGarmin()
@@ -69,6 +72,9 @@ def build_case(mode, outcome, number):
     request_id = "12345678-1234-4234-8234-1234567890" + run_id
     active_run = "0"
     with TemporaryDirectory(prefix="synthetic-source-status-") as directory, ExitStack() as stack:
+        # This source-provenance fixture intentionally has no reference timezone.
+        stack.enter_context(patch.dict(os.environ))
+        os.environ.pop("HEALTH_TIMEZONE", None)
         root = Path(directory)
         (root / "activities.csv").write_text("Activity ID,Activity Date,Activity Name,Activity Type\n", encoding="utf-8")
         stack.enter_context(redirect_stdout(io.StringIO()))
@@ -111,6 +117,9 @@ def build_case(mode, outcome, number):
             seed = R2Store(client=client, bucket="synthetic")
             record = health_sync.store_day(seed, "body_composition", DAY, body_source.get_daily_weigh_ins(DAY))
             health_sync.finalize_days(seed, "body_composition", [record])
+        if mode == "night" and outcome.startswith("heart_rate_"):
+            refresh.latest_night.collect_heart_rate(
+                R2Store(client=client, bucket="synthetic"), garmin, [DAY], timezone="UTC")
         originals = {k: v["Body"] for k, v in client.objects.items()
                      if k.startswith("health/") or k.startswith("refresh/checks/")}
         if outcome == "wrong_date":
@@ -121,6 +130,12 @@ def build_case(mode, outcome, number):
             garmin.responses["sleep", DAY] = ValueError("SYNTHETIC_PROVIDER_TEXT")
         elif outcome == "pending":
             garmin.responses["hrv", DAY] = {"hrvSummary": {"calendarDate": DAY}, "hrvReadings": []}
+        if outcome == "heart_rate_invalid":
+            night_source.responses["heart_rate", DAY] = {"unexpected": "SYNTHETIC_PROVIDER_TEXT"}
+        elif outcome == "heart_rate_pending":
+            night_source.responses["heart_rate", DAY] = {"calendarDate": DAY, "heartRateValues": []}
+        elif outcome == "heart_rate_error":
+            night_source.responses["heart_rate", DAY] = ValueError("SYNTHETIC_PROVIDER_TEXT")
         if outcome in {"body_wrong_date", "both_errors"}:
             body_source.responses[DAY] = {"calendarDate": "2026-10-13", "dateWeightList": []}
         elif outcome in {"body_invalid_response", "body_unknown"}:
@@ -186,7 +201,9 @@ def build_case(mode, outcome, number):
             diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
         assert raised == fatal
         elapsed_ms = (perf_counter() - began) * 1000
-    canonical = {k: b for k, b in originals.items() if k.startswith("health/")}
+    # The scheduling queue may progress; source/product payloads stay immutable.
+    canonical = {k: b for k, b in originals.items() if k.startswith("health/")
+                 and k != "health/night-products/v1/refresh-queue.json"}
     assert all(client.objects[k]["Body"] == b for k, b in canonical.items())
     # Export synthetic JSON only. Exact original stored bytes are attested separately.
     objects = {}
@@ -219,6 +236,10 @@ def main():
          "summary_transport", "summary_schema", "full_valid", "both_errors", "mixed_pending"])]
     cases += [build_case(mode, kind, 79 + i) for i, (mode, kind) in enumerate(
         [("night", "fatal_night_transport"), ("night", "fatal_night_auth"), ("activity", "fatal_activity_transport")])]
+    cases += [build_case(mode, kind, 82 + i) for i, (mode, kind) in enumerate([
+        ("night", "heart_rate_invalid"), ("night", "heart_rate_pending"),
+        ("general", "heart_rate_invalid"), ("general", "heart_rate_error"),
+    ])]
     output = Path(sys.argv[1])
     output.parent.mkdir(parents=True, exist_ok=True)
     contract = {"producer_sha256": {module.__name__: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()

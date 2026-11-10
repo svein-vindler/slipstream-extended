@@ -35,7 +35,9 @@ def test_actual_night_child_cannot_downgrade_the_immutable_start_receipt():
     assert saved["request"]["mode"] == "night"
     assert saved["request"]["scope"] == f"night/{DAY}"
     assert saved["source"]["source_sha"] == "a" * 40
-    assert garmin.calls == [("sleep", DAY), ("hrv", DAY)]
+    assert garmin.calls == [("sleep", DAY), ("hrv", DAY),
+                            ("heart_rate", "2026-09-29"), ("heart_rate", DAY)]
+    assert result["source_checks"][0]["checked"] is True
     assert result["correlation_id"] == ID
 
 

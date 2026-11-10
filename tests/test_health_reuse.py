@@ -286,6 +286,13 @@ def test_targeted_night_uses_same_reuse_and_preserves_local_clocks(environment, 
                            store=R2Store(client=client, bucket="synthetic-health"), garmin=garmin)
     assert result["sleep_reused"] is result["hrv_reused"] is True
     assert result["status"] == "stored"
+    assert result["source_checked"] is True
+    assert result["heart_rate_status"] == "stored"
+    assert [call for call in garmin.calls if call[0] == "heart_rate"] == [
+        ("heart_rate", "2026-09-29"), ("heart_rate", DAY)] * 2
+    signal = document(client, f"health/signals/v1/2026/09/{DAY}.json")
+    assert signal["channels"]["heart_rate"]["status"] == "available"
+    assert signal["channels"]["heart_rate"]["readings"][0]["timestamp"] == 1790726400000
     assert document(client, canonical("sleep"))["sleep_start_garmin_local"] == "2026-09-29T23:30:00"
 
 
