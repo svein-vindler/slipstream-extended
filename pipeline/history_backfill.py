@@ -128,7 +128,6 @@ def _daily(job, args, *, clock=None, reference_max_periods=2, publication_owner=
     dates = active_round["dates"]
     cohort_dates = active_round["finalize_dates"]
     source_dates = active_round["new_dates"]
-    state = initial
     # Persisted cohort dates keep a stored-only continuation scoped to this
     # round, rather than recalculating unrelated history in a multi-year plan.
     # One bounded slot per affected period also covers a known split product
@@ -293,12 +292,9 @@ def _daily(job, args, *, clock=None, reference_max_periods=2, publication_owner=
             break
         if source_stop is not None or raw_deferred:
             break
-        if not pending and state["last_run_status"] not in {
-            None, "bounded_complete", "published", "user_stop"
-        }:
-            return {
-                **job.status(), "daily_status": "source_stopped", **result_fields(),
-            }
+        # A stored-only chunk made no source attempt in this invocation. Its
+        # prior terminal source status belongs to the preserved old receipts;
+        # new source attempts above still stop on their own actual outcome.
         if any(row["status"] == "ready" and row["date"] in chunk for row in job.snapshot()["rows"]):
             if phases >= phase_limit:
                 raw_deferred = True
@@ -623,7 +619,7 @@ def main(argv=None):
     bulk = commands.add_parser(
         "rolling-bulk", help="Explicit whole-scope stored-only reference workset."
     )
-    bulk.add_argument("--phase", choices=["prepare", "inventory", "collect", "build", "publication", "calendar", "ack"],
+    bulk.add_argument("--phase", choices=["prepare", "inventory", "collect", "build", "publication", "calendar", "ack", "reconcile"],
                       required=True)
     bulk.add_argument("--plan-sha", required=True)
     bulk.add_argument("--scope", type=Path, required=True)
@@ -631,6 +627,8 @@ def main(argv=None):
     bulk.add_argument("--workset", type=Path, required=True)
     bulk.add_argument("--resource-plan", type=Path)
     bulk.add_argument("--resource-plan-sha")
+    bulk.add_argument("--completion", type=Path)
+    bulk.add_argument("--completion-sha")
     bulk.add_argument("--carried", type=Path)
     bulk.add_argument("--carried-sha")
     bulk.add_argument("--proof", type=Path)

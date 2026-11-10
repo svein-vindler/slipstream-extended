@@ -174,6 +174,13 @@ publication remain separate phases: source reads only the selected Garmin
 credential, and publication reads only R2 credentials. Existing `collect`,
 `resume` and `publish` commands remain available.
 
+A new lawful invocation may publish its already verified ready curves even when
+an older, physically closed source invocation ended with a denied sibling. That
+historical outcome remains in the journal; it is not the current invocation's
+source result. The existing owner, unknown-write, source quota, per-date proof
+and selection guards remain required. Neither this continuation nor a release
+clears an unresolved owner or resets a historical counter.
+
 When continuing an installation that used earlier dated controllers, include
 **every** old and manual source journal on first use, for example:
 

@@ -20,7 +20,8 @@ MAX_DAYS = 14
 
 
 def run(
-    *, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None, today: date | None = None
+    *, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None, today: date | None = None,
+    night_references=False, heart_rate=None,
 ) -> dict:
     selected = tuple(dict.fromkeys(streams))
     if (not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= MAX_DAYS
@@ -98,7 +99,25 @@ def run(
         # A wholly failed source phase does not start unrelated tail publication.
         report["baseline_refresh"] = {"status": "not_run_source_failure"}
     else:
-        report["baseline_refresh"] = refresh_pending(store)
+        if night_references:
+            import os
+
+            from .latest_night import collect_heart_rate, refresh_references
+
+            wake_dates = sorted({row["date"] for records in all_records.values() for row in records})
+            report["heart_rate"] = heart_rate if heart_rate is not None else collect_heart_rate(
+                store, garmin, wake_dates, timezone=os.environ.get("HEALTH_TIMEZONE"),
+                reuse_checks=True)
+            hr_results = report["heart_rate"].get("source_results", [])
+            if any(row["status"] != "stored" for row in hr_results):
+                report["status"] = "partial"
+            report["baseline_refresh"] = (
+                {"status": "not_run_source_failure"} if any(
+                    row["status"] in {"invalid_response", "import_error"} for row in hr_results)
+                else refresh_references(store, wake_dates)
+                if wake_dates else refresh_pending(store))
+        else:
+            report["baseline_refresh"] = refresh_pending(store)
     log_report("recent_health", report)
     return report
 

@@ -50,6 +50,18 @@ never append the event again. Stored reads do not perform this write-side repair
 
 ## Existing entry points
 
+Normal recent-night production calls explicitly finish the newest selected wake
+endpoint's HR/HRV 28/30/90 cohort before older selected endpoints. The ordinary
+local reader computes the bounded cohort from shared snapshots, then the same
+publisher checks the combined source/context proof before and after conditional
+publication. It keeps the existing GET/LIST/PUT, memory and shared write limits;
+the standalone two-row refresh default remains unchanged. A larger recent cohort
+can retain an exact `selected_remaining` and `bounded_pending` result. Later
+ordinary scheduled work drains that remainder without re-dirtying unchanged
+accepted source data. Unrelated unknown intents are retained and do not make a
+completed selected cohort incomplete; an unknown operation on a selected target
+still prevents completion. The ordinary bounded calendar tail remains separate.
+
 The hook covers `health_sync.store_day` (sleep/HRV),
 `DailySignalCollector.publish` (HR), `recent_health`, `latest_night`,
 `local_import.run_import_cycle`, the merged `hrv_backfill`, sleep

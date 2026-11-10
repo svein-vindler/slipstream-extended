@@ -1,7 +1,7 @@
 """Synthetic provider/R2 fixtures for bounded request pipelines."""
 import gzip
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 from test_latest_activity import FakeGarmin, FakeStore, _activity, _health_file
@@ -56,10 +56,17 @@ class NightGarmin:
         return self.hrv
 
 
-def test_night_contacts_only_two_endpoints_and_preserves_local_clocks():
+    def get_heart_rates(self, day):
+        self.calls.append(("heart_rate", day))
+        stamp = int(datetime.fromisoformat(day).replace(tzinfo=timezone.utc).timestamp() * 1000)
+        return {"calendarDate": day, "heartRateValues": [[stamp, 55]]}
+
+
+def test_night_uses_standard_recent_endpoints_and_preserves_local_clocks():
     store, garmin = FakeStore(), NightGarmin()
     result = run(run_id="9", wake_date=DAY, request_id=REQUEST_ID, store=store, garmin=garmin)
-    assert garmin.calls == [("sleep", DAY), ("hrv", DAY)]
+    assert garmin.calls == [("sleep", DAY), ("hrv", DAY),
+                            ("heart_rate", "2026-09-29"), ("heart_rate", DAY)]
     assert result["status"] == "stored" and result["source_checked"] is True
     sleep = json.loads(gzip.decompress(store.get(f"health/sleep/v1/2026/09/{DAY}.json")))
     assert sleep["sleep_start_garmin_local"] == "2026-09-29T23:00:00"

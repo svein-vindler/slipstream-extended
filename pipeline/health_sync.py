@@ -204,6 +204,16 @@ def finalize_days(store, stream: str, records: list[dict[str, Any]]) -> dict[str
     return index
 
 
+def finalize_signal_days(store, records: list[dict[str, Any]]) -> None:
+    """Use the existing canonical-byte source-check protocol for timed HR."""
+    for record in records:
+        day = record["date"]
+        store.put(f"refresh/checks/v1/health/signals/{day}.json", json_bytes({
+            "schema_version": 1, "kind": "health-source-check", "stream": "signals",
+            "scope": f"health/signals/{day}", "status": "ready", **record,
+        }), "application/json")
+
+
 def publish_completed_nights(store, records: dict[str, list[dict[str, Any]]]) -> int:
     """Existing Worker night freshness advances only for two checked components."""
     sleep = {item["date"]: item for item in records.get("sleep", [])}

@@ -641,6 +641,26 @@ def _decode(body, limit=262144):
     return value
 
 
+def decode_product_snapshot(snapshot):
+    """Decode bounded product bytes without changing the observed wire metadata."""
+    import gzip
+    import io
+
+    require(type(snapshot.data) is bytes and len(snapshot.data) <= 262144
+            and snapshot.content_type == "application/json" and snapshot.encoding in (None, "gzip")
+            and isinstance(snapshot.revision, str) and bool(snapshot.revision),
+            "Stored reference metadata unverified")
+    if snapshot.encoding == "gzip":
+        require(snapshot.data[:2] == b"\x1f\x8b", "Stored reference encoding unverified")
+        with gzip.GzipFile(fileobj=io.BytesIO(snapshot.data)) as stream:
+            body = stream.read(262145)
+    else:
+        require(snapshot.data[:2] != b"\x1f\x8b", "Stored reference encoding unverified")
+        body = snapshot.data
+    _decode(body)
+    return body
+
+
 def _read_queue(store):
     before = _snapshot(store, QUEUE_KEY)
     queue = (
@@ -1100,6 +1120,82 @@ def register_rolling_endpoints(store, sources, *, today=None, prepared_manifest=
         io.close()
 
 
+def refresh_recent_night_references(store, *, wake_dates, timezone=None, snapshot_cache=None):
+    """Finish a bounded current-night cohort through the ordinary local producer.
+
+    Component counters and the store's write/inventory budget remain shared.
+    Unrelated calendar work retains its ordinary caller's separate tail drain.
+    """
+    require(isinstance(wake_dates, (list, tuple)) and len(wake_dates) <= 3
+            and all(isinstance(day, str) and date.fromisoformat(day).isoformat() == day
+                    for day in wake_dates), "Choose at most three exact wake dates")
+    cache = {} if snapshot_cache is None else snapshot_cache
+    if not wake_dates:
+        report = refresh_pending(store, timezone=timezone, snapshot_cache=cache)
+        return {**report, "selected_remaining": None, "selected_status": "not_requested"}
+    from .native_night import zone
+
+    timezone = timezone or os.environ.get("HEALTH_TIMEZONE")
+    if zone(timezone) is None:
+        return {"status": "calendar_timezone_required", "selected_remaining": 6 * len(set(wake_dates))}
+    today = _today(timezone)
+    dates = sorted(set(wake_dates))
+    require(all(day <= today for day in dates), "Wake endpoint is not yet available")
+    sources, available = [], []
+    io = _IO(store)
+    try:
+        for day in dates:
+            key = f"health/sleep/v1/{day[:4]}/{day[5:7]}/{day}.json"
+            snapshot = _snapshot(io, key, 524288)
+            if snapshot is None:
+                continue
+            value = _decode(snapshot.data, 2097152)
+            require(value.get("schema_version") == 1 and value.get("source") == "garmin"
+                    and value.get("date") == day and _validate_source("sleep", day, value),
+                    "Recent endpoint sleep is unverified")
+            sources.append({"key": key, "revision": snapshot.revision,
+                            "sha256": hashlib.sha256(snapshot.data).hexdigest()})
+            available.append(day)
+            if key in cache or (len(cache) < 512 and sum(len(row.data) for row in cache.values())
+                                + len(snapshot.data) <= 16777216):
+                cache[key] = snapshot
+    finally:
+        io.close()
+    missing = 6 * (len(dates) - len(available))
+    if not available:
+        return {"status": "not_ready", "selected_remaining": missing, "missing_endpoints": len(dates)}
+    registered = register_rolling_endpoints(store, sources, today=today)
+
+    def remaining(report):
+        return sum(any(first <= day <= last for first, last in item["ranges"])
+                   for channels in report["rolling_remaining"].values()
+                   for item in channels.values() for day in available)
+
+    current = registered
+    reports = []
+    for day in reversed(available):
+        if not any(any(first <= day <= last for first, last in item["ranges"])
+                   for channels in current["rolling_remaining"].values() for item in channels.values()):
+            continue
+        previous = remaining(current)
+        report = refresh_pending(store, today=today, timezone=timezone, max_periods=8,
+            period_names=set(), rolling_endpoints=[day], snapshot_cache=cache,
+            batch_local_preparation=True)
+        reports.append(report)
+        current = report
+        if remaining(current) >= previous or report.get("budget_deferred"):
+            break
+    report = current
+    selected = remaining(current) + missing
+    status = ("bounded_pending" if report.get("blocked") else "not_ready" if missing else
+              "complete" if selected == 0 else "held" if report.get("status") == "held" else "bounded_pending")
+    return {**report, "status": status, "selected_remaining": selected,
+            "selected_endpoints": len(dates), "missing_endpoints": len(dates) - len(available),
+            "global_held_periods": report.get("held_periods"), "cohort_phases": reports,
+            **{name: sum(row.get(name, 0) for row in reports)
+               for name in ("products_written", "products_unchanged", "periods_completed", "local_snapshot_hits")}}
+
+
 def _selected_prepared_targets(prepared_manifest, prepared_target_keys):
     if prepared_target_keys is None:
         return prepared_manifest.targets if prepared_manifest is not None else None
@@ -1312,6 +1408,7 @@ def prepare_reference(values, args, proof):
 
 
 _ORDINARY_PREPARATION = object()
+_ORDINARY_COHORT_PREPARATION = object()
 
 
 def _sealed_preparation(workset):
@@ -1396,9 +1493,9 @@ def publish_prepared_rows(io, queue, revision, rows, *, report, reserve_writes=0
     gate. Bulk publication always requires the whole-workset seal, not a list of
     the products that happened to finish preparation first.
     """
-    if _ordinary_gate is not _ORDINARY_PREPARATION:
+    if _ordinary_gate is not _ORDINARY_PREPARATION and _ordinary_gate is not _ORDINARY_COHORT_PREPARATION:
         _sealed_preparation(prepared_manifest)
-    else:
+    elif _ordinary_gate is _ORDINARY_PREPARATION:
         require(len(rows) == 1, "Ordinary reference row bound")
     require(type(rows) is list and 1 <= len(rows) <= MAX_LOCAL_PERIODS,
             "Choose one to eight prepared rows")
@@ -1557,7 +1654,7 @@ def publish_prepared_rows(io, queue, revision, rows, *, report, reserve_writes=0
 def refresh_pending(
     store, *, today=None, timezone=None, max_periods=MAX_PERIODS, reserve_writes=0,
     snapshot_cache=None, period_names=None, rolling_sources=None, rolling_endpoints=None,
-    prepared_manifest=None, prepared_target_keys=None,
+    prepared_manifest=None, prepared_target_keys=None, batch_local_preparation=False,
 ):
     """Bounded stored-only drain with optional verified local calculation inputs.
 
@@ -1572,6 +1669,8 @@ def refresh_pending(
         type(reserve_writes) is int and 0 <= reserve_writes <= 250,
         "Bounded caller checkpoint reservation",
     )
+    require(type(batch_local_preparation) is bool and not (batch_local_preparation and prepared_manifest is not None),
+            "Choose one local preparation contract")
     require(rolling_endpoints is None or isinstance(rolling_endpoints, (list, tuple))
             and len(rolling_endpoints) <= 7 and all(
                 isinstance(endpoint, str) and date.fromisoformat(endpoint).isoformat() == endpoint
@@ -1705,6 +1804,16 @@ def refresh_pending(
         calendars = [name for name in eligible if not queue["pending"][name].get("rolling_window")]
         selected = (calendars or eligible)[:max_periods]
         staged_rows = []
+        if batch_local_preparation and selected and not calendars:
+            first = min(queue["pending"][name]["start_date"] for name in selected)
+            last = max(queue["pending"][name]["end_date"] for name in selected)
+            days = [(date.fromisoformat(first) + timedelta(days=index)).isoformat()
+                    for index in range((date.fromisoformat(last) - date.fromisoformat(first)).days + 1)]
+            from .night_reference_sources import prime_rolling_list_bound
+
+            if io.counts()["list"] + prime_rolling_list_bound(days) > 100:
+                raise ComponentBudgetDeferred("Local cohort inventory budget deferred")
+            reader.prime_rolling_sources(days)
         for name in selected:
             row = queue["pending"][name]
             is_rolling = bool(row.get("rolling_window"))
@@ -1762,11 +1871,12 @@ def refresh_pending(
                 assembly_lists = prime_rolling_list_bound(requested)
             else:
                 assembly_lists = sum(wake not in nights for wake in requested)
-            if lists_used + assembly_lists + 2 * _context_fence_lists(requested) > 100:
+            if (not batch_local_preparation
+                    and lists_used + assembly_lists + 2 * _context_fence_lists(requested) > 100):
                 report.setdefault("budget_deferred", []).append(name)
                 break
             try:
-                if is_rolling:
+                if is_rolling and not batch_local_preparation:
                     reader.prime_rolling_sources(requested)
                     nights = {}
                 for wake in requested:
@@ -1803,6 +1913,9 @@ def refresh_pending(
                 start_date=row["start_date"], end_date=row["end_date"], period="custom",
                 channel=channel), proof)
                 for channel in ((row["channel"],) if is_rolling else ("heart_rate", "hrv"))]
+            if batch_local_preparation:
+                staged_rows.append((name, artifacts))
+                continue
             published = publish_prepared_rows(io, queue, revision, [(name, artifacts)],
                 report=report, reserve_writes=reserve_writes, _ordinary_gate=_ORDINARY_PREPARATION)
             revision = published["queue_revision"]
@@ -1810,7 +1923,8 @@ def refresh_pending(
                 break
         if staged_rows:
             published = publish_prepared_rows(io, queue, revision, staged_rows,
-                report=report, reserve_writes=reserve_writes, prepared_manifest=prepared_manifest)
+                report=report, reserve_writes=reserve_writes, prepared_manifest=prepared_manifest,
+                _ordinary_gate=_ORDINARY_COHORT_PREPARATION if batch_local_preparation else None)
             revision = published["queue_revision"]
         report["local_snapshot_hits"] = reader.local_snapshot_hits
         report["pending_materialized"] = len(queue["pending"])

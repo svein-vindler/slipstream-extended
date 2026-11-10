@@ -276,7 +276,7 @@ def prepare_bulk(job, plan_sha, scope_ref, folder):
         "target_count": len(targets), "product_puts": 0, "source_calls": 0}
 
 
-def load_bulk_workset(job, plan_sha, scope_ref, folder):
+def load_bulk_workset(job, plan_sha, scope_ref, folder, *, completion_ref=None):
     """Revalidate the immutable request and return its local workset and scope."""
     from .reference_workset import ReferenceWorkset
 
@@ -290,6 +290,8 @@ def load_bulk_workset(job, plan_sha, scope_ref, folder):
     request = json.loads(read(workset.folder / "REQUEST.json", 1048576))
     _require(request["scope"] == scope_ref and request["scope_sha256"] == workset.scope_sha256
              and request["deadline_utc"] == scope["deadline_utc"], "reference_bulk_request_changed")
+    if completion_ref is not None:
+        workset.qualify_completion(completion_ref)
     return workset, scope
 
 
@@ -571,7 +573,7 @@ def _publication_result(workset, account, resource_plan_ref, state):
 
 
 def publish_bulk(job, plan_sha, scope_ref, folder, *, resource_plan_ref, carried,
-                 store_factory=None, max_batches=2436):
+                 store_factory=None, max_batches=2436, completion_ref=None):
     """Publish sealed outstanding slots; unverified output alone is not scope completion."""
     from .history_publish import StorageGuard, _ReferenceStore
     from .night_baseline_refresh import refresh_pending, register_rolling_endpoints
@@ -580,19 +582,29 @@ def publish_bulk(job, plan_sha, scope_ref, folder, *, resource_plan_ref, carried
     from .rolling_reference_span import _CapturedStore
 
     _require(type(max_batches) is int and 1 <= max_batches <= 2436, "reference_bulk_publication_bound")
-    workset, scope = load_bulk_workset(job, plan_sha, scope_ref, folder)
+    from .reference_completion import completion_directory, publication_intent
+
+    workset, scope = load_bulk_workset(job, plan_sha, scope_ref, folder, completion_ref=completion_ref)
     workset.assert_sealed()
     state = _publication_state(workset)
-    intent_path = workset.folder / "PUBLICATION-INTENT.json"
+    intent_path = publication_intent(workset, completion_ref)
     _require(not intent_path.exists(), "reference_bulk_publication_pending")
     account = BulkAccount.open(workset.folder / "account", workset.scope_sha256, carried,
-                               deadline_utc=scope["deadline_utc"])
+                               deadline_utc=scope["deadline_utc"], completion_ref=completion_ref)
     account.activate(resource_plan_ref)
     _require(account.plan["phase"] == "publication", "reference_bulk_resource_phase")
     workset.bind_resource_plan("publication", resource_plan_ref)
     summary = _publication_result(workset, account, resource_plan_ref, state)
-    if summary["status"] in {"verification_pending", "complete"}:
+    if summary["status"] == "complete" or (summary["status"] == "verification_pending"
+            and (completion_ref is None or summary["unpublished_products"] == 0)):
         return summary
+    if completion_ref is not None:
+        from .reference_completion import validate_completion_receipt, validate_request
+
+        completion = validate_request(completion_ref)
+        reconciliation = completion_directory(workset, completion_ref) / "RECONCILIATION-RECEIPT.json"
+        validate_completion_receipt(workset, _reference(reconciliation))
+        _require(completion["resource_plan_ref"] == resource_plan_ref, "bulk_completion_plan_changed")
     sources = {row["key"] for row in workset.required_sources()}
     targets = []
     for target in workset.targets:
@@ -603,7 +615,8 @@ def publish_bulk(job, plan_sha, scope_ref, folder, *, resource_plan_ref, carried
             targets.append(target)
     endpoints = list(dict.fromkeys(target["endpoint"] for target in targets))
     groups = [endpoints[index:index + 7] for index in range(0, len(endpoints), 7)]
-    command = workset.folder / "publications" / uuid.uuid4().hex
+    command = (completion_directory(workset, completion_ref) / "publications" if completion_ref is not None
+               else workset.folder / "publications") / uuid.uuid4().hex
     command.mkdir(parents=True)
     write(intent_path, {"schema": 1, "kind": "reference-bulk-publication-intent",
         "scope_sha256": workset.scope_sha256, "build_seal": workset.assert_sealed(),
@@ -620,6 +633,11 @@ def publish_bulk(job, plan_sha, scope_ref, folder, *, resource_plan_ref, carried
             root_store = store_factory()
             close = root_store.client.close
         _require(_target(root_store) == workset.binding["storage_target_sha256"], "storage_target_changed")
+        if completion_ref is not None:
+            from .reference_completion import CompletionDestinationFence
+
+            root_store = CompletionDestinationFence(root_store, workset,
+                {target["key"] for target in targets} - state["published"].keys())
         local = workset.reader_store()
         for ordinal in range(max_batches):
             account.check_deadline()
@@ -653,7 +671,7 @@ def publish_bulk(job, plan_sha, scope_ref, folder, *, resource_plan_ref, carried
                 report = refresh_pending(capture, today=scope["today"], timezone=scope["timezone"],
                     max_periods=8, period_names=set(), rolling_endpoints=group,
                     prepared_manifest=workset, prepared_target_keys=group_keys)
-                if report.get("held_periods") or report.get("blocked"):
+                if report.get("blocked"):
                     raise Stop("reference_bulk_publication_held")
                 generated = [value for key, value in capture.observed.items()
                     if key in remaining and (value["written"] or key in capture.completed_keys)]
@@ -707,7 +725,8 @@ def publish_bulk(job, plan_sha, scope_ref, folder, *, resource_plan_ref, carried
             "ownedSDKClosed": sdk_closed, "componentCleanupConfirmed": cleanup is None,
             "status": "hold" if primary is not None or cleanup is not None else "complete"})
         receipts[batch] = _reference(batch / "TERMINAL.json")
-    generated = [{**{key: observed[target["key"]][0][key] for key in ("key", "args", "revision", "sha256")},
+    generated = [{**{key: observed[target["key"]][0][key] for key in
+                    ("key", "args", "revision", "sha256", "content_type", "encoding", "decoded_sha256")},
                   "producer_receipt": receipts[observed[target["key"]][1]]}
                  for target in targets if target["key"] in observed]
     terminal = {"schema": 1, "kind": "reference-bulk-stage-terminal",
@@ -827,15 +846,33 @@ def _validate_bulk_postcheck(workset, reference, targets, receipts):
     _require(proof.get("resource_plan_ref") == workset.status()["resource_plans"].get("publication"),
              "reference_bulk_resource_phase")
     planned = {target["key"]: target for target in workset.targets}
-    products, sizes = {}, {}
+    from .reference_verification_policy import validate_policy
+
+    verification = validate_policy(workset, binding, targets)
+    canary = verification["policy_ref"] is not None
+    if canary:
+        _require(proof.get("verification_policy_ref") == verification["policy_ref"]
+                 and encoded(proof.get("verification_coverage")) == encoded(verification["coverage"])
+                 and encoded(proof.get("verification_gets")) == encoded(verification["get_counts"])
+                 and type(proof["account_snapshot"]["context"]["independent_gets"]) is int
+                 and proof["account_snapshot"]["context"]["independent_gets"]
+                    == verification["prior_independent_gets"] + verification["get_counts"]["independent"],
+                 "reference_bulk_verification_policy_changed")
+    else:
+        _require("verification_policy_ref" not in proof and "verification_coverage" not in proof
+                 and "verification_gets" not in proof,
+                 "reference_bulk_verification_policy_unbound")
+    products, sizes, completion_receipts = {}, {}, {}
     readbacks, readers = proof.get("readbacks"), proof.get("readerObservations")
     _require(isinstance(readbacks, list) and isinstance(readers, list)
-             and len(readbacks) == len(readers) == len(targets), "reference_bulk_independent_proof_required")
+             and len(readbacks) == len(targets) and len(readers) == len(verification["selected_keys"]),
+             "reference_bulk_independent_proof_required")
     for target in targets:
         _require(target["key"] in planned and target["args"] == planned[target["key"]]["args"],
                  "reference_bulk_target_changed")
         receipt = json.loads(_pin(target["producer_receipt"]))
-        _require(receipt.get("kind") == "reference-bulk-publication-receipt"
+        reconciled = receipt.get("kind") == "reference-bulk-reconciliation-receipt"
+        _require(receipt.get("kind") in {"reference-bulk-publication-receipt", "reference-bulk-reconciliation-receipt"}
                  and receipt.get("scope_sha256") == workset.scope_sha256
                  and receipt.get("resource_plan_ref") == proof["resource_plan_ref"]
                  and receipt.get("status") == "complete" and receipt.get("ownedSDKClosed") is True
@@ -844,21 +881,55 @@ def _validate_bulk_postcheck(workset, reference, targets, receipts):
         _require(close.get("ownedSDKClosed") is True and close.get("componentCleanupConfirmed") is True
                  and close.get("primaryFailureCategory") is None and close.get("cleanupFailureCategory") is None,
                  "reference_bulk_producer_unqualified")
-        batch = json.loads(_pin(receipt["result"]))
+        if reconciled:
+            from .reference_completion import validate_completion_receipt
+
+            _require(binding.get("bulkCompletion") == receipt.get("completion_ref"),
+                     "bulk_completion_receipt_binding")
+            identity = digest(encoded(target["producer_receipt"]))
+            if identity not in completion_receipts:
+                completion_receipts[identity] = validate_completion_receipt(workset, target["producer_receipt"])
+            batch = completion_receipts[identity]
+        else:
+            batch = json.loads(_pin(receipt["result"]))
         actual = [row for row in batch["generated_targets"] if row["key"] == target["key"]]
         _require(batch.get("scope_sha256") == workset.scope_sha256 and batch.get("build_seal") == proof["build_seal"]
                  and len(actual) == 1 and all(actual[0][key] == target[key]
                      for key in ("key", "args", "revision", "sha256")), "reference_bulk_producer_changed")
+        if "decoded_sha256" in target:
+            _require(all(actual[0].get(key) == target[key]
+                         for key in ("content_type", "encoding", "decoded_sha256")),
+                     "reference_bulk_producer_metadata_changed")
         _pin(actual[0]["producer_observation"])
         candidates = [row for row in readbacks if row.get("keySHA256") == digest(target["key"].encode())]
         _require(len(candidates) == 1, "reference_bulk_sdk_required")
-        body = _pin(candidates[0]["body"])
+        from .night_baseline_refresh import decode_product_snapshot
+        from .r2_store import R2ObjectSnapshot
+
+        raw = _pin(candidates[0]["body"])
+        metadata = {"revision": target["revision"], "content_type": target.get("content_type", "application/json"),
+                    "encoding": target.get("encoding")}
+        body = decode_product_snapshot(R2ObjectSnapshot(raw, **metadata))
         product = _semantic_load(body)
-        metadata = {"revision": target["revision"], "content_type": "application/json", "encoding": None}
-        _require(digest(body) == target["sha256"] and _semantic_same(product.get("args"), target["args"])
+        if "decoded_sha256" in target:
+            decoded_ref = candidates[0].get("decoded_body", candidates[0]["body"] if metadata["encoding"] is None else None)
+            _require(decoded_ref is not None and digest(body) == target["decoded_sha256"] and _pin(decoded_ref) == body,
+                     "reference_bulk_decoded_postimage_changed")
+        _require(digest(raw) == target["sha256"] and _semantic_same(product.get("args"), target["args"])
                  and candidates[0].get("metadataSHA256") == digest(encoded(metadata)),
                  "reference_bulk_sdk_changed")
-        products[target["sha256"]], sizes[target["sha256"]] = product, len(body)
+        if canary:
+            # Every SDK postimage, including non-canaries, must retain the
+            # sealed source/context semantics. The existing publisher ignores
+            # only diagnostic resource counters for unchanged canonical bytes.
+            artifact = workset.product_for(target["key"])
+            sealed = _semantic_load(artifact["body"].encode())
+            _require(_semantic_same({key: value for key, value in product.items() if key != "resources"},
+                                    {key: value for key, value in sealed.items() if key != "resources"}),
+                     "reference_bulk_sdk_sealed_postimage_changed")
+        products[digest(body)], sizes[digest(body)] = product, len(body)
+    selected = {target.get("decoded_sha256", target["sha256"]) for target in targets
+                if target["key"] in verification["selected_keys"]}
     seen = set()
     for reference in readers:
         observation = _semantic_load(_pin(reference))
@@ -895,7 +966,7 @@ def _validate_bulk_postcheck(workset, reference, targets, receipts):
                      "invocation", "round_id", "plan_sha256", "binding_sha256", "binding", "arguments", "tool",
                      "sdk_product_sha256")), "reference_bulk_reader_binding")
         sha = intent["sdk_product_sha256"][0]
-        _require(sha in products and sha not in seen and intent["decoded_bytes"] == sizes[sha],
+        _require(sha in selected and sha not in seen and intent["decoded_bytes"] == sizes[sha],
                  "reference_bulk_reader_changed")
         product = products[sha]
         projection = {key: product[key] for key in ("args", "source_identity", "nights_requested", "source_nights",
@@ -912,7 +983,7 @@ def _validate_bulk_postcheck(workset, reference, targets, receipts):
                  and answer["resources"]["r2_get_attempts"] == intent["reserved_gets"] == 1,
                  "reference_bulk_reader_sdk_mismatch")
         seen.add(sha)
-    _require(seen == set(products), "reference_bulk_reader_required")
+    _require(seen == selected, "reference_bulk_reader_required")
     return proof
 
 
@@ -1277,14 +1348,14 @@ def validate_closed_source_cohort(job, plan_sha, round_id, *, before_sequence):
     return True
 
 
-def acknowledge_bulk(job, plan_sha, scope_ref, folder, proof_ref, *, resource_plan_ref, carried):
+def acknowledge_bulk(job, plan_sha, scope_ref, folder, proof_ref, *, resource_plan_ref, carried, completion_ref=None):
     """Advance only after the whole currently published set has genuine aggregate evidence."""
     from .reference_bulk_budget import BulkAccount
 
-    workset, scope = load_bulk_workset(job, plan_sha, scope_ref, folder)
+    workset, scope = load_bulk_workset(job, plan_sha, scope_ref, folder, completion_ref=completion_ref)
     state = _publication_state(workset)
     account = BulkAccount.open(workset.folder / "account", workset.scope_sha256, carried,
-                               deadline_utc=scope["deadline_utc"])
+                               deadline_utc=scope["deadline_utc"], completion_ref=completion_ref)
     account.activate(resource_plan_ref)
     current = _publication_result(workset, account, resource_plan_ref, state)
     repeated = proof_ref in state["verified"].values()
@@ -1296,6 +1367,9 @@ def acknowledge_bulk(job, plan_sha, scope_ref, folder, proof_ref, *, resource_pl
         _require(proof["account_snapshot"] == account.snapshot(), "reference_bulk_meter_changed")
         _publication_checkpoint(workset, state, "verified", proof_ref)
     result = {**_publication_result(workset, account, resource_plan_ref, _publication_state(workset)), "phase": "ack"}
+    if "verification_policy_ref" in proof:
+        result.update(verification_policy_ref=proof["verification_policy_ref"],
+                      verification_coverage=proof["verification_coverage"], verification_gets=proof["verification_gets"])
     if "after_source_ref" in proof:
         _require(result["status"] == "complete", "reference_bulk_source_completion_unverified")
         result["source_round_completion"] = _finish_source_round(job, plan_sha, scope_ref, workset, proof_ref, proof)
@@ -1314,7 +1388,16 @@ def run_command(job, args):
              "reference_bulk_resource_plan_changed")
     carried = json.loads(_pin(carried_ref))
     _require(isinstance(carried, dict), "reference_bulk_carried_required")
-    if args.phase == "inventory":
+    completion_ref = None
+    if getattr(args, "completion", None) is not None:
+        completion_ref = _reference(args.completion)
+        _require(completion_ref["sha256"] == args.completion_sha
+                 and args.phase in {"reconcile", "publication", "ack"}, "bulk_completion_phase")
+    if args.phase == "reconcile":
+        _require(completion_ref is not None, "bulk_completion_required")
+        result = reconcile_bulk(job, args.plan_sha, reference, args.workset,
+            resource_plan_ref=resource, carried=carried, completion_ref=completion_ref)
+    elif args.phase == "inventory":
         result = inventory_bulk(job, args.plan_sha, reference, args.workset,
                                 resource_plan_ref=resource, carried=carried)
     elif args.phase == "collect":
@@ -1328,7 +1411,8 @@ def run_command(job, args):
                             carried=carried, max_targets=args.max_targets)
     elif args.phase == "publication":
         result = publish_bulk(job, args.plan_sha, reference, args.workset,
-                              resource_plan_ref=resource, carried=carried, max_batches=args.max_batches)
+                              resource_plan_ref=resource, carried=carried, max_batches=args.max_batches,
+                              completion_ref=completion_ref)
     else:
         _require(args.phase in {"calendar", "ack"} and args.proof is not None, "reference_bulk_postcheck_required")
         proof = _reference(args.proof)
@@ -1338,8 +1422,16 @@ def run_command(job, args):
                                    resource_plan_ref=resource, carried=carried)
         else:
             result = acknowledge_bulk(job, args.plan_sha, reference, args.workset, proof,
-                                      resource_plan_ref=resource, carried=carried)
+                                      resource_plan_ref=resource, carried=carried, completion_ref=completion_ref)
     return {"schema": 1, "kind": "reference-bulk-result", "phase": args.phase, **result}
+
+
+def reconcile_bulk(job, plan_sha, scope_ref, folder, *, resource_plan_ref, carried,
+                   completion_ref, store_factory=None):
+    from .reference_completion import reconcile_bulk as reconcile
+
+    return reconcile(job, plan_sha, scope_ref, folder, resource_plan_ref=resource_plan_ref,
+                     carried=carried, completion_ref=completion_ref, store_factory=store_factory)
 
 
 def failure_result(job, args, error):

@@ -18,6 +18,7 @@ from .activity_backfill import (
 )
 from .activity_pagination import MAX_CHECKPOINT_BYTES, load_cursor, range_status
 from .granular import json_bytes
+from .night_followup import run_command
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2Store
 from .schema import activity_local_date
@@ -226,7 +227,9 @@ def main():
     parser.add_argument("--max-activities", type=int, default=50)
     args = parser.parse_args()
     try:
-        return run(max_activities=args.max_activities)
+        values = dict(max_activities=args.max_activities)
+        return run_command(
+            run, store_factory=R2Store, login=_login, now=datetime.now(timezone.utc), **values)
     except ValueError as exc:
         parser.error(str(exc))
 

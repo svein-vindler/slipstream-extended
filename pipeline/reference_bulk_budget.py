@@ -162,11 +162,12 @@ class BulkAccount:
     """One CAS-checked local ledger; new views never renew time or allowance."""
 
     @classmethod
-    def open(cls, folder, scope_sha, carried, *, deadline_utc=None):
+    def open(cls, folder, scope_sha, carried, *, deadline_utc=None, completion_ref=None):
         self = cls()
         self.folder = Path(folder)
         self.path = self.folder / "ACCOUNT.json"
         self.scope_sha = scope_sha
+        _need(completion_ref is None or self.path.is_file(), "bulk_completion_account_missing")
         self.folder.mkdir(parents=True, exist_ok=True)
         if self.path.exists():
             self._body = self.path.read_bytes()
@@ -189,14 +190,25 @@ class BulkAccount:
                 stream.write(self._body)
                 stream.flush()
                 os.fsync(stream.fileno())
-        _need(self.state["failed"] is None and self.state["pending_wire"] is None,
-              "bulk_resource_account_held")
-        self.check_deadline()
         self.execution_context = self.state["context"]
         self.plan = _pin(self.state["active_plan"]) if self.state["active_plan"] is not None else None
+        self.completion_ref = completion_ref
+        if completion_ref is not None:
+            from .reference_completion import attach_account
+
+            attach_account(self, completion_ref)
+        else:
+            _need(self.state["failed"] is None and self.state["pending_wire"] is None
+                  and "completion" not in self.state, "bulk_resource_account_held")
+        self.check_deadline()
         return self
 
     def check_deadline(self):
+        if getattr(self, "completion_ref", None) is not None:
+            from .reference_completion import check_account
+
+            check_account(self)
+            return
         _need(datetime.now(timezone.utc) < _deadline(self.state["deadline_utc"]),
               "bulk_resource_deadline")
         _need(self.state["failed"] is None, "bulk_resource_account_held")
@@ -304,6 +316,10 @@ class BulkAccount:
         self.checkpoint()
 
     def mark_failed(self, category):
+        if getattr(self, "completion_ref", None) is not None:
+            self.state["completion"]["failed"] = category
+            self.checkpoint()
+            return
         self.state["failed"] = category if category in {
             "unknown_storage_transport", "storage_denied_or_unknown", "unknown_write", "reader_unknown"
         } else "bulk_storage_unknown"

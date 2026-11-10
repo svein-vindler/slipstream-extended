@@ -127,7 +127,7 @@ def provider_diagnostics(client):
 
 
 def run(data_dir="data", *, store=None, client=None, now=None, force_reconcile=False,
-        request_pause=0.15, base=None, flow_id=None):
+        request_pause=0.15, base=None, flow_id=None, night_source_checks=False):
     started = time.perf_counter()
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
@@ -162,7 +162,7 @@ def run(data_dir="data", *, store=None, client=None, now=None, force_reconcile=F
     # Receipts are published only after both summaries, snapshots and manifest
     # have been successfully exported. Partial metrics retain old CSV values.
     manifest = export_summaries(data_dir, store=store, base=base, flow_id=flow_id)
-    signal_report = signals.publish()
+    signal_report = signals.publish(source_checks=night_source_checks)
     hashes = {entry["name"]: entry["sha256"] for entry in manifest["files"]}
     ready = {"activities": activity_complete, "health": health_complete}
     checkpoints = 0

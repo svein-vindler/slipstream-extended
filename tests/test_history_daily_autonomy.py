@@ -241,3 +241,58 @@ def test_daily_restart_keeps_the_original_new_date_selection_and_source_counts(m
     assert {day for day, _, _ in system.source_calls} == {"2026-01-26", "2026-01-25"}
     assert len(system.native_results) == 2
     capsys.readouterr()
+
+
+def test_new_daily_invocation_reuses_ready_dates_after_closed_historical_denial(monkeypatch, capsys):
+    import requests
+    from daily_autonomy_fixture import daily_system, transport_counts
+
+    from pipeline import history_source
+    from pipeline.history_state import rolling_usage
+
+    system = daily_system(monkeypatch)
+    job, files = system.job, system.files
+    source_wire = requests.adapters.HTTPAdapter.send
+
+    def historical_denial(adapter, request, **kwargs):
+        response = source_wire(adapter, request, **kwargs)
+        if "/hrv-service/" in request.url and "2026-01-20" in request.url:
+            response.status_code = 403
+        return response
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", historical_denial)
+    previous = history_collect.collect(
+        job, job.plan_sha, confirm=True, max_dates=7, now=system.clock.now,
+    )
+    assert previous["last_run_status"] == "denied"
+    assert previous["counts"] == {"pending": 48, "ready": 13, "denied": 1}
+    assert previous["locked"] is False and previous["active_run"] is None
+    old_journal = files[str(job.folder / "events.jsonl")]
+    old_native_proofs = {
+        name: body for name, body in files.items() if "/runs/" in name
+    }
+    old_calls = list(system.source_calls)
+    previous_usage = rolling_usage(job, now=system.clock.now())
+    assert previous_usage["HTTP"] == 28
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", source_wire)
+    monkeypatch.setattr(history_source, "Clock", lambda: system.clock)
+    native = history_backfill.main([
+        "--state", str(job.folder), "daily", "--plan-sha", job.plan_sha,
+        "--confirm-cloud-jobs-paused", "--confirm-r2-write", "--max-dates", "1",
+    ])
+    report = json.loads(capsys.readouterr().out)
+    assert report["daily_new_dates"] == 1
+    assert report["daily_status"] in {"bounded_complete", "baselines_pending"}
+    assert native == (0 if report["daily_status"] == "bounded_complete" else 2)
+    assert report["daily_stored_dates_reused"] == 7 and report["daily_HTTP"] == 4
+    assert report["counts"] == {"pending": 46, "published": 15, "denied": 1}
+    assert {day for day, _, _ in system.source_calls[len(old_calls):]} == {"2026-01-19"}
+    assert system.native_results == [0, 0, 0, 0, 0, 0, 2, 0]
+    assert files[str(job.folder / "events.jsonl")].startswith(old_journal)
+    assert all(files[name] == body for name, body in old_native_proofs.items())
+    assert rolling_usage(job, now=system.clock.now())["HTTP"] == 32
+    print(json.dumps({"source_HTTP": len(system.source_calls),
+                      "old_source_HTTP": len(old_calls),
+                      "R2": transport_counts(system.server.calls),
+                      "R2_write_bytes": system.server.attempted_write_bytes}))

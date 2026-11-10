@@ -127,6 +127,7 @@ class ReferenceWorkset:
         instance._outcomes, instance._steps, instance._plans = {}, [], {}
         instance._source_seal = instance._build_seal = instance._hold = None
         instance._holds = []
+        instance._completion_read = None
         instance._sequence, instance._previous, instance._journal_bytes = 0, None, 0
         body = read(instance.folder / "PROGRESS.jsonl")
         _require(not body or body.endswith(b"\n"))
@@ -335,7 +336,7 @@ class ReferenceWorkset:
         return reference
 
     def reader_store(self):
-        _require(self._source_seal is not None and self._hold is None, "reference_workset_sources_incomplete")
+        _require(self._source_seal is not None and self._sealed_read_allowed(), "reference_workset_sources_incomplete")
         _pin(self._source_seal)
         workset = self
 
@@ -457,12 +458,26 @@ class ReferenceWorkset:
         return reference
 
     def assert_sealed(self):
-        _require(self._build_seal is not None and self._hold is None, "reference_workset_build_incomplete")
+        _require(self._build_seal is not None and self._sealed_read_allowed(), "reference_workset_build_incomplete")
         value = json.loads(_pin(self._build_seal))
         _require(value["scope_sha256"] == self.scope_sha256 and value["source_seal"] == self._source_seal
                  and value["products"] == self._products and value["outcomes"] == self._outcomes)
         _pin(self._source_seal)
         return copy.deepcopy(self._build_seal)
+
+    def qualify_completion(self, reference):
+        from .reference_completion import qualify_workset
+
+        self._completion_read = qualify_workset(self, reference)
+        self.assert_sealed()
+
+    def _sealed_read_allowed(self):
+        if self._hold is None:
+            return True
+        from .reference_completion import SealedCompletionRead
+
+        return (type(self._completion_read) is SealedCompletionRead
+                and self._completion_read.revalidate(self))
 
     def product_for(self, key):
         self.assert_sealed()

@@ -192,8 +192,8 @@ export class NightProductsTools {
   }
   registerTools(server: McpServer) {
     server.registerTool("night_baseline", {
-      description: "Read one bounded precomputed personal night reference product. Each night contributes one within-night median per bin before linear P10/P25/P50/P75/P90. Explicit exclusions, context filters and coverage remain visible. No source-night scan, provider call or write.",
-      inputSchema: z.object({end_date: exactDate, period: z.enum(["7", "28", "90", "365", "custom"]).default("28"), start_date: exactDate.optional(),
+      description: "Read stored personal night references, including HR/HRV over 28, 30 or 90 days. end_date is the inclusive wake-date. Each night contributes one within-night median per bin before linear P10/P25/P50/P75/P90. Actual coverage, partial sources, exclusions and context filters remain visible. Reading never fetches source data, recomputes products or writes.",
+      inputSchema: z.object({end_date: exactDate, period: z.enum(["7", "28", "30", "90", "365", "custom"]).default("28"), start_date: exactDate.optional(),
         alignment: z.enum(["sleep_start", "wake", "clock"]).default("sleep_start"), bin_minutes: z.union([z.literal(15),z.literal(30)]).default(30),
         channel: z.enum(["heart_rate", "hrv", "body_battery", "stress"]).default("hrv"), exclude_dates: z.array(exactDate).max(366).default([]), context_filter: filtersSchema.default({}),
         compare: z.union([z.literal("previous"), z.object({start_date: exactDate, end_date: exactDate}).strict()]).optional()}).strict(),

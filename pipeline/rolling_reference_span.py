@@ -547,10 +547,10 @@ class _CapturedStore:
     def get_snapshot(self, name, **kwargs):
         snapshot = self.store.get_snapshot(name, **kwargs)
         proof = {"key": name, "revision": snapshot.revision, "sha256": digest(snapshot.data)}
-        from .night_baseline_refresh import QUEUE_KEY
+        from .night_baseline_refresh import QUEUE_KEY, _decode, decode_product_snapshot
 
         if name == QUEUE_KEY:
-            rows = json.loads(snapshot.data)["pending"]
+            rows = _decode(snapshot.data)["pending"]
             for identifier in self.queue_rows.keys() - rows.keys():
                 row = self.queue_rows[identifier]
                 self.completed_keys.update(key for key, planned in self.targets.items()
@@ -558,12 +558,15 @@ class _CapturedStore:
                     and row.get("end_date") == planned["endpoint"] and row.get("channel") == planned["channel"])
             self.queue_rows = rows
         if name in self.targets:
-            product = json.loads(snapshot.data)
+            decoded = decode_product_snapshot(snapshot)
+            product = json.loads(decoded)
             planned = self.targets[name]
             written = self.written.get(name)
             if product.get("args") == planned["args"]:
                 path = self.folder / (digest(name.encode()) + ".json")
                 value = {**proof, "args": product["args"], "source_identity": product["source_identity"],
+                         "content_type": snapshot.content_type, "encoding": snapshot.encoding,
+                         "decoded_sha256": digest(decoded),
                          "endpoint": planned["endpoint"], "window_days": planned["window_days"],
                          "channel": planned["channel"], "written": bool(written)}
                 # A key can be read as a preimage and again after its CAS; only

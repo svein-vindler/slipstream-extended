@@ -36,6 +36,15 @@ entries remain pending.
    observations against the actual published or verified-unchanged postimages.
    Publication alone is not completed verification.
 
+Identity and gzip postimages retain their actual raw bytes, hash, opaque
+revision, content type and encoding. A bounded decoded representation is used
+only for product validation and normal-reader comparison. New proof records bind
+both raw and decoded hashes/references; identity can reuse the same byte proof.
+Older identity-format proof records remain readable. An unchanged gzip product
+is not rewritten merely to make its bytes look like identity JSON. A global
+held count outside the selected scope does not reject otherwise verified work;
+the normal selected-source, unknown-write and no-progress guards still apply.
+
 No product PUT occurs during source collection or local building. A technical
 one-PUT-per-object is still necessary; no separate human approval or job startup
 is required for every curve. The per-window native memory/point limits remain
@@ -78,6 +87,14 @@ builds the exact affected target workset and uses the same local build/publisher
 It does not restart collection, widen the source limit or drain unrelated history.
 The compatible legacy daily mode remains available; selecting the new binding is
 an operator adoption step, not a new schedule.
+
+Affected selection includes existing partial curves as well as missing products.
+When another verified good source day arrives, the normal source hook invalidates
+every affected eligible channel/window and the next ordinary daily flow rebuilds
+those exact targets locally. No manual product selection is required. Coverage
+improves only where the new source actually contributes; gaps, nulls and partial
+coverage are not replaced with invented complete nights. The same dirty-source
+contract applies to qualified complete ISO weeks and calendar months.
 
 After rolling publication and its independent verification, daily mode uses the
 existing bounded calendar publisher for affected completed ISO weeks and calendar

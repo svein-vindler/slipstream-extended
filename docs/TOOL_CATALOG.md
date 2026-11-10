@@ -783,7 +783,7 @@ Distinct activity types with counts.
 
 ### `night_baseline`
 
-Read one bounded precomputed personal night reference product. Each night contributes one within-night median per bin before linear P10/P25/P50/P75/P90. Explicit exclusions, context filters and coverage remain visible. No source-night scan, provider call or write.
+Read stored personal night references, including HR/HRV over 28, 30 or 90 days. end_date is the inclusive wake-date. Each night contributes one within-night median per bin before linear P10/P25/P50/P75/P90. Actual coverage, partial sources, exclusions and context filters remain visible. Reading never fetches source data, recomputes products or writes.
 
 **Effect:** Stored-data read; starts no Garmin job and writes no fitness data.
 
@@ -910,6 +910,7 @@ Read one bounded precomputed personal night reference product. Each night contri
       "enum": [
         "7",
         "28",
+        "30",
         "90",
         "365",
         "custom"

@@ -227,6 +227,12 @@ def run(
                 checked = not unsupported and attempted and value["source_errors"] == 0
                 add(stream, checked, "not_checked" if unsupported or not attempted else "failed" if not checked else
                     "not_ready" if value["days_not_ready"] or incomplete_admission else "checked")
+            hr = result.get("heart_rate")
+            if isinstance(hr, dict):
+                states = [row["status"] for row in hr.get("source_results", [])]
+                checked = bool(states) and all(state in {"stored", "garmin_not_ready"} for state in states)
+                add("heart_rate", checked, "not_checked" if not states else "failed" if not checked
+                    else "not_ready" if "garmin_not_ready" in states else "checked")
         elif kind == "recent-body-sync":
             checked = result["days_checked"] > 0 and result["source_errors"] == 0
             add("body", checked, "not_checked" if not result["days_checked"] else
@@ -260,6 +266,15 @@ def run(
                 startup_saved = True
             result = operation(store)
             source_checks(result)
+            references = result.get("baseline_refresh") if isinstance(result, dict) else None
+            if isinstance(references, dict):
+                entry["baseline_refresh"] = references
+            if isinstance(references, dict) and (
+                references.get("selected_remaining") or references.get("closed_remaining")
+                or references.get("held_periods") or references.get("blocked")
+            ):
+                entry["status"] = "partial"
+                report["status"] = "partial"
             if isinstance(result, dict) and result.get("status") in {
                     "partial", "pending", "idle", "files_unavailable", "coach_pending", "unsupported"}:
                 entry["status"] = result["status"] if result["status"] in {"partial", "pending", "idle"} else "partial"
@@ -339,9 +354,13 @@ def run(
                         health_end=date.fromisoformat(end), client=provider.get()), storage=False)
                 stage("export_summaries", lambda store: summary_export.publish_derived(str(data), store=store, base=base, flow_id=flow_id))
             else:
-                stage("refresh_summaries", lambda store: refresh_summaries.run(
-                    str(data), store=store, client=provider.get(), base=base, flow_id=flow_id))
-            stage("recent_health", lambda store: recent_health.run(days=3, store=store, garmin=provider.get()))
+                summaries = stage("refresh_summaries", lambda store: refresh_summaries.run(
+                    str(data), store=store, client=provider.get(), base=base, flow_id=flow_id,
+                    night_source_checks=True))
+            stage("recent_health", lambda store: recent_health.run(
+                days=3, store=store, garmin=provider.get(),
+                night_references=not request.backfill and isinstance(summaries.get("signals"), dict),
+                heart_rate=summaries.get("signals") if not request.backfill else None))
             stage("recent_body", lambda store: recent_body.run(
                 max_days=3, health_csv=(data / "health_daily.csv").read_bytes(), store=store, garmin=provider.get()))
             if request.include_granular:
