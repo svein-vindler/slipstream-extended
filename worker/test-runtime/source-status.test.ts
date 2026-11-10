@@ -34,6 +34,10 @@ const contract = {...producerMetadata, cases: [
   (await import("./generated/source-status-contract.case-24.json")).default,
   (await import("./generated/source-status-contract.case-25.json")).default,
   (await import("./generated/source-status-contract.case-26.json")).default,
+  (await import("./generated/source-status-contract.case-27.json")).default,
+  (await import("./generated/source-status-contract.case-28.json")).default,
+  (await import("./generated/source-status-contract.case-29.json")).default,
+  (await import("./generated/source-status-contract.case-30.json")).default,
 ]};
 if (contract.cases.length !== caseCount) throw new Error("Synthetic source-status fixture case count changed");
 import { clearSummaryCaches } from "../src/r2-storage";
@@ -152,27 +156,32 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) for (const fixture of contr
     task.meta.c10Resources = { outcome: fixture.outcome, mode: fixture.mode, protocol, counts: { ...counts },
       current_checked: result.sync_status.current_job_source_checked, data_state: result.sync_status.data_state };
     expect(outputSchemas.refresh_status.safeParse(result).success).toBe(true);
-    if (fixture.fatal) {
+    if (fixture.fatal || (fixture.mode === "night" && fixture.outcome === "heart_rate_invalid")) {
       expect(result).toMatchObject({ terminal: false, should_continue_polling: false,
         dispatch_status: { state: "candidate", duplicate_guard_held: true },
         sync_status: { job_state: "unknown", current_job_source_checked: null, current_job_source_checked_at: null } });
       expect(result.data_ready).toBe(false);
       expect(result.sync_status.data_state).not.toBe("source_pending");
-      expect(fixture.diagnostic.status).toBe("failed");
+      expect(fixture.diagnostic.status).toBe(fixture.fatal ? "failed" : "partial");
       expect(fixture.diagnostic.source_checks.some(check => check.checked === false && check.outcome === "failed")).toBe(true);
-      expect(fixture.objects).not.toHaveProperty("refresh/reports/" + fixture.run_id + ".json");
+      if (fixture.fatal) expect(fixture.objects).not.toHaveProperty("refresh/reports/" + fixture.run_id + ".json");
+      else {
+        expect(fixture.objects["refresh/reports/" + fixture.run_id + ".json"].heart_rate_status).toBe("import_error");
+        expect(fixture.checkpoint_bytes_preserved["refresh/checks/v1/health/signals/" + DAY + ".json"]).toBe(true);
+      }
       expect(fixture.canonical_bytes_preserved).toBe(true);
       expect(counts.github_post).toBe(0); expect(counts.github_get).toBe(1);
       expect(counts.r2_control_get).toBe(3); expect(counts.r2_put).toBe(0);
       return;
     }
     const bad = ["wrong_date", "invalid_response", "source_error", "body_wrong_date", "body_invalid_response",
-      "body_unknown", "body_missing_weight", "body_missing_time", "both_errors", "summary_schema"].includes(fixture.outcome);
+      "body_unknown", "body_missing_weight", "body_missing_time", "both_errors", "summary_schema",
+      "heart_rate_invalid", "heart_rate_error"].includes(fixture.outcome);
     expect(result).toMatchObject({ terminal: true, data_ready: fixture.mode === "general" || fixture.outcome === "valid",
       dispatch_status: { state: "verified_terminal", duplicate_guard_held: false },
       sync_status: { kind: fixture.mode, job_state: "completed", source_checked: !bad, current_job_source_checked: !bad,
         current_job_source_checked_at: bad ? null : "2026-10-14T12:00:00+00:00",
-        data_state: bad ? "error" : ["pending", "body_pending", "mixed_pending"].includes(fixture.outcome) ? "source_pending" : fixture.mode === "night" ? "ready" : "unknown" } });
+        data_state: bad ? "error" : ["pending", "body_pending", "mixed_pending", "heart_rate_pending"].includes(fixture.outcome) ? "source_pending" : fixture.mode === "night" ? "ready" : fixture.outcome === "full_valid" ? "partial" : "unknown" } });
     expect(fixture.canonical_bytes_preserved).toBe(true);
     if (fixture.outcome === "body_valid") {
       const day = fixture.objects["health/body-composition/v1/2026/10/" + DAY + ".json"];
@@ -182,8 +191,11 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) for (const fixture of contr
     }
     if (fixture.outcome === "full_valid") {
       expect(fixture.diagnostic.source_checks.map(check => check.scope)).toEqual(
-        ["activities_summary", "health_summary", "sleep", "hrv", "body"]);
+        ["activities_summary", "health_summary", "sleep", "hrv", "heart_rate", "body"]);
       expect(fixture.diagnostic.source_checks.every(check => check.checked)).toBe(true);
+      expect(fixture.diagnostic.status).toBe("partial");
+      const recent = fixture.diagnostic.stages.find(stage => stage.stage === "recent_health");
+      expect(recent?.baseline_refresh).toMatchObject({ status: "calendar_timezone_required", selected_remaining: 18 });
     }
     if (fixture.outcome === "both_errors") {
       expect(fixture.diagnostic.source_checks.filter(check => check.outcome === "failed").map(check => check.scope))
@@ -192,6 +204,7 @@ for (const protocol of ["2025-03-26", "2026-07-28"]) for (const fixture of contr
     }
     if (bad) expect(fixture.checkpoint_bytes_preserved[fixture.outcome === "summary_schema"
       ? "refresh/checks/v1/summary/health/reconciliation.json"
+      : fixture.outcome.startsWith("heart_rate_") ? "refresh/checks/v1/health/signals/" + DAY + ".json"
       : (fixture.outcome.startsWith("body_") || fixture.outcome === "both_errors")
       ? "refresh/checks/v1/health/body_composition/" + DAY + ".json"
       : "refresh/checks/v1/night/" + DAY + ".json"]).toBe(true);

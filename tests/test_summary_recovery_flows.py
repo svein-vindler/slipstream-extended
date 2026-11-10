@@ -247,6 +247,9 @@ def test_shared_initial_general_with_granular_produces_readable_summaries(tmp_pa
         def get_hrv_data(self, requested_day):
             return self.night.get_hrv_data(requested_day)
 
+        def get_heart_rates(self, requested_day):
+            return self.night.get_heart_rates(requested_day)
+
         def get_weigh_ins(self, first, last):
             return self.body.get_daily_weigh_ins(day) if first <= day <= last else {"dateWeightList": []}
 
@@ -258,6 +261,7 @@ def test_shared_initial_general_with_granular_produces_readable_summaries(tmp_pa
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TRAINING_READINESS_ENABLED", "false")
+    monkeypatch.delenv("HEALTH_TIMEZONE", raising=False)
     monkeypatch.setattr("pipeline.sources.garmin_health.time.sleep", lambda seconds: None)
     for module in (activity_refresh, freshness, health_sync, manual_activity_refresh, refresh,
                    refresh_summaries, summary_export, summary_publication):
@@ -280,7 +284,19 @@ def test_shared_initial_general_with_granular_produces_readable_summaries(tmp_pa
     try:
         diagnostic = refresh.run(refresh.RefreshRequest(include_granular=True), data_dir=str(target),
                                  store_factory=factory, login=login)
-        assert diagnostic["status"] == "complete"
+        # Source checks can complete while reference assembly still needs a timezone.
+        assert diagnostic["status"] == "partial"
+        assert next(stage for stage in diagnostic["stages"]
+                    if stage["stage"] == "refresh_summaries")["status"] == "complete"
+        references = next(stage for stage in diagnostic["stages"]
+                          if stage["stage"] == "recent_health")["baseline_refresh"]
+        assert references["status"] == "calendar_timezone_required"
+        assert references["selected_remaining"] == 18
+        assert all(check["checked"] is True for check in diagnostic["source_checks"])
+        assert next(check for check in diagnostic["source_checks"]
+                    if check["scope"] == "heart_rate")["checked"] is True
+        assert [call for call in sdk.night.calls if call[0] == "heart_rate"] == [
+            ("heart_rate", f"2026-10-{number:02d}") for number in range(1, 15)]
         assert len(logins) == 1
         assert json.loads((tmp_path / ".granular/on-demand-baseline.json").read_text()) == []
         manual = json.loads(client.objects["refresh/reports/0.json"]["Body"])
@@ -309,7 +325,18 @@ def test_shared_initial_general_with_granular_produces_readable_summaries(tmp_pa
         sdk.body.calls.clear()
         repeated = refresh.run(refresh.RefreshRequest(include_granular=True), data_dir=str(target),
                                store_factory=factory, login=login)
-        assert repeated["status"] == "complete"
+        assert repeated["status"] == "partial"
+        assert next(stage for stage in repeated["stages"]
+                    if stage["stage"] == "refresh_summaries")["status"] == "complete"
+        references = next(stage for stage in repeated["stages"]
+                          if stage["stage"] == "recent_health")["baseline_refresh"]
+        assert references["status"] == "calendar_timezone_required"
+        assert references["selected_remaining"] == 18
+        assert all(check["checked"] is True for check in repeated["source_checks"])
+        assert next(check for check in repeated["source_checks"]
+                    if check["scope"] == "heart_rate")["checked"] is True
+        assert [call for call in sdk.night.calls if call[0] == "heart_rate"] == [
+            ("heart_rate", "2026-10-12"), ("heart_rate", "2026-10-13"), ("heart_rate", "2026-10-14")]
         assert len(logins) == 1
         assert json.loads((tmp_path / ".granular/on-demand-baseline.json").read_text()) == ["garmin-101"]
         manual = json.loads(client.objects["refresh/reports/0.json"]["Body"])
