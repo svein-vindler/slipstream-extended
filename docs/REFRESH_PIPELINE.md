@@ -15,6 +15,23 @@ repair never logs into Garmin. Explicit historical date/year inputs remain
 available; year imports run newest first. Historical work is never inferred from
 a normal chat request.
 
+Normal recent-night work also retains timed HR using the existing standard
+Garmin GET, without historical archive reloads. General refresh reuses the HR
+responses already collected by its summary stage; activity changes are not a
+prerequisite. Targeted and scheduled night follow-up collect the source dates
+selected by the native night reader, preserving UTC, Garmin-local, travel and
+DST context. Existing health-source-check receipts bind successful HR checks
+to exact canonical bytes. A later scheduled job can reuse qualified sleep/HRV
+and fetch only missing HR; malformed replies and storage failures remain failures.
+
+The same stored-source reference engine processes HR and HRV rolling 28-, 30-
+and 90-day products, prioritizing the newest wake-date. Earlier affected dates
+stay queued when the existing component budget is exhausted and continue on a
+later ordinary invocation. The original bounded week/month tail also remains.
+Private diagnostics distinguish `selected_remaining`, calendar work and source
+outcomes; successful source checks do not imply that deferred references are
+complete. No additional schedule, stage allowance or resource cap is introduced.
+
 An explicitly requested R2-only activity repair may use an older local date.
 It still requires an exact numeric activity ID and a strict `YYYY-MM-DD` date
 no later than tomorrow. The stored canonical activity must have the known

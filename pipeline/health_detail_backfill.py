@@ -16,6 +16,7 @@ from .granular import gzip_json, json_bytes
 from .health_detail import normalize_body_composition, normalize_sleep_detail
 from .health_history_index import sync_dates
 from .night_baseline_refresh import source_capacity
+from .night_followup import run_command
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2BudgetError, R2Store
 from .sources.garmin import _login
@@ -507,7 +508,7 @@ def main():
     parser.add_argument("--skip-sleep", action="store_true")
     args = parser.parse_args()
     try:
-        return run(
+        values = dict(
             max_sleep_days=args.max_sleep_days,
             max_body_days=args.max_body_days,
             retry_failures=args.retry_failures,
@@ -516,6 +517,8 @@ def main():
             repair_body_end=args.repair_body_end,
             skip_sleep=args.skip_sleep,
         )
+        return run_command(
+            run, store_factory=R2Store, login=_login, now=datetime.now(timezone.utc), **values)
     except ValueError as exc:
         parser.error(str(exc))
 

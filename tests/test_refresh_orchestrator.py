@@ -177,6 +177,8 @@ def test_workflow_input_adapter_preserves_targeting_and_correlation(monkeypatch)
 
 
 def test_real_targeted_night_pipeline_keeps_receipts_and_reuses_canonical_bytes(monkeypatch):
+    from datetime import datetime, timezone
+
     from test_fresh_data import DAY, NightGarmin
 
     from pipeline.r2_store import R2Store
@@ -186,6 +188,12 @@ def test_real_targeted_night_pipeline_keeps_receipts_and_reuses_canonical_bytes(
         def today(cls):
             return cls.fromisoformat(DAY)
     monkeypatch.setattr("pipeline.freshness.date", Clock)
+    class Instant(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 30, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr("pipeline.night_baseline_refresh.datetime", Instant)
+    monkeypatch.setenv("HEALTH_TIMEZONE", "Europe/Oslo")
     client = HealthClient()
     source = NightGarmin()
     request = refresh.RefreshRequest(mode="night", wake_date=DAY, run_id="123")

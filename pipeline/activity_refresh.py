@@ -12,6 +12,7 @@ from .activity_backfill import is_job_stopping_error, is_supported_activity
 from .granular import activity_prefix, activity_type, json_bytes, sha256
 from .granular_export import activity_artifact_keys, export_activity
 from .measurements import measured_component
+from .night_followup import run_command
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2BudgetError, R2Store
 from .sources.garmin import _login
@@ -276,12 +277,14 @@ def main():
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     try:
-        return run(
+        values = dict(
             lookback_days=args.lookback_days,
             max_activities=args.max_activities,
             activity_id=args.activity_id,
             force=args.force,
         )
+        return run_command(
+            run, store_factory=R2Store, login=_login, now=datetime.now(timezone.utc), **values)
     except ValueError as exc:
         parser.error(str(exc))
 

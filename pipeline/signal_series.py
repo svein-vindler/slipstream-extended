@@ -5,7 +5,7 @@ import gzip
 import io
 import json
 import math
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
 from botocore.exceptions import ClientError
@@ -252,14 +252,23 @@ class DailySignalCollector:
             raise R2ReadBoundaryError("schema_unverified")
         return channels, data
 
-    def publish(self) -> dict[str, Any]:
+    def publish(self, *, source_checks=False, refresh_references=True) -> dict[str, Any]:
         counts = {"objects_written": 0, "objects_unchanged": 0, "stored_bytes": 0,
                   "get_attempts": 0, "put_attempts": 0, "preserved_channels": 0,
                   "read_bytes": 0, "write_bytes": 0, "valid_points": 0}
+        records = []
+        source_results = []
         for day, incoming in sorted(self.days.items()):
             counts["get_attempts"] += 1
             channels, previous_bytes = self._previous(day)
             counts["read_bytes"] += len(previous_bytes or b"")
+            if source_checks and incoming.get("heart_rate", {}).get("status") == "invalid_response":
+                source_results.append({"date": day, "status": "invalid_response"})
+                # Unknown source shapes never become canonical empty curves.
+                # Other independently valid channels may still be preserved.
+                incoming = {name: value for name, value in incoming.items() if name != "heart_rate"}
+                if not incoming:
+                    continue
             for name, value in incoming.items():
                 previous = channels.get(name, {})
                 if previous.get("status") == "available" and value["status"] != "available":
@@ -282,6 +291,25 @@ class DailySignalCollector:
             counts["objects_written" if changed else "objects_unchanged"] += 1
             counts["stored_bytes"] += len(data)
             counts["valid_points"] += sum(len(channel["readings"]) for channel in channels.values())
-        from .night_baseline_refresh import refresh_pending
-        counts["baseline_refresh"] = refresh_pending(self.store)
+            if source_checks and "heart_rate" in incoming:
+                status = incoming["heart_rate"]["status"]
+                source_results.append({"date": day, "status": {
+                    "available": "stored", "no_data": "garmin_not_ready",
+                    "invalid_response": "invalid_response",
+                }[status]})
+                if status == "available":
+                    snapshot = self.store.get_snapshot(signal_key(day), max_bytes=MAX_STORED_BYTES)
+                    if snapshot.data != data:
+                        raise R2ReadBoundaryError("source_changed")
+                    records.append({"date": day, "source_key": signal_key(day),
+                                    "source_sha256": sha256(data),
+                                    "checked_at": datetime.now(UTC).isoformat()})
+        if source_checks:
+            from .health_sync import finalize_signal_days
+            finalize_signal_days(self.store, records)
+            counts["source_records"] = records
+            counts["source_results"] = source_results
+        if refresh_references:
+            from .night_baseline_refresh import refresh_pending
+            counts["baseline_refresh"] = refresh_pending(self.store)
         return counts
