@@ -94,13 +94,14 @@ def collect_heart_rate(store, garmin, wake_dates, *, timezone=None, reuse_checks
     return result
 
 
-def refresh_references(store, wake_dates):
+def refresh_references(store, wake_dates, *, rolling_windows=None):
     """Finish selected rolling work and retain the existing bounded calendar tail."""
     from .night_baseline_refresh import refresh_pending, refresh_recent_night_references
 
     cache = {}
-    report = refresh_recent_night_references(store, wake_dates=wake_dates, snapshot_cache=cache)
-    tail = refresh_pending(store, snapshot_cache=cache)
+    report = refresh_recent_night_references(store, wake_dates=wake_dates, snapshot_cache=cache,
+                                            rolling_windows=rolling_windows)
+    tail = refresh_pending(store, snapshot_cache=cache, rolling_windows=rolling_windows)
     report["calendar_refresh"] = tail
     for name in ("products_written", "products_unchanged", "periods_completed"):
         report[name] = report.get(name, 0) + tail.get(name, 0)

@@ -20,7 +20,9 @@ completed ISO week. A rolling 365-date reference always requests 365 nights,
 including across a leap year; a full calendar year can contain 366 dates. The
 reader does not calculate missing references or start a sync.
 
-The existing durable queue stores compact eligible/dirty date ranges. A changed
+The existing durable queue stores compact eligible/dirty date ranges. Explicit
+7/365 admission retains its own endpoint ranges; a legacy registration does not
+admit a new extended-window endpoint. Reads preserve older queue representations. A changed
 sleep/HRV source day invalidates every eligible D through d+N-1, not only d.
 HR calendar dependencies use a conservative four-day margin for rolling work;
 the established week/month mapping is unchanged. Bounded discovery checks only
@@ -53,15 +55,18 @@ never append the event again. Stored reads do not perform this write-side repair
 
 ## Existing entry points
 
-Normal recent-night production calls explicitly finish the newest selected wake
-endpoint's HR/HRV 7/28/30/90/365 cohort before older selected endpoints. The ordinary
+Normal recent-night production retains the implicit HR/HRV 28/30/90 cohort,
+prioritizing the newest selected wake-date. New job/workset scopes must explicitly
+select 7/365 or all five windows; installation does not expand an existing scope.
+The ordinary
 local reader computes the bounded cohort from shared snapshots, then the same
 publisher checks the combined source/context proof before and after conditional
 publication. It keeps the existing GET/LIST/PUT, memory and shared write limits;
 the standalone two-row refresh default remains unchanged. A larger recent cohort
 can retain an exact `selected_remaining` and `bounded_pending` result. Later
-ordinary scheduled work drains that remainder without re-dirtying unchanged
-accepted source data. Unrelated unknown intents are retained and do not make a
+invocations with the same selected scope drain that remainder without re-dirtying
+unchanged accepted source data. Default consumers leave unrelated 7/365 work queued
+and exclude it from their selected completion. Unrelated unknown intents are retained and do not make a
 completed selected cohort incomplete; an unknown operation on a selected target
 still prevents completion. The ordinary bounded calendar tail remains separate.
 Existing legacy three-window queue state remains readable. Ordinary source

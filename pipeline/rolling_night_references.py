@@ -15,7 +15,7 @@ CHANNELS = ("heart_rate", "hrv")
 def window_selection(windows=None):
     """Return a canonical bounded selection of exact rolling day counts."""
     if windows is None:
-        return WINDOWS
+        return LEGACY_WINDOWS
     if (not isinstance(windows, (list, tuple)) or not windows
             or any(type(n) is not int or n not in WINDOWS for n in windows)
             or tuple(windows) != tuple(sorted(set(windows)))):
@@ -57,12 +57,27 @@ def remove_day(ranges, day):
 
 def state(queue, *, upgrade=False):
     value = queue.setdefault("rolling", {"eligible": [], "dirty": {
-        str(n): {channel: [] for channel in CHANNELS} for n in WINDOWS
+        str(n): {channel: [] for channel in CHANNELS} for n in LEGACY_WINDOWS
     }})
     if upgrade:
         for n in WINDOWS:
             value["dirty"].setdefault(str(n), {channel: [] for channel in CHANNELS})
     return value
+
+
+def _window_eligible(queue, n):
+    value = queue["rolling"]
+    if "window_eligible" in value:
+        return value["window_eligible"][str(n)]
+    if n in LEGACY_WINDOWS:
+        return value["eligible"]
+    # Earlier extended queues have no per-window admission map. Only their
+    # actual retained slots prove extended work; legacy eligibility alone does
+    # not authorize another window. Reading this evidence never changes bytes.
+    return merge([interval for ranges in value["dirty"].get(str(n), {}).values()
+                  for interval in ranges] + [
+        [row["end_date"], row["end_date"]] for row in queue["pending"].values()
+        if row.get("rolling_window") == n])
 
 
 def validate(queue):
@@ -97,12 +112,18 @@ def validate(queue):
     if "rolling" not in queue:
         return
     value = queue["rolling"]
-    if (not isinstance(value, dict) or set(value) != {"eligible", "dirty"}
+    if (not isinstance(value, dict) or set(value) not in (
+            {"eligible", "dirty"}, {"eligible", "dirty", "window_eligible"})
             or not isinstance(value["dirty"], dict)
             or set(value["dirty"]) not in ({str(n) for n in LEGACY_WINDOWS},
                                            {str(n) for n in WINDOWS})):
         raise ValueError("Unverified rolling registry")
     collections = [value["eligible"]]
+    if "window_eligible" in value:
+        if (not isinstance(value["window_eligible"], dict)
+                or set(value["window_eligible"]) != {str(n) for n in WINDOWS}):
+            raise ValueError("Unverified rolling window eligibility")
+        collections.extend(value["window_eligible"].values())
     for channels in value["dirty"].values():
         if not isinstance(channels, dict) or set(channels) != set(CHANNELS):
             raise ValueError("Unverified rolling channels")
@@ -117,22 +138,39 @@ def validate(queue):
                 raise ValueError("Unverified rolling range")
         if merge(ranges) != ranges:
             raise ValueError("Noncanonical rolling ranges")
-    for channels in value["dirty"].values():
+    for n, channels in value["dirty"].items():
         for ranges in channels.values():
-            if any(intersect(value["eligible"], a, b) != [[a, b]] for a, b in ranges):
+            if any(intersect(value["eligible"], a, b) != [[a, b]]
+                   or intersect(_window_eligible(queue, int(n)), a, b) != [[a, b]] for a, b in ranges):
                 raise ValueError("Rolling endpoint lacks eligibility")
+    if "window_eligible" in value:
+        if any(intersect(value["eligible"], a, b) != [[a, b]]
+               for ranges in value["window_eligible"].values() for a, b in ranges):
+            raise ValueError("Rolling window endpoint lacks eligibility")
 
 
-def register(queue, days):
+def register(queue, days, *, windows=None):
+    selected = window_selection(windows)
     value = state(queue)
-    for day in days:
-        if intersect(value["eligible"], day, day):
-            continue
+    days = tuple(days)
+    if selected != LEGACY_WINDOWS and (
+            any(n not in LEGACY_WINDOWS for n in selected)
+            or any(not intersect(value["eligible"], day, day) for day in days)):
+        if "window_eligible" not in value:
+            value["window_eligible"] = {str(n): [list(pair) for pair in _window_eligible(queue, n)]
+                                        for n in WINDOWS}
+    if any(n not in LEGACY_WINDOWS for n in selected):
         state(queue, upgrade=True)
-        value["eligible"] = merge([*value["eligible"], [day, day]])
-        for channels in value["dirty"].values():
+    for day in days:
+        for n in selected:
+            if intersect(_window_eligible(queue, n), day, day):
+                continue
+            channels = value["dirty"].setdefault(str(n), {channel: [] for channel in CHANNELS})
             for channel in CHANNELS:
                 channels[channel] = merge([*channels[channel], [day, day]])
+            if "window_eligible" in value:
+                value["window_eligible"][str(n)] = merge([*_window_eligible(queue, n), [day, day]])
+        value["eligible"] = merge([*value["eligible"], [day, day]])
 
 
 def source_range(kind, day, window):
@@ -148,10 +186,10 @@ def invalidate(queue, kind, day):
     schedule_discovery(queue, kind, day)
     if "rolling" not in queue:
         return
-    value = state(queue, upgrade=True)
-    for n in WINDOWS:
+    value = state(queue)
+    for n in (int(key) for key in value["dirty"]):
         first, last = source_range(kind, day, n)
-        targets = intersect(value["eligible"], first, last)
+        targets = intersect(_window_eligible(queue, n), first, last)
         for channel in CHANNELS:
             value["dirty"][str(n)][channel] = merge([
                 *value["dirty"][str(n)][channel], *targets,
@@ -177,7 +215,7 @@ def row_identity(name, row):
             == date.fromisoformat(row["end_date"]))
 
 
-def status(queue, *, today=None, sources=None):
+def status(queue, *, today=None, sources=None, windows=None):
     """Count compact rest plus durable rows, optionally intersecting a source cohort.
 
     Sources are (canonical kind, source date) pairs; no historical enumeration.
@@ -185,7 +223,7 @@ def status(queue, *, today=None, sources=None):
     """
     value = queue.get("rolling")
     result = {}
-    for n in WINDOWS:
+    for n in window_selection(windows):
         result[str(n)] = {}
         for channel in CHANNELS:
             ranges = list(value["dirty"].get(str(n), {}).get(channel, [])) if value else []
@@ -249,7 +287,6 @@ def materialize(queue, *, today, limit, max_pending, allowed_sources=None, allow
             if row.get("rolling_window") == n and row.get("channel") == channel:
                 candidates = remove_day(candidates, row["end_date"])
         if candidates and limit and len(queue["pending"]) < max_pending:
-            state(queue, upgrade=True)
             first = candidates[0][0]
             name = f"rolling/{n}/{first}/{channel}"
             queue["pending"][name] = {

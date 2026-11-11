@@ -136,7 +136,7 @@ def test_real_annual_publication_detects_source_change_between_two_physical_fenc
     server.send = change_after_first_target
     with pytest.raises(BaselineRefreshStop) as caught:
         refresh.refresh_pending(sdk_store(server), today="2024-03-01", timezone="Europe/Oslo",
-                                period_names=set(), rolling_endpoints=["2024-03-01"])
+                                period_names=set(), rolling_endpoints=["2024-03-01"], rolling_windows=(365,))
     assert isinstance(caught.value.__cause__, NativeInputError)
     assert str(caught.value.__cause__) == "Night source revision changed"
     assert changed and len([key for key in server.puts if "/baseline/" in key]) == 1
@@ -269,7 +269,7 @@ def test_annual_run_stops_before_any_target_put_on_full_physical_prefix_resource
         server.send = padded
     if overflow == "physical_bytes":
         report = refresh.refresh_pending(sdk_store(server), today="2024-03-01", timezone="Europe/Oslo",
-                                         period_names=set(), rolling_endpoints=["2024-03-01"])
+                                         period_names=set(), rolling_endpoints=["2024-03-01"], rolling_windows=(365,))
         assert report["products_written"] == 0 and report["blocked"]
         io = _IO(sdk_store(server))
         try:
@@ -282,7 +282,7 @@ def test_annual_run_stops_before_any_target_put_on_full_physical_prefix_resource
         return
     with pytest.raises((NativeInputError, BaselineRefreshStop, R2ReadBoundaryError)) as caught:
         refresh.refresh_pending(sdk_store(server), today="2024-03-01", timezone="Europe/Oslo",
-                                period_names=set(), rolling_endpoints=["2024-03-01"])
+                                period_names=set(), rolling_endpoints=["2024-03-01"], rolling_windows=(365,))
     expected = {"context_keys": "schema_unverified", "raw_keys": "schema_unverified",
                 "physical_bytes": "Annual inventory physical byte bound",
                 "page_bytes": "Baseline declared body bound"}[overflow]

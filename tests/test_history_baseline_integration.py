@@ -2,6 +2,7 @@
 
 import json
 from collections import Counter
+from importlib import import_module
 from pathlib import PurePosixPath
 
 import boto3
@@ -36,6 +37,9 @@ def memory_job(monkeypatch, targets):
     from datetime import datetime, timezone
 
     from pipeline import night_baseline_refresh, reference_bulk
+
+    # This lazy consumer also caches shared I/O aliases at import time.
+    import_module("pipeline.rolling_reference_span")
 
     class Calendar(datetime):
         @classmethod
@@ -162,14 +166,15 @@ def test_memory_fixture_does_not_leak_into_later_disk_artifact_reads(tmp_path):
 
     with MonkeyPatch.context() as patch:
         memory_job(patch, [])
-        # Import at the same point as the typed-cohort continuation path.
-        from pipeline import reference_bulk
+        # Import at the typed-cohort and span publication continuation boundary.
+        from pipeline import reference_bulk, rolling_reference_span
 
     body = b"synthetic-disk-artifact"
     path = tmp_path / "scope.json"
     path.write_bytes(body)
     reference = {"path": str(path.resolve()), "bytes": len(body), "sha256": digest(body)}
     assert reference_bulk._pin(reference) == body
+    assert rolling_reference_span._ref(path) == reference
 
 
 class BaselineServer(Server):

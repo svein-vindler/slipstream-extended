@@ -18,6 +18,21 @@ from pipeline.night_products import normalize_args, storage_key
 ENDPOINT = "2024-03-01"
 
 
+@pytest.mark.parametrize("windows,remaining", [
+    (None, 18), ((7, 28, 30, 90, 365), 30), ((365,), 6), ((7,), 6),
+])
+def test_recent_missing_timezone_counts_only_explicitly_selected_windows(windows, remaining):
+    server, _ = seeded(ENDPOINT, 1)
+    before = copy.deepcopy(server.objects)
+    options = {} if windows is None else {"rolling_windows": windows}
+    result = refresh.refresh_recent_night_references(
+        sdk_store(server), wake_dates=[ENDPOINT, "2024-03-02", "2024-03-03"],
+        timezone="Not/A_Real_Zone", **options)
+    assert result == {"status": "calendar_timezone_required", "selected_remaining": remaining}
+    assert server.objects == before
+    assert server.calls == [] and server.puts == []
+
+
 def annual_keys(endpoint=ENDPOINT):
     return {storage_key(normalize_args(
         start_date=(date.fromisoformat(endpoint) - timedelta(days=364)).isoformat(),
@@ -28,7 +43,8 @@ def annual_keys(endpoint=ENDPOINT):
 def recent(store, cache):
     try:
         return refresh.refresh_recent_night_references(
-            store, wake_dates=[ENDPOINT], timezone="Europe/Oslo", snapshot_cache=cache)
+            store, wake_dates=[ENDPOINT], timezone="Europe/Oslo", snapshot_cache=cache,
+            rolling_windows=(365,))
     except refresh.BaselineRefreshStop:
         print(json.dumps({"case": "recent_caller_stopped", "operations": store.operations,
                           "attempted_write_bytes": store._write_bytes}))
@@ -179,7 +195,7 @@ def test_normal_reference_entry_reaches_tail_after_retained_annual_recent_work(m
     server, _ = seeded(ENDPOINT, 1)
     annual_only_queue(server)
     store = sdk_store(server)
-    result = refresh_references(store, [ENDPOINT])
+    result = refresh_references(store, [ENDPOINT], rolling_windows=(365,))
     assert result["selected_remaining"] == 0
     assert result["products_written"] == 2
     assert result["calendar_refresh"]["products_written"] == 0
@@ -207,7 +223,8 @@ def test_combined_annual_batch_defers_without_widening_the_exact_source_window(o
     queue_source(server, [], rolling=queue["rolling"], pending=queue["pending"])
     store = sdk_store(server)
     result = refresh.refresh_pending(store, today=other, timezone="Europe/Oslo", max_periods=8,
-        period_names=set(), rolling_endpoints=[ENDPOINT, other], batch_local_preparation=True)
+        period_names=set(), rolling_endpoints=[ENDPOINT, other], batch_local_preparation=True,
+        rolling_windows=(365,))
     assert result["status"] == "bounded_pending" and result.get("budget_deferred")
     assert result["products_written"] == 0
     assert sum(item["count"] for item in result["rolling_remaining"]["365"].values()) == 4
@@ -224,7 +241,8 @@ def test_recent_missing_or_unknown_timezone_counts_all_supported_products(timezo
     before = copy.deepcopy(server.objects)
     store = sdk_store(server)
     result = refresh.refresh_recent_night_references(
-        store, wake_dates=[ENDPOINT, ENDPOINT], timezone=timezone, snapshot_cache={})
+        store, wake_dates=[ENDPOINT, ENDPOINT], timezone=timezone, snapshot_cache={},
+        rolling_windows=rolling.WINDOWS)
     assert result["status"] == status
     assert result["selected_remaining"] == 10
     if missing:
