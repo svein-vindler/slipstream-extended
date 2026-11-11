@@ -24,14 +24,17 @@ DST context. Existing health-source-check receipts bind successful HR checks
 to exact canonical bytes. A later scheduled job can reuse qualified sleep/HRV
 and fetch only missing HR; malformed replies and storage failures remain failures.
 
-The same stored-source reference engine processes HR and HRV rolling 7-, 28-,
-30-, 90- and 365-day products, prioritizing the newest wake-date. Local and GitHub
-workflow entrypoints use this shared engine. Each rolling period contains the
+The same stored-source reference engine supports HR and HRV rolling 7-, 28-,
+30-, 90- and 365-day products. Local and GitHub workflow entrypoints retain the
+implicit 28/30/90 scope and prioritize the newest wake-date. New job/workset
+scopes explicitly select 7/365 or all five windows; omitted selections never
+expand older plans, cohorts or scheduled work. Each rolling period contains the
 declared number of inclusive wake-dates: seven rolling dates are distinct from
 a completed ISO week, and 365 rolling dates are distinct from a calendar year
 that may contain 366 dates. Earlier affected dates
 stay queued when the existing component budget is exhausted and continue on a
-later ordinary invocation. The original bounded week/month tail also remains.
+later invocation with the same selected scope. Unrelated extended-window work
+does not hold legacy completion. The original bounded week/month tail remains.
 Private diagnostics distinguish `selected_remaining`, calendar work and source
 outcomes; successful source checks do not imply that deferred references are
 complete. No additional schedule, stage allowance or resource cap is introduced.

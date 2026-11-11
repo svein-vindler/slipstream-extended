@@ -36,23 +36,23 @@ def validate_discovery(queue):
 
 
 def schedule_discovery(queue, kind, day):
-    from .rolling_night_references import WINDOWS, merge, source_range
+    from .rolling_night_references import LEGACY_WINDOWS, merge, source_range
 
     if kind not in {"sleep", "hrv", "signals"}:
         raise ValueError("Only admitted night source horizons may be discovered")
-    queue["rolling_discovery"] = merge([*_ranges(queue), list(source_range(kind, day, max(WINDOWS)))])
+    queue["rolling_discovery"] = merge([*_ranges(queue), list(source_range(kind, day, max(LEGACY_WINDOWS)))])
     validate_discovery(queue)
 
 
-def discovery_status(queue, *, today=None, sources=None):
-    from .rolling_night_references import WINDOWS, intersect, merge, source_range
+def discovery_status(queue, *, today=None, sources=None, windows=None):
+    from .rolling_night_references import intersect, merge, source_range, window_selection
 
     ranges = list(_ranges(queue))
     if today is not None:
         ranges = intersect(ranges, date.min.isoformat(), today)
     if sources is not None:
         ranges = merge([target for kind, day in sources
-                        for target in intersect(ranges, *source_range(kind, day, max(WINDOWS)))])
+                        for target in intersect(ranges, *source_range(kind, day, max(window_selection(windows))))])
     return {
         "kind": "endpoint_discovery_scan_candidates",
         "eligibility": "unknown_until_verified_stored_sleep",
@@ -67,21 +67,22 @@ def _subtract(ranges, first, last):
     return subtract(ranges, first, last)
 
 
-def _held_horizons(queue):
+def _held_horizons(queue, windows=None):
     from .night_baseline_refresh import _source
-    from .rolling_night_references import WINDOWS, merge, source_range
+    from .rolling_night_references import merge, source_range, window_selection
 
-    result = [list(source_range("sleep", binding["wake_date"], max(WINDOWS)))
+    maximum = max(window_selection(windows))
+    result = [list(source_range("sleep", binding["wake_date"], maximum))
               for binding in queue.get("rolling_context_intents", {}).values()]
     for row in queue["pending"].values():
         for entries in (row["sources"], row.get("following_sources", {})):
-            result.extend(list(source_range(*_source(key), max(WINDOWS))) for key, binding in entries.items()
+            result.extend(list(source_range(*_source(key), maximum)) for key, binding in entries.items()
                           if binding["state"] == "intent")
     return merge(result)
 
 
 def drain_discovery(store, queue, *, today, max_endpoints=MAX_ENDPOINTS,
-                    snapshot_cache=None, allowed_sources=None):
+                    snapshot_cache=None, allowed_sources=None, windows=None):
     """Observe at most four sleep months and seven positive objects, no writes.
 
     Complete month inventories prove missing candidate dates without daily GETs.
@@ -90,7 +91,7 @@ def drain_discovery(store, queue, *, today, max_endpoints=MAX_ENDPOINTS,
     A source collision or unverified response aborts before queue mutation.
     """
     from .night_baseline_refresh import _decode, _snapshot, _validate_source, require
-    from .rolling_night_references import WINDOWS, intersect, merge, register, source_range
+    from .rolling_night_references import intersect, merge, register, source_range, window_selection
 
     require(type(max_endpoints) is int and 1 <= max_endpoints <= MAX_ENDPOINTS,
             "Choose1-7 discovery endpoints")
@@ -105,8 +106,8 @@ def drain_discovery(store, queue, *, today, max_endpoints=MAX_ENDPOINTS,
     candidates = list(remaining)
     if allowed_sources is not None:
         candidates = merge([target for kind, day in allowed_sources
-                            for target in intersect(candidates, *source_range(kind, day, max(WINDOWS)))])
-    for first, last in _held_horizons(queue):
+                            for target in intersect(candidates, *source_range(kind, day, max(window_selection(windows))))])
+    for first, last in _held_horizons(queue, windows):
         result["held_ranges"].extend(intersect(candidates, first, last))
         candidates = _subtract(candidates, first, last)
     days, snapshots = [], {}
@@ -171,7 +172,7 @@ def drain_discovery(store, queue, *, today, max_endpoints=MAX_ENDPOINTS,
     # All listed positive snapshots have now passed exact fresh revision/size
     # and the canonical source validator; caller CAS makes this progress durable.
     if days:
-        register(queue, days)
+        register(queue, days, windows=windows)
     queue["rolling_discovery"] = remaining
     if snapshot_cache is not None:
         used = sum(len(snapshot.data) for snapshot in snapshot_cache.values())

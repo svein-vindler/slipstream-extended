@@ -5,12 +5,21 @@ from test_rolling_reference_sources import seeded
 from pipeline.rolling_reference_plan import plan_references
 
 
-def test_normal_reference_plan_includes_seven_and365_day_lengths():
+def test_explicit_reference_plan_includes_seven_and365_day_lengths():
+    server, _ = seeded('2026-10-31', 2)
+    result = plan_references(sdk_store(server), ['2026-11-01'],
+        today='2026-11-01', timezone='Europe/Oslo', windows=(7, 28, 30, 90, 365))
+    assert {row['window_days'] for row in result['targets']} == {7, 28, 30, 90, 365}
+    assert len(result['targets']) == 10
+
+
+def test_implicit_reference_plan_still_selects_only_legacy_lengths():
     server, _ = seeded('2026-10-31', 2)
     result = plan_references(sdk_store(server), ['2026-11-01'],
         today='2026-11-01', timezone='Europe/Oslo')
-    assert {row['window_days'] for row in result['targets']} == {7, 28, 30, 90, 365}
-    assert len(result['targets']) == 10
+    assert {row['window_days'] for row in result['targets']} == {28, 30, 90}
+    assert len(result['targets']) == 6
+    assert server.puts == []
 
 
 def test_job_plan_binds_explicit_window_choice_through_existing_public_api(tmp_path):
@@ -29,12 +38,12 @@ def test_job_plan_binds_explicit_window_choice_through_existing_public_api(tmp_p
     assert server.puts == [] and not job.status()['locked']
 
 
-def test_source_change_discovers_full_year_dependency_without_scanning_on_enqueue():
+def test_implicit_source_change_keeps_legacy_discovery_horizon_without_scanning():
     from pipeline.rolling_discovery import discovery_status, schedule_discovery
 
     queue = {'pending': {}}
     schedule_discovery(queue, 'hrv', '2025-01-01')
-    assert discovery_status(queue, today='2026-01-01')['ranges'] == [['2025-01-01', '2025-12-31']]
+    assert discovery_status(queue, today='2026-01-01')['ranges'] == [['2025-01-01', '2025-03-31']]
 
 
 def test_expanded_plan_preserves_legacy_products_partial_coverage_and_verified_cache_reuse():
@@ -43,7 +52,7 @@ def test_expanded_plan_preserves_legacy_products_partial_coverage_and_verified_c
     legacy = plan_references(sdk_store(server), ['2026-11-01'], today='2026-11-01',
         timezone='Europe/Oslo', snapshot_cache=cache, windows=[28, 30, 90])
     expanded = plan_references(sdk_store(server), ['2026-11-01'], today='2026-11-01',
-        timezone='Europe/Oslo', snapshot_cache=cache)
+        timezone='Europe/Oslo', snapshot_cache=cache, windows=(7, 28, 30, 90, 365))
     assert legacy['reads']['operations']['get'] > 0
     assert expanded['reads']['operations']['get'] == 0
     assert expanded['reads']['operations']['list'] > 0  # Cache is not a new source fence.

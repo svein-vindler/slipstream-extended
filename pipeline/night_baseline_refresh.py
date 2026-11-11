@@ -1044,7 +1044,7 @@ def enqueue_verified_sources(store, sources):
 
 
 def register_rolling_endpoints(store, sources, *, today=None, prepared_manifest=None,
-                               prepared_target_keys=None):
+                               prepared_target_keys=None, rolling_windows=None):
     """Activate only endpoints backed by fresh exact, usable stored sleep proofs.
 
     Ordinary re-registration is idempotent. A sealed bulk caller can request
@@ -1059,6 +1059,11 @@ def register_rolling_endpoints(store, sources, *, today=None, prepared_manifest=
         _sealed_preparation(prepared_manifest)
         require(len(sources) <= 7, "Choose at most seven prepared endpoints")
     selected_targets = _selected_prepared_targets(prepared_manifest, prepared_target_keys)
+    selected_windows = rolling.window_selection(
+        sorted({target["window_days"] for target in selected_targets})
+        if selected_targets is not None and rolling_windows is None else rolling_windows)
+    require(selected_targets is None or all(target["window_days"] in selected_windows
+            for target in selected_targets), "Prepared windows outside selected scope")
     local = prepared_manifest.reader_store() if prepared_manifest is not None else None
     io = _IO(store)
     try:
@@ -1108,7 +1113,7 @@ def register_rolling_endpoints(store, sources, *, today=None, prepared_manifest=
             validate_rolling_sources(io, _combined_reference_proof(prepared_proofs),
                 **({"window_days": 365} if any(row["window_days"] == 365 for row in prepared_proofs) else {}))
         if prepared_manifest is None:
-            rolling.register(queue, days)
+            rolling.register(queue, days, windows=selected_windows)
         else:
             require(prepared_target_keys is None or all(
                 target["endpoint"] in days for target in selected_targets),
@@ -1120,13 +1125,15 @@ def register_rolling_endpoints(store, sources, *, today=None, prepared_manifest=
         if before is None or before.data != canonical(queue).encode():
             _save_queue(io, queue, before)
         return {"registered_endpoints": len(set(days)),
-                "rolling_remaining": rolling.status(queue, today=today),
-                "pending_periods": len(queue["pending"])}
+                "rolling_remaining": rolling.status(queue, today=today, windows=selected_windows),
+                "pending_periods": sum(not row.get("rolling_window")
+                    or row["rolling_window"] in selected_windows for row in queue["pending"].values())}
     finally:
         io.close()
 
 
-def refresh_recent_night_references(store, *, wake_dates, timezone=None, snapshot_cache=None):
+def refresh_recent_night_references(store, *, wake_dates, timezone=None, snapshot_cache=None,
+                                    rolling_windows=None):
     """Finish a bounded current-night cohort through the ordinary local producer.
 
     Component counters and the store's write/inventory budget remain shared.
@@ -1136,13 +1143,15 @@ def refresh_recent_night_references(store, *, wake_dates, timezone=None, snapsho
             and all(isinstance(day, str) and date.fromisoformat(day).isoformat() == day
                     for day in wake_dates), "Choose at most three exact wake dates")
     cache = {} if snapshot_cache is None else snapshot_cache
+    selected_windows = rolling.window_selection(rolling_windows)
     if not wake_dates:
-        report = refresh_pending(store, timezone=timezone, snapshot_cache=cache)
+        report = refresh_pending(store, timezone=timezone, snapshot_cache=cache,
+                                 rolling_windows=selected_windows)
         return {**report, "selected_remaining": None, "selected_status": "not_requested"}
     from .native_night import zone
 
     timezone = timezone or os.environ.get("HEALTH_TIMEZONE")
-    products_per_endpoint = len(rolling.window_selection()) * len(rolling.CHANNELS)
+    products_per_endpoint = len(selected_windows) * len(rolling.CHANNELS)
     if zone(timezone) is None:
         return {"status": "calendar_timezone_required",
                 "selected_remaining": products_per_endpoint * len(set(wake_dates))}
@@ -1172,7 +1181,7 @@ def refresh_recent_night_references(store, *, wake_dates, timezone=None, snapsho
     missing = products_per_endpoint * (len(dates) - len(available))
     if not available:
         return {"status": "not_ready", "selected_remaining": missing, "missing_endpoints": len(dates)}
-    registered = register_rolling_endpoints(store, sources, today=today)
+    registered = register_rolling_endpoints(store, sources, today=today, rolling_windows=selected_windows)
 
     def remaining(report):
         return sum(any(first <= day <= last for first, last in item["ranges"])
@@ -1188,7 +1197,7 @@ def refresh_recent_night_references(store, *, wake_dates, timezone=None, snapsho
         previous = remaining(current)
         report = refresh_pending(store, today=today, timezone=timezone, max_periods=8,
             period_names=set(), rolling_endpoints=[day], snapshot_cache=cache,
-            batch_local_preparation=True)
+            batch_local_preparation=True, rolling_windows=selected_windows)
         reports.append(report)
         current = report
         if remaining(current) >= previous or report.get("budget_deferred"):
@@ -1221,19 +1230,23 @@ def _selected_prepared_targets(prepared_manifest, prepared_target_keys):
 def _register_prepared_endpoints(queue, days, targets, *, include_existing=False):
     """Admit declared slots, preserving prior dirty ranges and pending ownership."""
     previous = copy.deepcopy(queue.get("rolling"))
-    rolling.register(queue, days)
+    for day in sorted(set(days)):
+        windows = sorted({target["window_days"] for target in targets if target["endpoint"] == day})
+        if windows:
+            rolling.register(queue, [day], windows=windows)
     value = queue["rolling"]
-    new_days = {day for day in days if previous is None
-                or not rolling.intersect(previous["eligible"], day, day)}
+    registered = copy.deepcopy(value["dirty"])
     pending_targets = {(row.get("rolling_window"), row.get("channel"), row["end_date"])
                        for row in queue["pending"].values()}
-    for n in rolling.WINDOWS:
+    for n in (int(key) for key in value["dirty"]):
         for channel in rolling.CHANNELS:
             prior = previous["dirty"].get(str(n), {}).get(channel, []) if previous else []
             added = [[target["endpoint"], target["endpoint"]] for target in targets
-                     if target["endpoint"] in (set(days) if include_existing else new_days)
+                     if target["endpoint"] in days
                      and target["window_days"] == n
                      and target["channel"] == channel
+                     and (include_existing or rolling.intersect(
+                         registered[str(n)][channel], target["endpoint"], target["endpoint"]))
                      and (not include_existing
                           or (n, channel, target["endpoint"]) not in pending_targets)]
             value["dirty"][str(n)][channel] = rolling.merge([*prior, *added])
@@ -1263,7 +1276,7 @@ def _materialize_prepared(queue, targets, **kwargs):
     return True
 
 
-def rolling_cohort_status(queue, sources=None, *, today=None):
+def rolling_cohort_status(queue, sources=None, *, today=None, rolling_windows=None):
     """Public compact remaining report for a bounded local source cohort.
 
     Accept canonical keys, exact proof dictionaries, or (kind, date) pairs.
@@ -1273,7 +1286,7 @@ def rolling_cohort_status(queue, sources=None, *, today=None):
         _source(item["key"] if isinstance(item, dict) else item) if isinstance(item, (str, dict))
         else tuple(item) for item in sources
     ]
-    return rolling.status(queue, today=today, sources=selected)
+    return rolling.status(queue, today=today, sources=selected, windows=rolling_windows)
 
 
 def _proof(reader, requested):
@@ -1711,6 +1724,11 @@ def refresh_pending(
     day = today
     seal = _sealed_preparation(prepared_manifest) if prepared_manifest is not None else None
     prepared_targets = _selected_prepared_targets(prepared_manifest, prepared_target_keys)
+    selected_windows = rolling.window_selection(
+        sorted({target["window_days"] for target in prepared_targets})
+        if prepared_targets is not None and rolling_windows is None else rolling_windows)
+    require(prepared_targets is None or all(target["window_days"] in selected_windows
+            for target in prepared_targets), "Prepared windows outside selected scope")
     require(prepared_target_keys is None or rolling_endpoints is not None and all(
         target["endpoint"] in rolling_endpoints for target in prepared_targets),
         "Prepared targets outside refresh endpoints")
@@ -1738,18 +1756,20 @@ def refresh_pending(
             )
             if changed:
                 revision = _save_queue(io, queue, revision)
-        report["held_periods"] = (sum(_held(row) for row in queue["pending"].values())
+        scoped_rows = [row for row in queue["pending"].values()
+                       if not row.get("rolling_window") or row["rolling_window"] in selected_windows]
+        report["held_periods"] = (sum(_held(row) for row in scoped_rows)
                                   + sum(binding["state"] == "intent" for binding in
                                         queue.get("rolling_context_intents", {}).values()))
-        report["rolling_remaining"] = rolling.status(queue)
-        report["discovery_remaining"] = discovery_status(queue)
+        report["rolling_remaining"] = rolling.status(queue, windows=selected_windows)
+        report["discovery_remaining"] = discovery_status(queue, windows=selected_windows)
         report["pending"] = (
             sum(not row.get("rolling_window") for row in queue["pending"].values())
             + sum(item["count"] for channels in report["rolling_remaining"].values()
                   for item in channels.values())
             + report["discovery_remaining"]["count"]
         )
-        if not queue["pending"] and not queue.get("rolling_context_intents") and not report["discovery_remaining"]["count"] and not any(
+        if not scoped_rows and not queue.get("rolling_context_intents") and not report["discovery_remaining"]["count"] and not any(
             item["count"] for channels in report["rolling_remaining"].values()
             for item in channels.values()
         ):
@@ -1766,7 +1786,7 @@ def refresh_pending(
             if zone(timezone) is None:
                 return {
                     **report,
-                    "pending_materialized": len(queue["pending"]),
+                    "pending_materialized": len(scoped_rows),
                     "status": "calendar_timezone_required",
                     "closed_pending": None,
                     "deferred_open": None,
@@ -1782,7 +1802,7 @@ def refresh_pending(
             discovery_before = copy.deepcopy(queue)
             snapshot_cache = {} if snapshot_cache is None else snapshot_cache
             discovery = drain_discovery(io, queue, today=day, snapshot_cache=snapshot_cache,
-                                        allowed_sources=allowed)
+                                        allowed_sources=allowed, windows=selected_windows)
             report["discovery"] = discovery
             if discovery["changed"]:
                 if not store.can_write_group(attempts=1 + reserve_writes,
@@ -1801,7 +1821,7 @@ def refresh_pending(
         )
         materialize_args = {"today": day, "limit": max_periods, "max_pending": MAX_PENDING,
                             "allowed_sources": allowed, "allowed_endpoints": rolling_endpoints,
-                            "allowed_windows": rolling_windows}
+                            "allowed_windows": selected_windows}
         if not calendar_waiting and (
             rolling.materialize(queue, **materialize_args) if prepared_targets is None
             else _materialize_prepared(queue, prepared_targets, **materialize_args)
@@ -1819,7 +1839,7 @@ def refresh_pending(
             name
             for name, row in sorted(queue["pending"].items())
             if (row.get("rolling_window") and (rolling_endpoints is None or row["end_date"] in rolling_endpoints)
-                and row["rolling_window"] in rolling.window_selection(rolling_windows)
+                and row["rolling_window"] in selected_windows
                 and (allowed is None or any(
                 a <= row["end_date"] <= b for kind, source_day in allowed
                 for a, b in [rolling.source_range(kind, source_day, row["rolling_window"])]
@@ -1983,11 +2003,12 @@ def refresh_pending(
                 _ordinary_gate=_ORDINARY_COHORT_PREPARATION if batch_local_preparation else None)
             revision = published["queue_revision"]
         report["local_snapshot_hits"] = reader.local_snapshot_hits
-        report["pending_materialized"] = len(queue["pending"])
-        report["rolling_remaining"] = rolling.status(queue)
-        report["rolling_eligible_remaining"] = rolling.status(queue, today=day)
-        report["discovery_remaining"] = discovery_status(queue)
-        report["discovery_eligible_remaining"] = discovery_status(queue, today=day)
+        report["pending_materialized"] = sum(not row.get("rolling_window")
+            or row["rolling_window"] in selected_windows for row in queue["pending"].values())
+        report["rolling_remaining"] = rolling.status(queue, windows=selected_windows)
+        report["rolling_eligible_remaining"] = rolling.status(queue, today=day, windows=selected_windows)
+        report["discovery_remaining"] = discovery_status(queue, windows=selected_windows)
+        report["discovery_eligible_remaining"] = discovery_status(queue, today=day, windows=selected_windows)
         report["rolling_pending"] = sum(
             item["count"] for channels in report["rolling_remaining"].values()
             for item in channels.values()
@@ -2030,9 +2051,10 @@ def refresh_pending(
             component_operations=io.counts(),
         )
         if queue is not None:
-            report["rolling_remaining"] = rolling.status(queue)
-            report["discovery_remaining"] = discovery_status(queue)
-            report["pending_materialized"] = len(queue["pending"])
+            report["rolling_remaining"] = rolling.status(queue, windows=selected_windows)
+            report["discovery_remaining"] = discovery_status(queue, windows=selected_windows)
+            report["pending_materialized"] = sum(not row.get("rolling_window")
+                or row["rolling_window"] in selected_windows for row in queue["pending"].values())
             report["pending"] = (
                 sum(not row.get("rolling_window") for row in queue["pending"].values())
                 + sum(item["count"] for channels in report["rolling_remaining"].values()

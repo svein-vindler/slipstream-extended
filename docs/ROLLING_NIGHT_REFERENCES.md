@@ -5,7 +5,10 @@ mode, see [Local bulk night references](LOCAL_REFERENCE_BULK.md).
 
 The existing `pipeline.history_backfill` job can plan historical 7/28/30/90/365-date
 HR/HRV products and publish them through its existing queue and owner protocol.
-The explicit planning commands below support selected stored-only work. Routine
+The explicit planning commands below support selected stored-only work. Omitted
+window selections remain 28/30/90; a new job/workset must explicitly declare 7/365
+or all five windows. Unrelated extended-window work is not part of legacy
+completion or implicit discovery, which retains its 90-day horizon. Routine
 daily continuation needs no operator CLI: the existing daily worker also drains
 its persistent source cohort through finite reference-only successors. Neither
 path searches the bucket for all historical endpoints.
@@ -181,7 +184,7 @@ pause consumers before any rollback and review that compatibility boundary.
 
 ## Explicit rolling window selection
 
-The read-only Python planner defaults to `7, 28, 30, 90, 365` and reports its
+The read-only Python planner defaults to `28, 30, 90` and reports its
 selection. Existing immutable job plans, bulk scopes, endpoint policies and
 worksets without a `windows` declaration retain `28, 30, 90`. New declarations
 are sorted, unique, nonempty subsets of the five supported exact day counts.

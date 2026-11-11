@@ -1571,7 +1571,8 @@ def _publish_store(
             from .night_baseline_refresh import register_rolling_endpoints
 
             register_rolling_endpoints(reference_store, rolling_plan["verified_sleep_sources"],
-                                       today=rolling_plan["today"])
+                                       today=rolling_plan["today"],
+                                       rolling_windows=rolling_plan.get("windows"))
         period_names = None
         if finalize_dates is not None:
             period_names = set()
@@ -1644,9 +1645,8 @@ def _publish_store(
             current_queue = reference_store.queue_snapshot
             if current_queue is None:
                 raise Stop("rolling_queue_unverified")
-            remaining = rolling.status(current_queue, today=rolling_plan["today"])
             selected_windows = rolling.window_selection(rolling_plan.get("windows", rolling.LEGACY_WINDOWS))
-            remaining = {str(width): remaining[str(width)] for width in selected_windows}
+            remaining = rolling.status(current_queue, today=rolling_plan["today"], windows=selected_windows)
             count = 0
             for channels in remaining.values():
                 for item in channels.values():
@@ -1694,15 +1694,16 @@ def _publish_store(
                 sources = [("signals" if row["stream"] == "hr" else "hrv", row["date"])
                            for row in state["rows"] if row["date"] in finalize_dates]
                 queue = reference_store.queue_snapshot
-                remaining = rolling.status(queue, today=closure_day, sources=sources)
+                cohort_windows = rolling_plan.get("windows") if rolling_plan is not None else None
+                remaining = rolling.status(queue, today=closure_day, sources=sources, windows=cohort_windows)
                 discovery = rolling_discovery.discovery_status(
-                    queue, today=closure_day, sources=sources,
+                    queue, today=closure_day, sources=sources, windows=cohort_windows,
                 )
                 rolling_count = sum(item["count"] for channels in remaining.values()
                                     for item in channels.values())
                 closed += rolling_count + discovery["count"]
                 for name, row in rows.items():
-                    if not row.get("rolling_window") or not any(
+                    if str(row.get("rolling_window")) not in remaining or not any(
                         first <= row["end_date"] <= last
                         for first, last in remaining[str(row["rolling_window"])][row["channel"]]["ranges"]
                     ):

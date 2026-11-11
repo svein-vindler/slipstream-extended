@@ -253,11 +253,13 @@ def _child_main(workflow, event, scenario, directory):
 
 def invoke(tmp_path, workflow, *, event="workflow_dispatch", scenario="no_work"):
     driver = "import runpy,sys; ns=runpy.run_path(sys.argv[1]); ns['_child_main'](*sys.argv[2:])"
+    child_env = _synthetic_environment()
+    child_env["PYTHONPATH"] = str(ROOT.resolve())
     result = subprocess.run(
         [sys.executable, "-B", "-X", "utf8", "-c", driver, str(Path(__file__).resolve()),
          workflow, event, scenario, str(tmp_path)],
         cwd=ROOT, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
-        env=_synthetic_environment(),
+        env=child_env,
     )
     assert (tmp_path / "receipt.json").is_file(), result.stderr
     receipt = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))

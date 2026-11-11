@@ -98,8 +98,9 @@ an operator adoption step, not a new schedule.
 
 Affected selection includes existing partial curves as well as missing products.
 When another verified good source day arrives, the normal source hook invalidates
-every affected eligible channel/window and the next ordinary daily flow rebuilds
-those exact targets locally. No manual product selection is required. Coverage
+every affected admitted channel/window. A later caller with that selected scope
+rebuilds those exact targets locally; default 28/30/90 callers do not adopt
+unrelated 7/365 work. No manual product selection is required. Coverage
 improves only where the new source actually contributes; gaps, nulls and partial
 coverage are not replaced with invented complete nights. The same dirty-source
 contract applies to qualified complete ISO weeks and calendar months.
