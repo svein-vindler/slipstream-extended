@@ -1084,7 +1084,7 @@ def register_rolling_endpoints(store, sources, *, today=None, prepared_manifest=
                     and value.get("date") == day and _validate_source(kind, day, value),
                     "Endpoint sleep unavailable")
             if prepared_manifest is not None:
-                target = max((target for target in prepared_manifest.targets
+                target = max((target for target in selected_targets
                     if target["endpoint"] == day), key=lambda target: target["window_days"], default=None)
                 require(target is not None, "Prepared endpoint outside sealed scope")
                 artifact = prepared_manifest.product_for(target["key"])
@@ -1095,12 +1095,18 @@ def register_rolling_endpoints(store, sources, *, today=None, prepared_manifest=
                 require(binding.get("status") == "present" and binding.get("revision") == snapshot.revision
                         and binding.get("size") == len(snapshot.data)
                         and binding.get("sha256") == item["sha256"], "Prepared endpoint proof changed")
-                prepared_proofs.append({"proof": proof})
+                prepared_proofs.append({"proof": proof, "window_days": target["window_days"]})
             days.append(day)
         if prepared_proofs:
             from .night_reference_sources import validate_rolling_sources
 
-            validate_rolling_sources(io, _combined_reference_proof(prepared_proofs))
+            annual_endpoints = sorted({target["endpoint"] for target in selected_targets
+                                       if target["window_days"] == 365})
+            authorize = getattr(io, "authorize_annual_endpoints", None)
+            if annual_endpoints and authorize is not None:
+                authorize(annual_endpoints)
+            validate_rolling_sources(io, _combined_reference_proof(prepared_proofs),
+                **({"window_days": 365} if any(row["window_days"] == 365 for row in prepared_proofs) else {}))
         if prepared_manifest is None:
             rolling.register(queue, days)
         else:
@@ -1136,8 +1142,10 @@ def refresh_recent_night_references(store, *, wake_dates, timezone=None, snapsho
     from .native_night import zone
 
     timezone = timezone or os.environ.get("HEALTH_TIMEZONE")
+    products_per_endpoint = len(rolling.window_selection()) * len(rolling.CHANNELS)
     if zone(timezone) is None:
-        return {"status": "calendar_timezone_required", "selected_remaining": 6 * len(set(wake_dates))}
+        return {"status": "calendar_timezone_required",
+                "selected_remaining": products_per_endpoint * len(set(wake_dates))}
     today = _today(timezone)
     dates = sorted(set(wake_dates))
     require(all(day <= today for day in dates), "Wake endpoint is not yet available")
@@ -1161,7 +1169,7 @@ def refresh_recent_night_references(store, *, wake_dates, timezone=None, snapsho
                 cache[key] = snapshot
     finally:
         io.close()
-    missing = 6 * (len(dates) - len(available))
+    missing = products_per_endpoint * (len(dates) - len(available))
     if not available:
         return {"status": "not_ready", "selected_remaining": missing, "missing_endpoints": len(dates)}
     registered = register_rolling_endpoints(store, sources, today=today)
@@ -1221,7 +1229,7 @@ def _register_prepared_endpoints(queue, days, targets, *, include_existing=False
                        for row in queue["pending"].values()}
     for n in rolling.WINDOWS:
         for channel in rolling.CHANNELS:
-            prior = previous["dirty"][str(n)][channel] if previous else []
+            prior = previous["dirty"].get(str(n), {}).get(channel, []) if previous else []
             added = [[target["endpoint"], target["endpoint"]] for target in targets
                      if target["endpoint"] in (set(days) if include_existing else new_days)
                      and target["window_days"] == n
@@ -1236,6 +1244,7 @@ def _materialize_prepared(queue, targets, **kwargs):
     view = copy.deepcopy(queue)
     if "rolling" not in view:
         return False
+    rolling.state(view, upgrade=True)
     for n in rolling.WINDOWS:
         for channel in rolling.CHANNELS:
             ranges = view["rolling"]["dirty"][str(n)][channel]
@@ -1378,8 +1387,14 @@ def _preserve_reference(store, queue, queue_revision, row, key, before):
 
 def prepare_reference(values, args, proof):
     """Build the same bounded baseline without any storage or queue operation."""
-    require(type(values) is list and 1 <= len(values) <= 90, "Native reference window bound")
     args = normalize_args(period="custom", **args)
+    annual = (date.fromisoformat(args["end_date"]) - date.fromisoformat(args["start_date"])).days == 364
+    require(type(values) is list and (1 <= len(values) <= 90 or annual and len(values) == 365),
+            "Native reference window bound")
+    if len(values) > 90:
+        require([night.get("wake_date") for night in values] == [
+            (date.fromisoformat(args["start_date"]) + timedelta(days=index)).isoformat()
+            for index in range(365)], "Explicit365 calendar coverage required")
     for night in values:
         observed = night["channels"][args["channel"]]
         if any(observed["quality"][field] for field in
@@ -1447,11 +1462,16 @@ def _prepared_value(artifact, row):
             and hashlib.sha256(canonical(proof).encode()).hexdigest() == artifact["source_proof_sha256"],
             "Prepared reference proof changed")
     inputs = artifact["prior_inputs"]
-    require(type(inputs) is list and 1 <= len(inputs) <= 90
+    annual = (date.fromisoformat(args["end_date"]) - date.fromisoformat(args["start_date"])).days == 364
+    require(type(inputs) is list and (1 <= len(inputs) <= 90 or annual and len(inputs) == 365)
             and all(type(item) is dict and set(item) == {
                 "wake_date", "status", "channel_status", "source_dates", "source_revisions"}
                 and type(item["source_dates"]) is list and type(item["source_revisions"]) is list
                 for item in inputs), "Prepared reference availability changed")
+    if len(inputs) > 90:
+        require([item["wake_date"] for item in inputs] == [
+            (date.fromisoformat(args["start_date"]) + timedelta(days=index)).isoformat()
+            for index in range(365)], "Prepared365 availability dates changed")
     return value, body.encode(), proof
 
 
@@ -1588,7 +1608,9 @@ def publish_prepared_rows(io, queue, revision, rows, *, report, reserve_writes=0
             return False
         from .night_reference_sources import rolling_fence_list_bound
 
-        lists = rolling_fence_list_bound(proof) if rolling_group else 4 * len(_context_months(proof["lists"]))
+        lists = (rolling_fence_list_bound(proof,
+            **({"window_days": 365} if any(item["row"].get("rolling_window") == 365 for item in group) else {}))
+            if rolling_group else 4 * len(_context_months(proof["lists"])))
         return io.counts()["list"] + 2 * lists <= 100
 
     for record in records:
@@ -1616,8 +1638,18 @@ def publish_prepared_rows(io, queue, revision, rows, *, report, reserve_writes=0
     revision = _save_queue(io, queue, revision)
     from .night_reference_sources import validate_rolling_sources
 
-    validate = validate_rolling_sources if rolling_group else _validate_sources
-    validate(io, proof)
+    def validate_current():
+        if rolling_group:
+            annual_endpoints = sorted({item["row"]["end_date"] for item in chosen
+                                       if item["row"].get("rolling_window") == 365})
+            authorize = getattr(io, "authorize_annual_endpoints", None)
+            if annual_endpoints and authorize is not None:
+                authorize(annual_endpoints)
+            validate_rolling_sources(io, proof,
+                **({"window_days": 365} if any(item["row"].get("rolling_window") == 365 for item in chosen) else {}))
+        else:
+            _validate_sources(io, proof)
+    validate_current()
     for record in chosen:
         row = record["row"]
         for key, data, before, _ in record["chosen"]:
@@ -1632,7 +1664,7 @@ def publish_prepared_rows(io, queue, revision, rows, *, report, reserve_writes=0
             row.pop("inflight")
             revision = _save_queue(io, queue, revision)
             report["products_written"] += 1
-    validate(io, proof)
+    validate_current()
     completed = []
     for record in chosen:
         if len(record["chosen"]) < len(record["pending"]):
@@ -1654,7 +1686,7 @@ def publish_prepared_rows(io, queue, revision, rows, *, report, reserve_writes=0
 def refresh_pending(
     store, *, today=None, timezone=None, max_periods=MAX_PERIODS, reserve_writes=0,
     snapshot_cache=None, period_names=None, rolling_sources=None, rolling_endpoints=None,
-    prepared_manifest=None, prepared_target_keys=None, batch_local_preparation=False,
+    prepared_manifest=None, prepared_target_keys=None, batch_local_preparation=False, rolling_windows=None,
 ):
     """Bounded stored-only drain with optional verified local calculation inputs.
 
@@ -1768,7 +1800,8 @@ def refresh_pending(
             for name, row in queue["pending"].items()
         )
         materialize_args = {"today": day, "limit": max_periods, "max_pending": MAX_PENDING,
-                            "allowed_sources": allowed, "allowed_endpoints": rolling_endpoints}
+                            "allowed_sources": allowed, "allowed_endpoints": rolling_endpoints,
+                            "allowed_windows": rolling_windows}
         if not calendar_waiting and (
             rolling.materialize(queue, **materialize_args) if prepared_targets is None
             else _materialize_prepared(queue, prepared_targets, **materialize_args)
@@ -1786,6 +1819,7 @@ def refresh_pending(
             name
             for name, row in sorted(queue["pending"].items())
             if (row.get("rolling_window") and (rolling_endpoints is None or row["end_date"] in rolling_endpoints)
+                and row["rolling_window"] in rolling.window_selection(rolling_windows)
                 and (allowed is None or any(
                 a <= row["end_date"] <= b for kind, source_day in allowed
                 for a, b in [rolling.source_range(kind, source_day, row["rolling_window"])]
@@ -1811,9 +1845,25 @@ def refresh_pending(
                     for index in range((date.fromisoformat(last) - date.fromisoformat(first)).days + 1)]
             from .night_reference_sources import prime_rolling_list_bound
 
-            if io.counts()["list"] + prime_rolling_list_bound(days) > 100:
+            annual_endpoints = sorted({queue["pending"][name]["end_date"] for name in selected
+                                      if queue["pending"][name].get("rolling_window") == 365})
+            annual_kwargs = {"window_days": 365} if annual_endpoints else {}
+            if annual_endpoints:
+                # The assembly prime admits one exact annual window. Combined
+                # endpoints retain their ordinary per-row route; never widen it.
+                if (len(days) != 365 or len(annual_endpoints) > 7
+                        or (date.fromisoformat(annual_endpoints[-1])
+                            - date.fromisoformat(annual_endpoints[0])).days > 6):
+                    raise ComponentBudgetDeferred("Local annual cohort calendar budget deferred")
+                authorize = getattr(io, "authorize_annual_endpoints", None)
+                if authorize is not None:
+                    authorize(annual_endpoints)
+            assembly_lists = prime_rolling_list_bound(days, **annual_kwargs)
+            # Annual physical-year inventories and BOTH fresh fences share the
+            # same phase budget. Legacy batch pricing remains unchanged.
+            if io.counts()["list"] + assembly_lists * (3 if annual_endpoints else 1) > 100:
                 raise ComponentBudgetDeferred("Local cohort inventory budget deferred")
-            reader.prime_rolling_sources(days)
+            reader.prime_rolling_sources(days, **annual_kwargs)
         for name in selected:
             row = queue["pending"][name]
             is_rolling = bool(row.get("rolling_window"))
@@ -1868,16 +1918,22 @@ def refresh_pending(
                     prime_rolling_list_bound,
                 )
 
-                assembly_lists = prime_rolling_list_bound(requested)
+                annual_kwargs = {"window_days": 365} if row.get("rolling_window") == 365 else {}
+                authorize = getattr(io, "authorize_annual_endpoints", None)
+                if annual_kwargs and authorize is not None:
+                    authorize([row["end_date"]])
+                assembly_lists = prime_rolling_list_bound(requested, **annual_kwargs)
             else:
                 assembly_lists = sum(wake not in nights for wake in requested)
+            fence_lists = (assembly_lists if is_rolling and row.get("rolling_window") == 365
+                           else _context_fence_lists(requested))
             if (not batch_local_preparation
-                    and lists_used + assembly_lists + 2 * _context_fence_lists(requested) > 100):
+                    and lists_used + assembly_lists + 2 * fence_lists > 100):
                 report.setdefault("budget_deferred", []).append(name)
                 break
             try:
                 if is_rolling and not batch_local_preparation:
-                    reader.prime_rolling_sources(requested)
+                    reader.prime_rolling_sources(requested, **annual_kwargs)
                     nights = {}
                 for wake in requested:
                     if wake not in nights:

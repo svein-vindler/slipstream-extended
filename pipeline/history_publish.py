@@ -8,7 +8,7 @@ import re
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -438,6 +438,26 @@ class _ReferenceStore:
         self.queue_rows = None
         self.queue_snapshot = None
         self.queue_bytes = 0
+        self.annual_endpoints = set()
+        self.annual_prefixes = {}
+
+    def authorize_annual_endpoints(self, endpoints):
+        """Only typed365 producer rows may admit these finite physical year prefixes."""
+        from .night_products import calendar_day
+        from .night_reference_sources import rolling_source_prefixes
+
+        if (not isinstance(endpoints, (list, tuple)) or not 1 <= len(endpoints) <= 7
+                or any(not isinstance(day, str) or calendar_day(day).isoformat() != day for day in endpoints)):
+            raise Stop("annual_reference_endpoint_bound")
+        selected = sorted(self.annual_endpoints | set(endpoints))
+        if len(selected) > 7 or (calendar_day(selected[-1]) - calendar_day(selected[0])).days > 6:
+            raise Stop("annual_reference_endpoint_bound")
+        prefixes = {}
+        for endpoint in selected:
+            last = calendar_day(endpoint)
+            dates = [(last - timedelta(days=index)).isoformat() for index in range(365)]
+            prefixes.update(rolling_source_prefixes(dates, window_days=365))
+        self.annual_endpoints, self.annual_prefixes = set(selected), prefixes
 
     def __getattr__(self, name):
         return getattr(self.store, name)
@@ -516,7 +536,9 @@ class _ReferenceStore:
         # physical guard still charges every page and verifies the raw envelope.
         canonical = re.fullmatch(r"health/(?:sleep/v1|hrv|signals/v1)/[0-9]{4}/[0-9]{2}/", prefix)
         context = re.fullmatch(r"health/night-context/v1/[0-9]{4}/[0-9]{2}/", prefix)
-        if not (canonical and max_keys == 63 or context and max_keys == 3101):
+        annual = (prefix in self.annual_prefixes and type(max_keys) is int
+                  and self.annual_prefixes[prefix] == max_keys)
+        if not (canonical and max_keys == 63 or context and max_keys == 3101 or annual):
             raise Stop("reference_prefix_outside_contract")
         self.guard.prefixes.add(prefix)
         return self.store.list_revisions_bounded(prefix, max_keys=max_keys)
@@ -1598,6 +1620,7 @@ def _publish_store(
             timezone=rolling_plan["timezone"] if rolling_plan else calendar_slice.timezone if calendar_slice else None,
             period_names=set() if defer_references or rolling_plan is not None else period_names,
             rolling_endpoints=rolling_plan["endpoints"] if rolling_plan is not None else None,
+            rolling_windows=rolling_plan.get("windows", (28, 30, 90)) if rolling_plan is not None else None,
             rolling_sources=[] if defer_references or calendar_slice is not None else (
                 [("signals" if row["stream"] == "hr" else "hrv", row["date"])
                  for row in state["rows"] if row["date"] in finalize_dates]
@@ -1622,6 +1645,8 @@ def _publish_store(
             if current_queue is None:
                 raise Stop("rolling_queue_unverified")
             remaining = rolling.status(current_queue, today=rolling_plan["today"])
+            selected_windows = rolling.window_selection(rolling_plan.get("windows", rolling.LEGACY_WINDOWS))
+            remaining = {str(width): remaining[str(width)] for width in selected_windows}
             count = 0
             for channels in remaining.values():
                 for item in channels.values():

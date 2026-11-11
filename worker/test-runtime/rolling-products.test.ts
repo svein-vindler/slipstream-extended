@@ -62,6 +62,12 @@ async function call(protocol: string, window: number, channel: string) {
   expect(JSON.parse(message.result.content[0].text)).toEqual(message.result.structuredContent);
   return message.result.structuredContent;
 }
+it("covers every supported rolling period for both channels", () => {
+  expect(fixture.products.map(item => `${item.window}/${item.channel}`).sort()).toEqual([
+    "7/heart_rate", "7/hrv", "28/heart_rate", "28/hrv", "30/heart_rate", "30/hrv",
+    "90/heart_rate", "90/hrv", "365/heart_rate", "365/hrv",
+  ].sort());
+});
 for (const protocol of ["2026-07-28", "2025-03-26"]) {
   it.each(fixture.products)(`${protocol} reads stored $window/$channel with exactly one GET`, async item => {
     const result = await call(protocol, item.window, item.channel);

@@ -1,6 +1,6 @@
 # Optional local HR/HRV history
 
-For bounded stored-only 28/30/90 HR/HRV planning and reference publication, see
+For bounded stored-only 7/28/30/90/365 HR/HRV planning and reference publication, see
 [rolling references](ROLLING_NIGHT_REFERENCES.md). The same daily job also tracks
 later affected endpoints and reports remaining references within its budgets.
 

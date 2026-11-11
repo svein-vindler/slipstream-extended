@@ -1,6 +1,6 @@
 # User context for a night
 
-A confirmed context append also marks affected rolling 28/30/90 HR/HRV
+A confirmed context append also marks affected rolling 7/28/30/90/365 HR/HRV
 references for bounded refresh. The event stays append-only. Unknown writes
 remain held; if the event is confirmed saved but reference invalidation is held,
 retry reading the result rather than appending the same context again. Stored

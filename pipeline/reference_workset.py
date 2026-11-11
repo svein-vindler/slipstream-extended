@@ -12,6 +12,7 @@ from .history_state import Stop, digest, encoded, read, write
 from .native_night import zone
 from .night_products import calendar_day, canonical, normalize_args, storage_key
 from .r2_store import R2ObjectSnapshot, _opaque_revision
+from .rolling_night_references import LEGACY_WINDOWS, window_selection
 
 ROOTS = ("health/sleep/v1/", "health/hrv/", "health/signals/v1/")
 CONTEXT = "health/night-context/v1/"
@@ -52,9 +53,15 @@ def _days(first, last):
 
 def _validate_scope(binding, targets, target_subset):
     _require(type(target_subset) is bool, "reference_workset_targets")
-    _require(type(binding) is dict and set(binding) == {
-        "job_plan_sha256", "storage_target_sha256", "today", "timezone", "endpoints"},
+    fields = {"job_plan_sha256", "storage_target_sha256", "today", "timezone", "endpoints"}
+    _require(type(binding) is dict and set(binding) in (fields, fields | {"windows"}),
         "reference_workset_binding")
+    _require("windows" not in binding or type(binding["windows"]) is list and binding["windows"],
+             "reference_workset_binding")
+    try:
+        windows = window_selection(binding["windows"] if "windows" in binding else LEGACY_WINDOWS)
+    except ValueError:
+        raise Stop("reference_workset_binding") from None
     _require(all(type(binding[name]) is str and re.fullmatch(r"[a-f0-9]{64}", binding[name])
                  for name in ("job_plan_sha256", "storage_target_sha256")),
              "reference_workset_binding")
@@ -66,10 +73,12 @@ def _validate_scope(binding, targets, target_subset):
              and (calendar_day(endpoints[-1]) - calendar_day(endpoints[0])).days <= 405,
              "reference_workset_scope")
     expected = set()
-    _require(type(targets) is list and (1 <= len(targets) <= 6 * len(endpoints) if target_subset else len(targets) == 6 * len(endpoints)), "reference_workset_targets")
+    target_count = 2 * len(windows) * len(endpoints)
+    _require(type(targets) is list and (1 <= len(targets) <= target_count if target_subset else len(targets) == target_count), "reference_workset_targets")
     for target in targets:
         _require(type(target) is dict and set(target) == TARGET_FIELDS
-                 and target["endpoint"] in endpoints and target["window_days"] in (28, 30, 90)
+                 and target["endpoint"] in endpoints and type(target["window_days"]) is int
+                 and target["window_days"] in windows
                  and target["channel"] in ("heart_rate", "hrv"), "reference_workset_targets")
         args = normalize_args(period="custom", **target["args"])
         width = (calendar_day(args["end_date"]) - calendar_day(args["start_date"])).days + 1
@@ -339,11 +348,23 @@ class ReferenceWorkset:
         _require(self._source_seal is not None and self._sealed_read_allowed(), "reference_workset_sources_incomplete")
         _pin(self._source_seal)
         workset = self
+        annual = {}
+        if ("windows" in self._binding and 365 in self._binding["windows"]
+                and any(target["window_days"] == 365 for target in self._targets)):
+            # This is a selected-date view of sealed local months. Independent
+            # fresh fences enumerate the full physical year namespace later.
+            annual = {prefix.rstrip("/").rsplit("/", 1)[0] + "/":
+                      3101 if prefix.startswith(CONTEXT) else 800 for prefix in self.prefixes}
 
         class LocalSources:
             def list_revisions_bounded(self, prefix, *, max_keys):
-                _require(prefix in workset._inventories, "reference_workset_source_outside_scope")
-                rows = workset._inventories[prefix]["rows"]
+                if prefix in workset._inventories:
+                    rows = workset._inventories[prefix]["rows"]
+                else:
+                    _require(prefix in annual and max_keys == annual[prefix],
+                             "reference_workset_source_outside_scope")
+                    rows = {key: value for month, inventory in workset._inventories.items()
+                            if month.startswith(prefix) for key, value in inventory["rows"].items()}
                 _require(len(rows) <= max_keys, "reference_workset_inventory")
                 return copy.deepcopy(rows)
 
@@ -496,7 +517,8 @@ class ReferenceWorkset:
         for key, reference in self._products.items():
             product = self._load_artifact(reference, key)
             product_bytes += len(product["body"].encode())
-            fence_pages += 2 * rolling_fence_list_bound(product["source_proof"])
+            fence_pages += 2 * rolling_fence_list_bound(product["source_proof"],
+                **({"window_days": 365} if self._target_map[key]["window_days"] == 365 else {}))
         return {"product_count": len(self._products), "product_bytes": product_bytes,
                 "fresh_fence_list_pages": fence_pages,
                 "known_gap_count": len(self._outcomes), "build_seal": seal}

@@ -12,6 +12,7 @@ from pathlib import Path
 from .history_state import Stop, digest, encoded, read, write
 from .native_night import zone
 from .night_products import calendar_day, normalize_args, storage_key
+from .rolling_night_references import LEGACY_WINDOWS, window_selection
 
 
 def _require(condition, category):
@@ -36,10 +37,25 @@ def _pin(reference, maximum=16777216):
     return body
 
 
-def _targets(endpoints):
+def _windows(declaration):
+    if "windows" not in declaration:
+        return LEGACY_WINDOWS
+    _require(type(declaration["windows"]) is list and declaration["windows"], "reference_bulk_windows")
+    try:
+        return window_selection(declaration["windows"])
+    except ValueError:
+        raise Stop("reference_bulk_windows") from None
+
+
+def _carry_windows(source, destination):
+    if "windows" in source:
+        destination["windows"] = list(_windows(source))
+
+
+def _targets(endpoints, windows=LEGACY_WINDOWS):
     result = []
     for endpoint in endpoints:
-        for width in (28, 30, 90):
+        for width in window_selection(windows):
             for channel in ("heart_rate", "hrv"):
                 args = normalize_args(end_date=endpoint, period="custom" if width == 30 else str(width),
                     start_date=(calendar_day(endpoint) - timedelta(days=width - 1)).isoformat(), channel=channel)
@@ -68,9 +84,9 @@ def _affected_targets(job, pairs, universe, endpoints):
             kind = "signals" if row["stream"] == "hr" else "hrv"
             rows[identity] = {key: row[key] for key in ("key", "revision", "sha256", "date", "stream")}
             rows[identity]["ranges"] = [{"window_days": width, "first": first, "last": last}
-                for width in (28, 30, 90) for first, last in [source_range(kind, row["date"], width)]]
+                for width in _windows(universe) for first, last in [source_range(kind, row["date"], width)]]
     proofs = [rows[key] for key in sorted(rows)]
-    targets = [target for target in _targets(endpoints) if any(
+    targets = [target for target in _targets(endpoints, _windows(universe)) if any(
         window["window_days"] == target["window_days"]
         and window["first"] <= target["endpoint"] <= window["last"]
         for row in proofs for window in row["ranges"])]
@@ -83,13 +99,14 @@ def _daily_endpoint_universe(job, plan_sha, source_delivery_refs, policy_ref):
     policy = json.loads(_pin(policy_ref))
     fields = {"schema", "kind", "job_plan_sha256", "storage_target_sha256", "today", "timezone",
               "deadline_utc", "latest_allowed_wake_date", "max_source_dates", "max_endpoints", "historical_refs"}
-    _require(isinstance(policy, dict) and set(policy) == fields and policy["schema"] == 1
+    _require(isinstance(policy, dict) and set(policy) in (fields, fields | {"windows"}) and policy["schema"] == 1
              and policy["kind"] == "DAILY_REFERENCE_ENDPOINT_POLICY_V1"
              and policy["job_plan_sha256"] == plan_sha == job.plan_sha
              and re.fullmatch(r"[a-f0-9]{64}", policy["storage_target_sha256"] or "") is not None
              and type(policy["max_source_dates"]) is int and policy["max_source_dates"] == 30
              and type(policy["max_endpoints"]) is int and policy["max_endpoints"] == 406,
              "reference_bulk_daily_policy_unqualified")
+    maximum = max(_windows(policy))
     job.admission(plan_sha, source=False)
     latest, today = calendar_day(policy["latest_allowed_wake_date"]), calendar_day(policy["today"])
     _require(latest <= today and zone(policy["timezone"]) is not None, "reference_bulk_daily_policy_bound")
@@ -124,15 +141,16 @@ def _daily_endpoint_universe(job, plan_sha, source_delivery_refs, policy_ref):
     endpoints = set()
     for value in selected:
         first = calendar_day(value)
-        calendar_day((first - timedelta(days=89)).isoformat())
+        calendar_day((first - timedelta(days=maximum - 1)).isoformat())
         _require(first <= latest, "reference_bulk_daily_latest_wake_bound")
-        last = min(first + timedelta(days=89), latest)
+        last = min(first + timedelta(days=maximum - 1), latest)
         endpoints.update((first + timedelta(days=index)).isoformat() for index in range((last - first).days + 1))
     _require(len(endpoints) <= policy["max_endpoints"], "reference_bulk_daily_scope_capacity")
     result = {name: policy[name] for name in ("job_plan_sha256", "storage_target_sha256", "today",
         "timezone", "deadline_utc", "historical_refs")}
     result.update(schema=1, kind="reference-bulk-daily-universe", policy_ref=policy_ref,
                   source_delivery_refs=source_delivery_refs, source_dates=sorted(selected), endpoints=sorted(endpoints))
+    _carry_windows(policy, result)
     return result
 
 
@@ -153,11 +171,12 @@ def _scope(job, plan_sha, reference):
         fields = {"schema", "kind", "job_plan_sha256", "storage_target_sha256", "today", "timezone",
                   "deadline_utc", "historical_refs", "source_delivery_refs", "endpoint_scope_ref",
                   "targets", "source_range_proofs"}
-        _require(set(scope) == fields and scope["schema"] == 2, "reference_bulk_scope_unqualified")
+        _require(set(scope) in (fields, fields | {"windows"}) and scope["schema"] == 2, "reference_bulk_scope_unqualified")
         universe, endpoints = _scope(job, plan_sha, scope["endpoint_scope_ref"])
         _require(universe["kind"] in {"reference-bulk-scope", "reference-bulk-daily-universe"}
             and (universe["kind"] != "reference-bulk-daily-universe"
                  or universe["source_delivery_refs"] == scope["source_delivery_refs"])
+            and ("windows" in scope) == ("windows" in universe) and _windows(scope) == _windows(universe)
             and all(scope[name] == universe[name] for name in
             ("job_plan_sha256", "storage_target_sha256", "today", "timezone", "deadline_utc", "historical_refs")),
             "reference_bulk_affected_scope_changed")
@@ -167,7 +186,7 @@ def _scope(job, plan_sha, reference):
         return scope, sorted({target["endpoint"] for target in targets})
     fields = {"schema", "kind", "job_plan_sha256", "storage_target_sha256", "today", "timezone",
               "lower_endpoint", "upper_endpoint", "deadline_utc", "historical_refs", "source_delivery_refs"}
-    _require(isinstance(scope, dict) and set(scope) == fields and scope["schema"] == 1
+    _require(isinstance(scope, dict) and set(scope) in (fields, fields | {"windows"}) and scope["schema"] == 1
              and scope["kind"] == "reference-bulk-scope" and plan_sha == job.plan_sha
              and scope["job_plan_sha256"] == plan_sha
              and re.fullmatch(r"[a-f0-9]{64}", scope["storage_target_sha256"] or "") is not None,
@@ -175,7 +194,7 @@ def _scope(job, plan_sha, reference):
     job.admission(plan_sha, source=False)
     lower, upper, today = (calendar_day(scope[key]) for key in
                             ("lower_endpoint", "upper_endpoint", "today"))
-    calendar_day((lower - timedelta(days=89)).isoformat())
+    calendar_day((lower - timedelta(days=max(_windows(scope)) - 1)).isoformat())
     _require(lower <= upper <= today and (upper - lower).days < 406
              and zone(scope["timezone"]) is not None, "reference_bulk_scope_bound")
     deadline = datetime.fromisoformat(scope["deadline_utc"])
@@ -214,6 +233,7 @@ def create_affected_scope(job, plan_sha, source_delivery_refs, endpoint_scope_re
         "timezone", "deadline_utc", "historical_refs")}
     result.update(schema=2, kind="reference-bulk-affected-scope", source_delivery_refs=source_delivery_refs,
                   endpoint_scope_ref=endpoint_scope_ref, targets=targets, source_range_proofs=proofs)
+    _carry_windows(universe, result)
     write(Path(output), result)
     return _reference(output)
 
@@ -249,6 +269,7 @@ def _seed_source_deliveries(job, workset, scope):
         "job_plan_sha256": job.plan_sha, "storage_target_sha256": workset.binding["storage_target_sha256"],
         "source_delivery_refs": scope["source_delivery_refs"], "stage_facts": facts,
         "objects": [objects[key] for key in sorted(objects)]}
+    _carry_windows(scope, provenance)
     path = workset.folder / "SOURCE-DELIVERY-SEED.json"
     if path.exists():
         _require(read(path) == encoded(provenance), "reference_bulk_seed_changed")
@@ -265,7 +286,8 @@ def prepare_bulk(job, plan_sha, scope_ref, folder):
     binding = {key: scope[key] for key in
                ("job_plan_sha256", "storage_target_sha256", "today", "timezone")}
     binding["endpoints"] = endpoints
-    targets = scope["targets"] if scope["schema"] == 2 else _targets(endpoints)
+    _carry_windows(scope, binding)
+    targets = scope["targets"] if scope["schema"] == 2 else _targets(endpoints, _windows(scope))
     workset = ReferenceWorkset.create(Path(folder), binding, targets, target_subset=scope["schema"] == 2)
     write(workset.folder / "REQUEST.json", {"schema": 1, "kind": "reference-bulk-request",
         "scope": scope_ref, "scope_sha256": workset.scope_sha256,
@@ -284,8 +306,9 @@ def load_bulk_workset(job, plan_sha, scope_ref, folder, *, completion_ref=None):
     binding = {key: scope[key] for key in
                ("job_plan_sha256", "storage_target_sha256", "today", "timezone")}
     binding["endpoints"] = endpoints
+    _carry_windows(scope, binding)
     workset = ReferenceWorkset.open(Path(folder), binding)
-    _require(workset.targets == (scope["targets"] if scope["schema"] == 2 else _targets(endpoints)),
+    _require(workset.targets == (scope["targets"] if scope["schema"] == 2 else _targets(endpoints, _windows(scope))),
              "reference_bulk_declared_targets_changed")
     request = json.loads(read(workset.folder / "REQUEST.json", 1048576))
     _require(request["scope"] == scope_ref and request["scope_sha256"] == workset.scope_sha256
@@ -321,7 +344,8 @@ def _read_stage(workset, scope, phase, resource_plan_ref, carried, store_factory
                  "storage_target_changed")
         guard = StorageGuard(store, set(), stage, execution_context=account.execution_context,
                              bulk_account=account)
-        sources = _ReadOnlySources(store, guard, workset.binding["endpoints"], workset.binding["today"])
+        sources = _ReadOnlySources(store, guard, workset.binding["endpoints"], workset.binding["today"],
+                                   windows=_windows(workset.binding))
         io = _IO(sources)
         result = perform(io, guard, account, stage)
     except BaseException as error:
@@ -471,7 +495,7 @@ def build_bulk(job, plan_sha, scope_ref, folder, *, carried, max_targets=2436):
             maximum = max(target["window_days"] for target in targets)
             days = [(last - timedelta(days=maximum - 1 - index)).isoformat() for index in range(maximum)]
             reader = NativeNightReader(local, timezone=scope["timezone"])
-            reader.prime_rolling_sources(days)
+            reader.prime_rolling_sources(days, **({"window_days": 365} if maximum == 365 else {}))
             values = [reader.night(day) for day in days]
             for target in targets:
                 account.check_deadline()

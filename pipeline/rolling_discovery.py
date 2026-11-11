@@ -36,23 +36,23 @@ def validate_discovery(queue):
 
 
 def schedule_discovery(queue, kind, day):
-    from .rolling_night_references import merge, source_range
+    from .rolling_night_references import WINDOWS, merge, source_range
 
     if kind not in {"sleep", "hrv", "signals"}:
         raise ValueError("Only admitted night source horizons may be discovered")
-    queue["rolling_discovery"] = merge([*_ranges(queue), list(source_range(kind, day, 90))])
+    queue["rolling_discovery"] = merge([*_ranges(queue), list(source_range(kind, day, max(WINDOWS)))])
     validate_discovery(queue)
 
 
 def discovery_status(queue, *, today=None, sources=None):
-    from .rolling_night_references import intersect, merge, source_range
+    from .rolling_night_references import WINDOWS, intersect, merge, source_range
 
     ranges = list(_ranges(queue))
     if today is not None:
         ranges = intersect(ranges, date.min.isoformat(), today)
     if sources is not None:
         ranges = merge([target for kind, day in sources
-                        for target in intersect(ranges, *source_range(kind, day, 90))])
+                        for target in intersect(ranges, *source_range(kind, day, max(WINDOWS)))])
     return {
         "kind": "endpoint_discovery_scan_candidates",
         "eligibility": "unknown_until_verified_stored_sleep",
@@ -69,13 +69,13 @@ def _subtract(ranges, first, last):
 
 def _held_horizons(queue):
     from .night_baseline_refresh import _source
-    from .rolling_night_references import merge, source_range
+    from .rolling_night_references import WINDOWS, merge, source_range
 
-    result = [list(source_range("sleep", binding["wake_date"], 90))
+    result = [list(source_range("sleep", binding["wake_date"], max(WINDOWS)))
               for binding in queue.get("rolling_context_intents", {}).values()]
     for row in queue["pending"].values():
         for entries in (row["sources"], row.get("following_sources", {})):
-            result.extend(list(source_range(*_source(key), 90)) for key, binding in entries.items()
+            result.extend(list(source_range(*_source(key), max(WINDOWS))) for key, binding in entries.items()
                           if binding["state"] == "intent")
     return merge(result)
 
@@ -90,7 +90,7 @@ def drain_discovery(store, queue, *, today, max_endpoints=MAX_ENDPOINTS,
     A source collision or unverified response aborts before queue mutation.
     """
     from .night_baseline_refresh import _decode, _snapshot, _validate_source, require
-    from .rolling_night_references import intersect, merge, register, source_range
+    from .rolling_night_references import WINDOWS, intersect, merge, register, source_range
 
     require(type(max_endpoints) is int and 1 <= max_endpoints <= MAX_ENDPOINTS,
             "Choose1-7 discovery endpoints")
@@ -105,7 +105,7 @@ def drain_discovery(store, queue, *, today, max_endpoints=MAX_ENDPOINTS,
     candidates = list(remaining)
     if allowed_sources is not None:
         candidates = merge([target for kind, day in allowed_sources
-                            for target in intersect(candidates, *source_range(kind, day, 90))])
+                            for target in intersect(candidates, *source_range(kind, day, max(WINDOWS)))])
     for first, last in _held_horizons(queue):
         result["held_ranges"].extend(intersect(candidates, first, last))
         candidates = _subtract(candidates, first, last)

@@ -8,7 +8,7 @@ from .native_night import NativeInputError, NativeNightReader, zone
 from .night_baseline_refresh import _IO, BaselineRefreshStop
 from .night_products import baseline, calendar_day, canonical, normalize_args, storage_key
 from .night_reference_sources import rolling_fence_list_bound
-from .rolling_night_references import CHANNELS, WINDOWS
+from .rolling_night_references import CHANNELS, window_selection
 
 
 def _dates(first, last):
@@ -22,7 +22,8 @@ def _estimate(targets, proofs, reads):
     # Existing history and queue rewrites must therefore be priced at their caps.
     per_target_put = 11
     per_target_bytes = 3 * 262144 + 2048 + 12 * 262144
-    known_fences = sum(2 * rolling_fence_list_bound(proofs[target["endpoint"]])
+    known_fences = sum(2 * rolling_fence_list_bound(proofs[(target["endpoint"], target["window_days"])],
+        **({"window_days": 365} if target["window_days"] == 365 else {}))
                        for target in ready)
     candidate_count = min(len(ready), 2 * min(14, 10485760 // 2097152, 1000 // 200))
     return {
@@ -55,19 +56,21 @@ def _estimate(targets, proofs, reads):
     }
 
 
-def plan_references(store, endpoints, *, today, timezone, snapshot_cache=None):
+def plan_references(store, endpoints, *, today, timezone, snapshot_cache=None, windows=None):
     """Observe1..7 explicit wake endpoints; never write, inventory, or register.
 
     The returned JSON contains provenance and coverage metadata only. The caller's
     bounded verified snapshot mapping is filled for the existing publication path;
     its contents are observations, never a replacement for fresh source fences.
     """
+    selected_windows = window_selection(windows)
+    maximum = max(selected_windows)
     if (not isinstance(endpoints, (list, tuple)) or not 1 <= len(endpoints) <= 7
             or any(not isinstance(day, str) for day in endpoints)):
         raise ValueError("Provide1 through7 explicit endpoint dates")
     requested = sorted(set(endpoints))
     values = [calendar_day(day) for day in requested]
-    calendar_day((values[0] - timedelta(days=89)).isoformat())
+    calendar_day((values[0] - timedelta(days=maximum - 1)).isoformat())
     current = calendar_day(today)
     if (values[-1] - values[0]).days > 6 or zone(timezone) is None:
         raise ValueError("Endpoint batch requires one seven-day span and IANA timezone")
@@ -82,6 +85,7 @@ def plan_references(store, endpoints, *, today, timezone, snapshot_cache=None):
                 for day in requested if day > current.isoformat()]
     result = {"schema_version": 1, "kind": "rolling-night-reference-plan",
               "requested_endpoints": requested, "today": current.isoformat(), "timezone": timezone,
+              "windows": list(selected_windows),
               "eligible_endpoints": [], "verified_sleep_sources": [], "targets": [],
               "deferred": deferred, "blocked": [], "status": "observed",
               "observation_only": True, "fresh_publication_fences_required": True}
@@ -90,7 +94,7 @@ def plan_references(store, endpoints, *, today, timezone, snapshot_cache=None):
     started = io.counts()
     reader = NativeNightReader(io, timezone=timezone, snapshot_cache=cache)
     try:
-        union = (_dates(calendar_day(safe[0]) - timedelta(days=89), calendar_day(safe[-1]))
+        union = (_dates(calendar_day(safe[0]) - timedelta(days=maximum - 1), calendar_day(safe[-1]))
                  if safe else [])
         for offset in range(0, len(union), 90):
             batch = union[offset:offset + 90]
@@ -134,15 +138,13 @@ def plan_references(store, endpoints, *, today, timezone, snapshot_cache=None):
                                           "reason": "native_input_unknown" if endpoint in unknown
                                           else "sleep_not_stored"})
                 continue
-            first90 = calendar_day(endpoint) - timedelta(days=89)
-            full_days = _dates(first90, calendar_day(endpoint))
-            endpoint_proofs[endpoint] = {
-                name: {key: value for day in full_days if day in dependencies
-                       for key, value in dependencies[day][name].items()}
-                for name in ("objects", "lists")}
-            for width in WINDOWS:
+            for width in selected_windows:
                 first = calendar_day(endpoint) - timedelta(days=width - 1)
                 days = _dates(first, calendar_day(endpoint))
+                endpoint_proofs[(endpoint, width)] = {
+                    name: {key: value for day in days if day in dependencies
+                           for key, value in dependencies[day][name].items()}
+                    for name in ("objects", "lists")}
                 observed = [nights[day] for day in days if day in nights]
                 input_bytes = len(canonical(observed).encode())
                 points = sum(len(channel["points"]) for night in observed

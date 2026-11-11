@@ -7,8 +7,20 @@ only the existing consumer materializes bounded per-channel publication rows.
 import re
 from datetime import date, timedelta
 
-WINDOWS = (28, 30, 90)
+LEGACY_WINDOWS = (28, 30, 90)
+WINDOWS = (7, 28, 30, 90, 365)
 CHANNELS = ("heart_rate", "hrv")
+
+
+def window_selection(windows=None):
+    """Return a canonical bounded selection of exact rolling day counts."""
+    if windows is None:
+        return WINDOWS
+    if (not isinstance(windows, (list, tuple)) or not windows
+            or any(type(n) is not int or n not in WINDOWS for n in windows)
+            or tuple(windows) != tuple(sorted(set(windows)))):
+        raise ValueError("Choose supported rolling windows")
+    return tuple(sorted(set(windows)))
 
 
 def merge(ranges):
@@ -43,10 +55,14 @@ def remove_day(ranges, day):
     return subtract(ranges, day, day)
 
 
-def state(queue):
-    return queue.setdefault("rolling", {"eligible": [], "dirty": {
+def state(queue, *, upgrade=False):
+    value = queue.setdefault("rolling", {"eligible": [], "dirty": {
         str(n): {channel: [] for channel in CHANNELS} for n in WINDOWS
     }})
+    if upgrade:
+        for n in WINDOWS:
+            value["dirty"].setdefault(str(n), {channel: [] for channel in CHANNELS})
+    return value
 
 
 def validate(queue):
@@ -83,7 +99,8 @@ def validate(queue):
     value = queue["rolling"]
     if (not isinstance(value, dict) or set(value) != {"eligible", "dirty"}
             or not isinstance(value["dirty"], dict)
-            or set(value["dirty"]) != {str(n) for n in WINDOWS}):
+            or set(value["dirty"]) not in ({str(n) for n in LEGACY_WINDOWS},
+                                           {str(n) for n in WINDOWS})):
         raise ValueError("Unverified rolling registry")
     collections = [value["eligible"]]
     for channels in value["dirty"].values():
@@ -111,6 +128,7 @@ def register(queue, days):
     for day in days:
         if intersect(value["eligible"], day, day):
             continue
+        state(queue, upgrade=True)
         value["eligible"] = merge([*value["eligible"], [day, day]])
         for channels in value["dirty"].values():
             for channel in CHANNELS:
@@ -130,7 +148,7 @@ def invalidate(queue, kind, day):
     schedule_discovery(queue, kind, day)
     if "rolling" not in queue:
         return
-    value = state(queue)
+    value = state(queue, upgrade=True)
     for n in WINDOWS:
         first, last = source_range(kind, day, n)
         targets = intersect(value["eligible"], first, last)
@@ -170,7 +188,7 @@ def status(queue, *, today=None, sources=None):
     for n in WINDOWS:
         result[str(n)] = {}
         for channel in CHANNELS:
-            ranges = list(value["dirty"][str(n)][channel]) if value else []
+            ranges = list(value["dirty"].get(str(n), {}).get(channel, [])) if value else []
             ranges.extend([row["end_date"], row["end_date"]]
                           for row in queue["pending"].values()
                           if row.get("rolling_window") == n and row.get("channel") == channel)
@@ -188,7 +206,8 @@ def status(queue, *, today=None, sources=None):
     return result
 
 
-def materialize(queue, *, today, limit, max_pending, allowed_sources=None, allowed_endpoints=None):
+def materialize(queue, *, today, limit, max_pending, allowed_sources=None, allowed_endpoints=None,
+                allowed_windows=None):
     """Move at most limit ranges' first endpoints into the durable pending map."""
     if "rolling" not in queue:
         return False
@@ -202,7 +221,11 @@ def materialize(queue, *, today, limit, max_pending, allowed_sources=None, allow
         for key, _ in intents]
     held_sources.extend(("sleep", row["wake_date"])
                         for row in queue.get("rolling_context_intents", {}).values())
-    groups = [(n, channel) for n in WINDOWS for channel in CHANNELS]
+    # Keep the established consumer order; new lengths cannot displace known
+    # legacy work or change a retained publication checkpoint's first product.
+    selected_windows = window_selection(allowed_windows)
+    order = (*LEGACY_WINDOWS, *(n for n in WINDOWS if n not in LEGACY_WINDOWS))
+    groups = [(n, channel) for n in order if n in selected_windows for channel in CHANNELS]
     # One blocked channel must not fill all publication slots before another
     # channel gets a checkpoint. Prefer cohorts with less retained held work.
     groups.sort(key=lambda group: sum(
@@ -211,7 +234,7 @@ def materialize(queue, *, today, limit, max_pending, allowed_sources=None, allow
         for row in queue["pending"].values()
     ))
     for n, channel in groups:
-        ranges = value["dirty"][str(n)][channel]
+        ranges = value["dirty"].get(str(n), {}).get(channel, [])
         candidates = intersect(ranges, date.min.isoformat(), today)
         if allowed_endpoints is not None:
             candidates = merge([target for day in allowed_endpoints
@@ -226,6 +249,7 @@ def materialize(queue, *, today, limit, max_pending, allowed_sources=None, allow
             if row.get("rolling_window") == n and row.get("channel") == channel:
                 candidates = remove_day(candidates, row["end_date"])
         if candidates and limit and len(queue["pending"]) < max_pending:
+            state(queue, upgrade=True)
             first = candidates[0][0]
             name = f"rolling/{n}/{first}/{channel}"
             queue["pending"][name] = {

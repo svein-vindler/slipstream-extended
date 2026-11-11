@@ -17,6 +17,7 @@ permissions:
 concurrency:
   group: garmin-sync
   cancel-in-progress: false
+  queue: max
 
 jobs:
   backfill:

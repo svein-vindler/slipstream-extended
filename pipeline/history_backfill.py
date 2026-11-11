@@ -585,6 +585,8 @@ def main(argv=None):
     references.add_argument("--endpoint", action="append", required=True)
     references.add_argument("--today", required=True)
     references.add_argument("--timezone", required=True)
+    references.add_argument("--window-days", action="append", type=int, choices=[7, 28, 30, 90, 365],
+                            help="Explicit sorted rolling lengths; omitted keeps legacy28/30/90.")
     refresh = commands.add_parser(
         "rolling-refresh", help="One plan-bound reference-only publication phase; zero Garmin calls.",
     )
@@ -773,12 +775,14 @@ def main(argv=None):
 
                 print(json.dumps(run_command(job, args)))
             elif args.command == "rolling-plan":
+                from .rolling_night_references import LEGACY_WINDOWS
                 from .rolling_reference_cli import create_plan
 
                 if not args.confirm_r2_read:
                     raise Stop("explicit_storage_read_required")
                 result = create_plan(job, args.plan_sha, endpoints=args.endpoint,
-                                     today=args.today, timezone=args.timezone)
+                                     today=args.today, timezone=args.timezone,
+                                     windows=args.window_days if args.window_days is not None else LEGACY_WINDOWS)
                 observation = result["plan"]
                 print(json.dumps({
                     "reference_plan_sha256": result["plan_sha256"],

@@ -148,6 +148,12 @@ def _reference_outcome(report, outcome):
     # These are observed child reports only; do not read or infer stored queue state.
     if not isinstance(report, dict):
         return outcome
+    night = report.get("night_followup")
+    if (isinstance(night, dict) and night.get("status") == "partial"
+            and outcome in {"complete", "no_work", "not_ready"}):
+        # The scheduled night check is part of this invocation even when the
+        # primary historical/activity operation has no eligible work.
+        outcome = "partial"
     baseline = report.get("baseline_refresh")
     if isinstance(baseline, dict):
         status = baseline.get("status")

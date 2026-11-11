@@ -3,7 +3,7 @@
 For the explicit durable collect-all/build-all flow and daily affected-target
 mode, see [Local bulk night references](LOCAL_REFERENCE_BULK.md).
 
-The existing `pipeline.history_backfill` job can plan historical 28/30/90-date
+The existing `pipeline.history_backfill` job can plan historical 7/28/30/90/365-date
 HR/HRV products and publish them through its existing queue and owner protocol.
 The explicit planning commands below support selected stored-only work. Routine
 daily continuation needs no operator CLI: the existing daily worker also drains
@@ -20,8 +20,11 @@ python -B -X utf8 -m pipeline.history_backfill --state PRIVATE_JOB rolling-refre
 Planning accepts one to seven explicitly named endpoints spanning at most seven
 dates. It reads only bounded canonical/context months, with no provider calls,
 R2 writes, bucket inventory or product mutation. Usable, fresh Sleep evidence
-establishes eligibility. Each endpoint has six independent channel/window
-targets. Missing/ambiguous source coverage is reported honestly. A plan is not a
+establishes eligibility. A five-window endpoint has ten independent channel/window
+targets; an immutable legacy 28/30/90 scope has six. Explicit bulk scope/policy
+`windows` is bound through its target manifest and finite resource plan. An
+omitted declaration preserves the legacy three-window meaning; it does not
+silently select new windows. Missing/ambiguous source coverage is reported honestly. A plan is not a
 guarantee that all targets fit the publication budget.
 
 The private immutable plan binds the job, target, calendar, selected endpoints,
@@ -76,10 +79,17 @@ Ordinary hosted consumers can also drain queued references. Do not infer full fr
 from successful canonical writes, and do not increase source quotas to chase a
 reference backlog.
 
-The Worker remains a stored-product reader: use `28`, `90`, or a 30-date `custom`
-range. No enum, method, units, quantile definition, key format or read schema
+The Worker remains a stored-product reader: use `7`, `28`, `30`, `90`, `365`, or
+an explicit `custom` range. Each rolling period contains exactly that many
+inclusive wake-dates. A rolling seven-date window is distinct from a completed
+ISO week; a rolling 365-date window is distinct from a calendar year, which can
+contain 366 dates. No enum, method, units, quantile definition, key format or read schema
 changes. Week/month products, old history and unknown-outcome safeguards remain
 compatible. A missing product stays missing until explicitly published.
+Overlapping references reuse verified source snapshots and the existing
+source/context CAS fences. Actual physical operations remain metered. Adding
+windows does not trigger a hidden full-history rebuild, source refetch, allowance
+increase or reset of earlier usage.
 
 ## Finite stored-source spans
 
@@ -168,3 +178,43 @@ Rollback is a coordinated code rollback only. Keep immutable source and product
 history, existing configuration, queued checkpoints and private job evidence.
 Older code must not consume a queue containing the additive rolling protocol;
 pause consumers before any rollback and review that compatibility boundary.
+
+## Explicit rolling window selection
+
+The read-only Python planner defaults to `7, 28, 30, 90, 365` and reports its
+selection. Existing immutable job plans, bulk scopes, endpoint policies and
+worksets without a `windows` declaration retain `28, 30, 90`. New declarations
+are sorted, unique, nonempty subsets of the five supported exact day counts.
+Explicit choices are pinned with the scope and resource plan; adding a code
+release never expands an already admitted workset.
+
+The existing job-bound `rolling-plan` CLI keeps the legacy default. Repeat
+`--window-days` to choose additional lengths, for example
+`--window-days 7 --window-days 365`. This is a stored-source observation, not
+source collection or publication. A 365-day rolling period includes exactly
+365 wake dates even across a leap day; it is neither a calendar year nor YTD.
+
+An explicit 365 producer can use a separate bounded annual inventory contract.
+It lists only the selected canonical source kinds and calendar years, retaining
+the established signal-date margin. Each entire physical raw year prefix is
+limited to 800 names and each entire context year prefix to 3101 names/four
+pages. Names outside the selected dates count toward those limits but are not
+contributors or spurious source changes. Both source fences are fresh; cached
+bytes and sealed local computation do not establish current capacity.
+
+The annual inventory has a 2 MiB acceptance threshold for metadata and observed
+wire bytes per pass. It is checked after each bounded listing: the last bounded
+page/listing can cross that threshold before rejection. Existing SDK response
+limits and physical request budgets still apply; this is not a hard 2 MiB
+network cutoff. Key/page/byte overflow stops before target publication. A source
+change after an accepted target write retains the existing publishing owner and
+HOLD rather than inventing a successful final commit.
+
+Phase limits remain 400 GET, 100 LIST, 100 PUT and 2 MiB written, with the
+existing cumulative meters. The resource planner still caps declarations at
+2436 targets, 1986 sources and 160 inventory requests. A five-window geometry
+has ten targets per endpoint; all 406 endpoints would describe 4060 targets and
+cannot obtain that resource allowance. Choose a smaller explicit scope; a
+metadata workset is not proof that its resource plan can be admitted. No full
+historical 365-window rebuild, extra Garmin reload, scheduler or retry loop is
+created by enabling these windows.
