@@ -42,7 +42,7 @@ const productSchema = z.object({
   args_sha256: hash, source_identity: hash, source_manifest: z.array(sourceSchema).max(366),
   nights_requested: integer.min(1).max(366), source_nights: integer.max(366), contributing_nights: integer.max(366),
   unit: z.enum(["bpm", "ms", "points"]), excluded: z.array(exclusionSchema).max(366), method: methodSchema,
-  bins: z.array(binSchema).max(144), quality_notes: z.array(qualityNoteSchema).max(366).default([]), resources: z.object({ input_bytes: integer.max(16 * 1024 * 1024), input_points: integer.max(200000), invalid_points: integer.max(200000) }).strict(),
+  bins: z.array(binSchema).max(144), quality_notes: z.array(qualityNoteSchema).max(366).default([]), resources: z.object({ input_bytes: integer.max(68040932), input_points: integer.max(200000), invalid_points: integer.max(200000) }).strict(),
 }).strict();
 const projectionSchema = z.object({
   status: z.enum(["available", "not_stored", "read_error", "invalid_schema"]),
@@ -104,7 +104,11 @@ function empty(args: Args, status: Projection["status"]): Projection {
     unit: null, bins: [], excluded: [], quality_notes: [], method: null };
 }
 function validCounts(product: Product) {
+  // ceil(16MiB *365/90); the larger metadata bound requires an exact annual calendar.
+  const inputByteLimit = product.nights_requested === 365
+    && dayNumber(product.args.end_date) - dayNumber(product.args.start_date) === 364 ? 68040932 : 16 * 1024 * 1024;
   if (product.nights_requested !== dayNumber(product.args.end_date) - dayNumber(product.args.start_date) + 1
+    || product.resources.input_bytes > inputByteLimit
     || product.source_nights !== product.source_manifest.length || product.contributing_nights > product.source_nights
     || product.source_nights > product.nights_requested || product.resources.invalid_points > product.resources.input_points
     || product.unit !== ({heart_rate:"bpm",hrv:"ms",body_battery:"points",stress:"points"} as const)[product.args.channel]) return false;

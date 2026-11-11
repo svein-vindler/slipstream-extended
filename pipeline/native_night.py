@@ -29,6 +29,10 @@ class _RawInputPointLimit(NativeInputError):
     category = "native_raw_input_point_limit"
 
 
+class _DecodedInputByteLimit(NativeInputError):
+    category = "native_decoded_input_byte_limit"
+
+
 def require(value, reason="Unverified stored night input"):
     if not value:
         raise NativeInputError(reason)
@@ -438,6 +442,7 @@ class NativeNightReader:
         self.read_bytes = self.decoded_bytes = self.input_points = 0
         self.rolling_inventory = None
         self.annual_input_days = frozenset()
+        self._annual_read = False
 
     def prime_rolling_sources(self, days, *, window_days=None):
         """Fresh bounded inventory, preserving each night's logical proof.
@@ -540,7 +545,11 @@ class NativeNightReader:
                 data = handle.read(decoded + 1)
         require(len(data) <= decoded)
         self.decoded_bytes += len(data)
-        require(self.decoded_bytes <= 33554432)
+        # ceil(32MiB *365/90), only while assembling an admitted annual night.
+        # Direct/foreign reads and new or failed primes retain the ordinary cap.
+        byte_limit = 136081864 if self._annual_read and inventoried else 33554432
+        if self.decoded_bytes > byte_limit:
+            raise _DecodedInputByteLimit("Stored native decoded input byte limit")
         try:
             value = json.loads(
                 data,
@@ -684,6 +693,13 @@ class NativeNightReader:
         return json_numbers(output)
 
     def night(self, day):
+        self._annual_read = day in self.annual_input_days
+        try:
+            return self._night(day)
+        finally:
+            self._annual_read = False
+
+    def _night(self, day):
         self.active_keys, self.active_prefixes = set(), set()
         require(date.fromisoformat(day).isoformat() == day)
         user = self.context(day)
@@ -889,7 +905,7 @@ class NativeNightReader:
             self.input_points += len(readings)
             add_readings(channel, readings, True, start, end)
         # ceil(200000 * 365 / 90): finite raw work for the explicit annual scope.
-        # Normalized prepare_reference points and every byte bound stay separate.
+        # Normalized prepare_reference points and byte bounds stay separate.
         point_limit = 811112 if day in self.annual_input_days else 200000
         if self.input_points > point_limit:
             raise _RawInputPointLimit("Stored native raw input point limit")
