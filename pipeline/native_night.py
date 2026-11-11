@@ -25,6 +25,10 @@ class NativeInputError(R2BudgetError):
     pass
 
 
+class _RawInputPointLimit(NativeInputError):
+    category = "native_raw_input_point_limit"
+
+
 def require(value, reason="Unverified stored night input"):
     if not value:
         raise NativeInputError(reason)
@@ -433,6 +437,7 @@ class NativeNightReader:
         self.active_keys, self.active_prefixes = set(), set()
         self.read_bytes = self.decoded_bytes = self.input_points = 0
         self.rolling_inventory = None
+        self.annual_input_days = frozenset()
 
     def prime_rolling_sources(self, days, *, window_days=None):
         """Fresh bounded inventory, preserving each night's logical proof.
@@ -447,6 +452,8 @@ class NativeNightReader:
             rolling_source_prefixes,
         )
 
+        # A new or failed prime cannot retain an earlier annual admission.
+        self.annual_input_days = frozenset()
         days = tuple(days)
         prefixes = rolling_source_prefixes(days, window_days=window_days)
         inventory = _read_inventories(self.store, prefixes, window_days=window_days)
@@ -459,6 +466,8 @@ class NativeNightReader:
             keys = sorted(key for key in _inventory_for(prefix, inventory) if key.startswith(prefix))
             require(len(keys) <= 100)
             self.lists[prefix] = keys
+        if window_days == 365:
+            self.annual_input_days = frozenset(days)
 
     def _rolling_binding(self, key):
         if self.rolling_inventory is None:
@@ -879,7 +888,11 @@ class NativeNightReader:
             channel["status"] = "available" if readings else "no_data"
             self.input_points += len(readings)
             add_readings(channel, readings, True, start, end)
-        require(self.input_points <= 200000)
+        # ceil(200000 * 365 / 90): finite raw work for the explicit annual scope.
+        # Normalized prepare_reference points and every byte bound stay separate.
+        point_limit = 811112 if day in self.annual_input_days else 200000
+        if self.input_points > point_limit:
+            raise _RawInputPointLimit("Stored native raw input point limit")
         for name, channel in channels.items():
             finish(channel, start, end, name == "heart_rate")
             channel["quality_flags"] = list(dict.fromkeys(channel["quality_flags"]))
