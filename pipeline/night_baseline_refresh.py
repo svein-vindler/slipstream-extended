@@ -18,7 +18,14 @@ from botocore.exceptions import ClientError
 
 from . import rolling_night_references as rolling
 from .native_night import NativeInputError, NativeNightReader
-from .night_products import baseline, canonical, normalize_args, storage_key
+from .night_products import (
+    baseline,
+    canonical,
+    normalize_args,
+    reference_input_byte_limit,
+    reference_resources_valid,
+    storage_key,
+)
 from .r2_store import R2BudgetError, missing_object
 from .rolling_discovery import discovery_status, drain_discovery
 
@@ -56,6 +63,10 @@ MAX_LOCAL_PERIODS = 8
 
 class BaselineRefreshStop(R2BudgetError):
     """A durable intent cannot become success after denial/unknown or interrupted publication."""
+
+
+class _ReferenceInputByteLimit(BaselineRefreshStop):
+    category = "native_reference_input_byte_limit"
 
 
 class ComponentBudgetDeferred(BaselineRefreshStop):
@@ -1416,7 +1427,9 @@ def prepare_reference(values, args, proof):
     input_bytes = len(canonical(values).encode())
     input_points = sum(len(channel["points"]) for night in values
                        for channel in night["channels"].values())
-    require(input_bytes <= 16777216, "Native reference input byte limit")
+    byte_limit = reference_input_byte_limit(args, values, annual=annual)
+    if input_bytes > byte_limit:
+        raise _ReferenceInputByteLimit("Native reference input byte limit")
     require(input_points <= 200000, "Native reference point limit")
     value = baseline(values, args, input_bytes=input_bytes, input_points=input_points)["product"]
     body = canonical(value)
@@ -1485,6 +1498,7 @@ def _prepared_value(artifact, row):
         require([item["wake_date"] for item in inputs] == [
             (date.fromisoformat(args["start_date"]) + timedelta(days=index)).isoformat()
             for index in range(365)], "Prepared365 availability dates changed")
+    require(reference_resources_valid(value, inputs), "Prepared reference resources changed")
     return value, body.encode(), proof
 
 
@@ -1974,9 +1988,10 @@ def refresh_pending(
                 report["blocked"].append(name)
                 revision = _save_queue(io, queue, revision)
                 continue
-            require(
-                len(canonical(values).encode()) <= 16777216, "Native reference input byte limit"
-            )
+            byte_limit = reference_input_byte_limit(row, values,
+                annual=is_rolling and row.get("rolling_window") == 365)
+            if len(canonical(values).encode()) > byte_limit:
+                raise _ReferenceInputByteLimit("Native reference input byte limit")
             require(
                 sum(len(ch["points"]) for night in values for ch in night["channels"].values())
                 <= 200000,

@@ -17,13 +17,14 @@ function storedProduct(channel: "heart_rate" | "hrv", start: string, end: string
   const args = { start_date: start, end_date: end, alignment: "sleep_start", bin_minutes: 30,
     channel, exclude_dates: [], context_filter: {} };
   const manifest = [{ wake_date: end, snapshot_sha256: "a".repeat(64), source_revisions: [], context_id: null }];
-  const excluded = Array.from({ length: 29 }, (_, index) => ({
+  const nights = (Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000 + 1;
+  const excluded = Array.from({ length: nights - 1 }, (_, index) => ({
     wake_date: new Date(Date.parse(`${start}T00:00:00Z`) + index * 86400000).toISOString().slice(0, 10),
     reason: "not_in_export",
   }));
   const product = { schema_version: 1, kind: "night-baseline", method_version: "night-baseline-v1", args,
     args_sha256: hash(args), source_identity: hash(manifest), source_manifest: manifest,
-    nights_requested: 30, source_nights: 1, contributing_nights: 1, unit: channel === "hrv" ? "ms" : "bpm",
+    nights_requested: nights, source_nights: 1, contributing_nights: 1, unit: channel === "hrv" ? "ms" : "bpm",
     excluded, method: { within_night: "median", quantiles: "linear-(n-1)p", one_contribution_per_night_bin: true },
     bins: [{ bin_index: 0, offset_minutes: 0, p10: 50, p25: 50, p50: 50, p75: 50, p90: 50, nights: 1, valid_points: 1 }],
     quality_notes: [{ wake_date: end, flags: ["partial_source"] }],
@@ -77,6 +78,46 @@ it.each(["heart_rate", "hrv"] as const)("registered %s 30-day alias matches cust
     expect(await read("30")).toMatchObject({ status: "partial", current: { status: "available" },
       reference: { status: "not_stored", window: { start_date: "2025-11-17", end_date: "2025-12-16" } },
       quality_flags: ["reference_unavailable"], resources: { r2_get_attempts: 2 } });
+    expect(forbidden).not.toHaveBeenCalled();
+  } finally {
+    await client.close();
+    await server.close();
+    fetch.mockRestore();
+  }
+});
+
+it.each([
+  { days: 365, bytes: 68040932, status: "available" },
+  { days: 365, bytes: 68040933, status: "invalid_schema" },
+  { days: 90, bytes: 16777216, status: "available" },
+  { days: 90, bytes: 16777217, status: "invalid_schema" },
+  { days: 364, bytes: 16777217, status: "invalid_schema" },
+  { days: 366, bytes: 16777217, status: "invalid_schema" },
+])("registered reader enforces finite normalized bytes for $days days at $bytes", async ({ days, bytes, status }) => {
+  const end = "2025-12-31";
+  const start = new Date(Date.parse(`${end}T00:00:00Z`) - (days - 1) * 86400000).toISOString().slice(0, 10);
+  const stored = storedProduct("hrv", start, end);
+  stored.product.resources.input_bytes = bytes;
+  const forbidden = vi.fn(() => { throw new Error("Unexpected non-read operation"); });
+  const get = vi.fn(async (key: string) => {
+    expect(key).toBe(stored.key);
+    const text = JSON.stringify(stored.product);
+    return { size: Buffer.byteLength(text), etag: "synthetic", body: new Response(text).body };
+  });
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(forbidden);
+  const server = new McpServer({ name: "annual-byte-period", version: "1" });
+  const client = new Client({ name: "annual-byte-client", version: "1" });
+  new NightProductsTools({ SLIPSTREAM_DATA: { get, put: forbidden, delete: forbidden, list: forbidden, head: forbidden } } as unknown as Env)
+    .registerTools(server);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+    const response = await client.callTool({ name: "night_baseline", arguments: {
+      channel: "hrv", end_date: end, start_date: start, period: "custom",
+    } });
+    expect(response.isError).not.toBe(true);
+    expect(response.structuredContent).toMatchObject({ status, current: { status }, resources: { r2_get_attempts: 1 } });
+    expect(get).toHaveBeenCalledTimes(1);
     expect(forbidden).not.toHaveBeenCalled();
   } finally {
     await client.close();

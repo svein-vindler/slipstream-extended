@@ -10,7 +10,13 @@ from pathlib import Path
 
 from .history_state import Stop, digest, encoded, read, write
 from .native_night import zone
-from .night_products import calendar_day, canonical, normalize_args, storage_key
+from .night_products import (
+    calendar_day,
+    canonical,
+    normalize_args,
+    reference_resources_valid,
+    storage_key,
+)
 from .r2_store import R2ObjectSnapshot, _opaque_revision
 from .rolling_night_references import LEGACY_WINDOWS, window_selection
 
@@ -410,6 +416,8 @@ class ReferenceWorkset:
         target = self._target_map.get(key)
         _require(target is not None and artifact.get("key") == key and artifact.get("args") == target["args"]
                  and digest(body.encode()) == artifact.get("sha256"), "reference_workset_product_changed")
+        _require(reference_resources_valid(json.loads(body), artifact.get("prior_inputs")),
+                 "reference_workset_product_resources")
         self._verify_source_proof(artifact["source_proof"])
         return artifact
 
@@ -432,6 +440,8 @@ class ReferenceWorkset:
                  and digest(canonical(artifact["source_proof"]).encode()) == artifact["source_proof_sha256"]
                  and type(artifact["prior_inputs"]) is list
                  and len(artifact["prior_inputs"]) <= target["window_days"], "reference_workset_product_changed")
+        _require(reference_resources_valid(value, artifact["prior_inputs"]),
+                 "reference_workset_product_resources")
         self._verify_source_proof(artifact["source_proof"])
         body_ref = _immutable(self.folder / "products" / (artifact["sha256"] + ".bin"), body)
         metadata = {key: item for key, item in artifact.items() if key != "body"}

@@ -17,6 +17,8 @@ from .output_privacy import SafeArgumentParser, safe_cli
 
 METHOD = "night-baseline-v1"
 MAX_INPUT_BYTES = 16 * 1024 * 1024
+# ceil(16MiB *365/90), for a complete explicitly selected annual preparation.
+ANNUAL_INPUT_BYTES = 68040932
 MAX_POINTS = 200000
 MAX_PRODUCT_BYTES = 1024 * 1024
 UNITS = {"heart_rate": "bpm", "hrv": "ms", "body_battery": "points", "stress": "points"}
@@ -37,6 +39,32 @@ def calendar_day(value: str) -> date:
     if parsed.isoformat() != value or parsed.year < 1970:
         raise ValueError("Invalid calendar date")
     return parsed
+
+
+def reference_input_byte_limit(args: dict, inputs: list, *, annual=False) -> int:
+    """Admit annual bytes only for the explicitly selected complete calendar."""
+    try:
+        start, end = calendar_day(args["start_date"]), calendar_day(args["end_date"])
+        admitted = (annual is True and (end - start).days == 364
+                    and type(inputs) is list and len(inputs) == 365
+                    and all(type(item) is dict and item.get("wake_date") ==
+                            (start + timedelta(days=index)).isoformat() for index, item in enumerate(inputs)))
+    except (KeyError, TypeError, ValueError):
+        return MAX_INPUT_BYTES
+    return ANNUAL_INPUT_BYTES if admitted else MAX_INPUT_BYTES
+
+
+def reference_resources_valid(value: dict, inputs: list) -> bool:
+    """Bound prepared metadata without widening export or response limits."""
+    resources = value.get("resources")
+    if (type(resources) is not dict or set(resources) != {"input_bytes", "input_points", "invalid_points"}
+            or any(type(number) is not int or number < 0 for number in resources.values())):
+        return False
+    limit = reference_input_byte_limit(value.get("args", {}), inputs,
+                                       annual=value.get("nights_requested") == 365)
+    return (resources["input_bytes"] <= limit
+            and resources["input_points"] <= MAX_POINTS
+            and resources["invalid_points"] <= resources["input_points"])
 
 
 def normalize_args(
