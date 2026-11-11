@@ -46,7 +46,7 @@ def setup_saved(*, inflight=False):
     }}
     # Worker has durably enqueued the next known generation while retaining the
     # publisher row verbatim; the fixture models that external boundary.
-    for n in rolling.WINDOWS:
+    for n in rolling.LEGACY_WINDOWS:
         for channel in rolling.CHANNELS:
             queue["rolling"]["dirty"][str(n)][channel] = [["2026-10-25", "2026-10-25"]]
     queue_source(server, [], **{k: v for k, v in queue.items() if k not in {
