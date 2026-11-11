@@ -434,35 +434,29 @@ class NativeNightReader:
         self.read_bytes = self.decoded_bytes = self.input_points = 0
         self.rolling_inventory = None
 
-    def prime_rolling_sources(self, days):
-        """Fresh bounded monthly inventory, preserving each night's logical proof.
+    def prime_rolling_sources(self, days, *, window_days=None):
+        """Fresh bounded inventory, preserving each night's logical proof.
 
         Verified shared snapshots save body GETs only while the newly observed
         canonical revision and size match. Both publication fences remain fresh.
         """
-        from .night_reference_sources import CONTEXT, rolling_source_prefixes
+        from .night_reference_sources import (
+            CONTEXT,
+            _inventory_for,
+            _read_inventories,
+            rolling_source_prefixes,
+        )
 
         days = tuple(days)
-        prefixes = rolling_source_prefixes(days)
-        inventory = {}
-        for prefix, bound in sorted(prefixes.items()):
-            rows = self.store.list_revisions_bounded(prefix, max_keys=bound)
-            require(len(rows) <= bound)
-            for key, binding in rows.items():
-                require(isinstance(key, str) and key.startswith(prefix)
-                        and isinstance(binding, dict)
-                        and isinstance(binding.get("revision"), str)
-                        and type(binding.get("size")) is int and binding["size"] >= 0,
-                        "Rolling source inventory unverified")
-            inventory[prefix] = rows
+        prefixes = rolling_source_prefixes(days, window_days=window_days)
+        inventory = _read_inventories(self.store, prefixes, window_days=window_days)
         self.rolling_inventory = inventory
         # A new prime is a new observation epoch, including absence/context.
         self.cache, self.proof, self.lists, self.dependencies = {}, {}, {}, {}
         self.cache_sizes = {}
         for day in days:
             prefix = f"{CONTEXT}{day[:4]}/{day[5:7]}/{day}/"
-            month = prefix.rsplit("/", 2)[0] + "/"
-            keys = sorted(key for key in inventory[month] if key.startswith(prefix))
+            keys = sorted(key for key in _inventory_for(prefix, inventory) if key.startswith(prefix))
             require(len(keys) <= 100)
             self.lists[prefix] = keys
 

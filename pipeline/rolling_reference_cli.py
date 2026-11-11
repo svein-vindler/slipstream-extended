@@ -16,6 +16,7 @@ from .native_night import zone
 from .night_products import calendar_day
 from .night_reference_sources import rolling_source_prefixes
 from .r2_store import R2ObjectSnapshot, R2Store, _opaque_revision
+from .rolling_night_references import LEGACY_WINDOWS, window_selection
 from .rolling_reference_plan import plan_references
 
 MAX_PLANS = 32
@@ -234,12 +235,14 @@ def _load_cache(job, payload, folder):
 class _ReadOnlySources:
     """Exact selected source dates; no product, queue, inventory or write method."""
 
-    def __init__(self, store, guard, endpoints, today):
+    def __init__(self, store, guard, endpoints, today, *, windows=LEGACY_WINDOWS):
         self.store, self.guard = store, guard
+        selected_windows = window_selection(windows)
         safe = sorted(day for day in endpoints if day <= today)
         self.dates, self.signal_dates, self.prefixes = set(), set(), {}
         if safe:
-            first, last = calendar_day(safe[0]) - timedelta(days=89), calendar_day(safe[-1])
+            first, last = (calendar_day(safe[0]) - timedelta(days=max(selected_windows) - 1),
+                           calendar_day(safe[-1]))
             days = [(first + timedelta(days=i)).isoformat() for i in range((last - first).days + 1)]
             self.dates = set(days)
             self.signal_dates = {(calendar_day(day) + timedelta(days=offset)).isoformat()
@@ -278,13 +281,14 @@ class _ReadOnlySources:
         return self.store.list_revisions_bounded(prefix, max_keys=max_keys)
 
 
-def _validate_input(endpoints, today, timezone):
+def _validate_input(endpoints, today, timezone, windows=LEGACY_WINDOWS):
+    selected_windows = window_selection(windows)
     if (not isinstance(endpoints, (list, tuple)) or not 1 <= len(endpoints) <= 7
             or any(not isinstance(day, str) for day in endpoints)):
         raise Stop("rolling_reference_endpoint_bound")
     selected = sorted(set(endpoints))
     dates = [calendar_day(day) for day in selected]
-    calendar_day((dates[0] - timedelta(days=89)).isoformat())
+    calendar_day((dates[0] - timedelta(days=max(selected_windows) - 1)).isoformat())
     calendar_day(today)
     if (dates[-1] - dates[0]).days > 6 or zone(timezone) is None:
         raise Stop("rolling_reference_endpoint_bound")
@@ -292,8 +296,9 @@ def _validate_input(endpoints, today, timezone):
 
 
 def _create_plan(job, plan_sha, *, store, endpoints, today, timezone,
-                 execution_context=None, close_owned=None, span=None):
-    selected = _validate_input(endpoints, today, timezone)
+                 execution_context=None, close_owned=None, span=None, windows=LEGACY_WINDOWS):
+    selected_windows = window_selection(windows)
+    selected = _validate_input(endpoints, today, timezone, selected_windows)
     target, context, prior = _context(job, plan_sha, store, execution_context)
     if span is None and len(prior) >= MAX_PLANS:
         raise Stop("rolling_reference_plan_capacity")
@@ -318,8 +323,9 @@ def _create_plan(job, plan_sha, *, store, endpoints, today, timezone,
         job.admission(plan_sha, source=False, owner=owner)
         journal_tip = job.events()[1]
         guard = StorageGuard(store, set(), evidence, context)
-        observed = plan_references(_ReadOnlySources(store, guard, selected, today), selected,
-                                   today=today, timezone=timezone, snapshot_cache=cache)
+        observed = plan_references(_ReadOnlySources(store, guard, selected, today, windows=selected_windows),
+                                   selected, today=today, timezone=timezone, snapshot_cache=cache,
+                                   windows=selected_windows)
         if guard.failed:
             raise Stop("rolling_plan_storage_outcome_unknown")
         guard.close()
@@ -387,19 +393,19 @@ def _create_plan(job, plan_sha, *, store, endpoints, today, timezone,
 
 
 def create_plan(job, plan_sha, *, store=None, endpoints, today, timezone, execution_context=None,
-                span=None):
+                span=None, windows=LEGACY_WINDOWS):
     """Persist one stored-only plan and charged reads; no Job journal mutation."""
-    _validate_input(endpoints, today, timezone)
+    _validate_input(endpoints, today, timezone, windows)
     job.admission(plan_sha, source=False)
     if store is not None:
         return _create_plan(job, plan_sha, store=store, endpoints=endpoints, today=today,
-                            timezone=timezone, execution_context=execution_context, span=span)
+                            timezone=timezone, execution_context=execution_context, span=span, windows=windows)
     owned, close = _open_store()
     primary = False
     try:
         return _create_plan(job, plan_sha, store=owned, endpoints=endpoints, today=today,
                             timezone=timezone, execution_context=execution_context, close_owned=close,
-                            span=span)
+                            span=span, windows=windows)
     except BaseException:
         primary = True
         raise
@@ -420,6 +426,8 @@ def load_plan(job, plan_sha, reference_plan_sha, *, store, reference_round_sha=N
                "storage_target_sha256": target, "today": payload["today"],
                "timezone": payload["timezone"], "endpoints": plan["eligible_endpoints"],
                "verified_sleep_sources": plan["verified_sleep_sources"]}
+    if "windows" in plan:
+        binding["windows"] = list(window_selection(plan["windows"]))
     return binding, cache, context, plan
 
 

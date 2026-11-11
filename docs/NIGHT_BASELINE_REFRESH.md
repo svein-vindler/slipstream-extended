@@ -4,7 +4,7 @@ The existing ingestion commands maintain personal HR/HRV `night-baseline-v1`
 products from R2 sources, using the unchanged `pipeline.night_products` producer.
 The arguments remain `sleep_start`, 30-minute bins and no filters/exclusions.
 Full Monday-Sunday ISO weeks and full calendar months remain supported alongside
-rolling 28/30/90-night references. Keys and Worker reader schema
+rolling 7/28/30/90/365-night references. Keys and Worker reader schema
 remain compatible with previously generated references; a week crossing a month
 or ISO-year boundary is not clipped or regrouped.
 
@@ -14,8 +14,11 @@ For a verified local wake-date endpoint D, a window N includes exactly
 D-(N-1)..D, including D. HR and HRV have independent queued products and coverage;
 missing nights are gaps, never zeros. The same native engine preserves units,
 alignment, nulls, actual local clocks and DST. Existing Worker `night_baseline`
-reads stored products: use periods `28`, `90`, or `custom` with a 30-date inclusive
-range. The reader does not calculate missing references or start a sync.
+reads stored products: use periods `7`, `28`, `30`, `90`, `365`, or an explicit
+`custom` inclusive range. A rolling seven-date reference is distinct from a
+completed ISO week. A rolling 365-date reference always requests 365 nights,
+including across a leap year; a full calendar year can contain 366 dates. The
+reader does not calculate missing references or start a sync.
 
 The existing durable queue stores compact eligible/dirty date ranges. A changed
 sleep/HRV source day invalidates every eligible D through d+N-1, not only d.
@@ -51,7 +54,7 @@ never append the event again. Stored reads do not perform this write-side repair
 ## Existing entry points
 
 Normal recent-night production calls explicitly finish the newest selected wake
-endpoint's HR/HRV 28/30/90 cohort before older selected endpoints. The ordinary
+endpoint's HR/HRV 7/28/30/90/365 cohort before older selected endpoints. The ordinary
 local reader computes the bounded cohort from shared snapshots, then the same
 publisher checks the combined source/context proof before and after conditional
 publication. It keeps the existing GET/LIST/PUT, memory and shared write limits;
@@ -61,6 +64,12 @@ ordinary scheduled work drains that remainder without re-dirtying unchanged
 accepted source data. Unrelated unknown intents are retained and do not make a
 completed selected cohort incomplete; an unknown operation on a selected target
 still prevents completion. The ordinary bounded calendar tail remains separate.
+Existing legacy three-window queue state remains readable. Ordinary source
+changes enqueue only affected eligible references; adding supported periods
+does not silently enumerate or rebuild all historical endpoints. Explicit bulk
+scopes and resource plans retain legacy 28/30/90 meaning when `windows` is absent;
+new five-window scopes declare `[7, 28, 30, 90, 365]` explicitly. Their exact
+sources, target count, bytes and independent verification remain bounded.
 
 The hook covers `health_sync.store_day` (sleep/HRV),
 `DailySignalCollector.publish` (HR), `recent_health`, `latest_night`,

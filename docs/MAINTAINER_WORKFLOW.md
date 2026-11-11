@@ -279,6 +279,28 @@ outside that evidence. Neither local tests nor CI establish total performance,
 free operation or complete provider/failure coverage. Keep the existing ceilings
 until a separately reviewed contract changes them.
 
+## Retain already-created pipeline jobs
+
+All workflows in the shared `garmin-sync` concurrency group use
+`cancel-in-progress: false` and `queue: max`. GitHub keeps one running workflow and
+up to 100 pending runs. This lets the three simultaneous morning workflows and
+their downstream consumers wait without replacing an earlier pending run.
+Manual members use the same policy. A full queue can still cancel a new run;
+queue order follows entry into the waiting state, not guaranteed dispatch order.
+Existing schedules, per-run work limits, source guards and R2 budgets still apply.
+
+Distinguish an absent workflow run, a created run that is queued/cancelled/skipped,
+and code that started but reported partial or unavailable data. Queue retention
+only addresses the second case. Local synthetic tests of the documented queue
+contract and real Python entrypoints do not prove that GitHub delivered a cron
+event, or establish the cause of earlier absent runs. Use actual run metadata and
+receipts; do not enable/disable workflows or dispatch duplicate work as a probe.
+The receipt includes an observed partial scheduled-night follow-up even when
+the primary activity or historical operation has no eligible work. A successful
+command can therefore still report partial data; it must not imply readiness.
+The public template's data workflows remain disabled at repository level.
+See [GitHub concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
+
 ## Public workflow privacy
 
 The maintainer's public template repository keeps data-producing workflows

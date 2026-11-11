@@ -13,8 +13,8 @@ ROOT = Path(__file__).resolve().parents[2]
 def main():
     end = date(2026, 11, 7)
     nights = []
-    for offset in range(90):
-        day = (end - timedelta(days=89-offset)).isoformat()
+    for offset in range(365):
+        day = (end - timedelta(days=364-offset)).isoformat()
         channels = {}
         for channel, value, unit in (("heart_rate", 60, "bpm"), ("hrv", 40, "ms")):
             channels[channel] = {"status": "available", "unit": unit,
@@ -28,7 +28,7 @@ def main():
     with tempfile.TemporaryDirectory(dir=os.environ.get("TEMP")) as folder:
         source = Path(folder) / "source.json"
         source.write_text(json.dumps({"nights": nights}), encoding="utf-8")
-        for window in (28, 30, 90):
+        for window in (7, 28, 30, 90, 365):
             for channel in ("heart_rate", "hrv"):
                 extra = ["--start-date", (end-timedelta(days=29)).isoformat()] if window == 30 else []
                 command = [sys.executable, "-B", "-X", "utf8", "-m", "pipeline.night_products", "baseline",

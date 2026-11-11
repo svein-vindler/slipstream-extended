@@ -1,20 +1,28 @@
 # Local bulk night references
 
 The bulk workset separates stored-source collection, local computation and
-publication. It uses the existing HR/HRV28/30/90 night-baseline motor and product
+publication. It uses the existing HR/HRV night-baseline motor for rolling
+7/28/30/90/365 windows and the same product
 schema. It does not collect Garmin data or introduce a schedule.
 
-A full scope declares inclusive wake endpoints and all six channel/window
-combinations. These are possible products, not a promise of complete source
+A full scope declares inclusive wake endpoints and exact channel/window
+combinations. New five-window scopes explicitly declare
+`"windows": [7, 28, 30, 90, 365]`, yielding ten possible products per endpoint.
+Omitting `windows` preserves the legacy 28/30/90 selection and six combinations;
+an invalid declaration is rejected. These are possible products, not a promise of complete source
 coverage. A daily affected scope declares only the exact rolling targets
 invalidated by its verified delivered sources. Calendar products are outside the
 rolling build barrier and have a separate bounded daily phase; unrelated queue
 entries remain pending.
+Rolling seven-date products are distinct from completed ISO weeks. A rolling
+365-date product requests exactly 365 nights, even across a leap year; it does
+not mean a full calendar year of up to 366 dates.
 
 ## Durable phases
 
 1. **Prepare:** bind the job, storage target, timezone, explicit targets, source
-   evidence and one absolute UTC deadline in a create-only local workset.
+   evidence, window selection and one absolute UTC deadline in a create-only
+   local workset. Legacy declarations keep their original meaning on resume.
 2. **Inventory and collect:** record bounded native-verified canonical revisions;
    deduplicate the required source versions. Matching verified local publication
    snapshots are reused. Each missing required version is fetched once into the
@@ -108,17 +116,27 @@ its actual native exit status and original proof.
 
 Each daily handoff derives a new immutable endpoint universe from its actual
 selected source cohort of at most 30 dates. It includes each new source date and
-its following wake dates through at most 89 days later, clamped to the current
+its following wake dates through the largest declared window minus one day,
+clamped to the current
 allowed latest wake date. It deduplicates this finite union, then the existing
 affected compiler selects targets from the verified raw delivery. The historic
 406-endpoint one-off set is not a permanent lower bound for daily products.
 
-Thirty consecutive source dates need at most 119 endpoints. The existing
+For legacy 28/30/90 scopes this is at most 89 later dates and 119 endpoints for
+thirty consecutive source dates. With an explicit 365-day window it is at most
+364 later dates and 394 endpoints for the same consecutive cohort. The existing
 406-endpoint workset capacity remains an explicit admission bound; a more
 scattered cohort whose union exceeds it stays held without truncating dates or
 targets. `no_affected_targets` likewise does not mean that its calendar work ran
 or its source cohort closed. Generated policy, scope and resource-plan bindings
 remain immutable throughout the admitted technical batches and phase resume.
+Window selection also binds source lookback and resource-plan identity. The
+existing 2436-target, 1986-source and 160-inventory admission caps remain in
+force: a five-window scope that exceeds one stays held for explicit scope
+qualification rather than being truncated or receiving a larger allowance.
+Local and GitHub ordinary ingestion use the same reference engine and affected
+source contract. This explicit bulk mode changes neither their schedules nor
+provider selection, and does not start a hidden full rebuild.
 
 ## Command contract
 

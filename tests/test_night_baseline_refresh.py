@@ -117,7 +117,7 @@ class IncrementalTest(unittest.TestCase):
         corrected = refresh.refresh_pending(store, today="2026-11-02", timezone="Europe/Oslo", rolling_sources=[])
         self.assertEqual((corrected["periods_completed"], corrected["products_written"]), (2, 4))
         self.assertEqual(corrected["status"], "bounded_pending")
-        self.assertEqual(corrected["discovery_remaining"]["count"], 90)
+        self.assertEqual(corrected["discovery_remaining"]["count"], 365)
         print({"corrected_week_and_month": corrected["component_operations"]})
         reopened = WritableSnapshots()
         reopened.objects = store.objects

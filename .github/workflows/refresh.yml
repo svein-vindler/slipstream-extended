@@ -75,6 +75,7 @@ concurrency:
   # Shared with granular jobs so Garmin is never queried concurrently.
   group: garmin-sync
   cancel-in-progress: false
+  queue: max
 
 jobs:
   refresh:
