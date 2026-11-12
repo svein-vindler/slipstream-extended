@@ -21,7 +21,7 @@ MAX_DAYS = 14
 
 def run(
     *, days: int = 3, streams=NIGHT_STREAMS, store=None, garmin=None, today: date | None = None,
-    night_references=False, heart_rate=None,
+    night_references=False, heart_rate=None, defer_fresh_references=False,
 ) -> dict:
     selected = tuple(dict.fromkeys(streams))
     if (not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= MAX_DAYS
@@ -114,7 +114,8 @@ def run(
             report["baseline_refresh"] = (
                 {"status": "not_run_source_failure"} if any(
                     row["status"] in {"invalid_response", "import_error"} for row in hr_results)
-                else refresh_references(store, wake_dates)
+                else {"status": "bounded_pending", "selected_remaining": 10} if defer_fresh_references
+                else refresh_references(store, wake_dates, fresh_endpoint=end.isoformat())
                 if wake_dates else refresh_pending(store))
         else:
             report["baseline_refresh"] = refresh_pending(store)

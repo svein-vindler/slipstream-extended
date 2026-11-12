@@ -9,6 +9,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal, TypedDict
 
 from .history_canonical import key as raw_key
 from .history_state import Stop, digest, encoded, read
@@ -58,8 +59,9 @@ def _leaf(row, refs, *, allow_stopped):
     source = json.loads(read(folder / "RECEIPT.json"))
     result = json.loads(read(folder / "RESULT.json"))
     receipt_body = read(folder / "RECEIPT.json")
-    if (not any(Path(item["path"]).resolve() == folder / "RECEIPT.json"
-                and item["sha256"] == digest(receipt_body) for item in refs)
+    if (not all(any(Path(item["path"]).resolve() == folder / name
+                and item["sha256"] == digest(read(folder / name)) for item in refs)
+                for name in ("INTENT.json", "RESULT.json", "RECEIPT.json"))
             or result.get("receipt_sha256") != digest(receipt_body)
             or row.get("receipt_sha256") != digest(receipt_body)
             or result.get("native") != row.get("native")
@@ -86,6 +88,109 @@ def _leaf(row, refs, *, allow_stopped):
             "wire_sha256": positive["wire_sha256"], "view_sha256": positive["view_sha256"]}
 
 
+class KnownFirstemptyPartial(TypedDict):
+    """Verified positive delivery with the original unresolved Source stop retained."""
+
+    schema: Literal[1]
+    kind: Literal["DAILY_KNOWN_FIRSTEMPTY_PARTIAL_V1"]
+    round: str
+    selection_sha256: str
+    selected_dates: list[str]
+    attempted_dates: list[str]
+    unattempted_dates: list[str]
+    unresolved_targets: list[dict]
+    published_targets: list[dict]
+    source_actual_native: Literal[2]
+    source_failure: Literal[True]
+    source_status: dict
+    source_terminal_ref: dict
+    source_outcome_ref: dict
+
+
+def _known_firstempty(job, context, scope, events, binding_sha) -> KnownFirstemptyPartial | None:
+    declaration = context.get("knownFirstempty")
+    if declaration is None:
+        return None
+    def require(condition):
+        if not condition:
+            raise Stop("rolling_span_known_firstempty_unqualified")
+
+    require(type(declaration) is dict and set(declaration) == {
+        "schema", "kind", "sourceStatus", "sourceNativeTerminal", "sourceOutcome"}
+        and declaration["schema"] == 1 and declaration["kind"] == "DAILY_KNOWN_FIRSTEMPTY_RAW_V1"
+        and context.get("actualNative") == 2 and context.get("sourceFailure") is True
+        and context.get("sourceFreeTerminal") is None)
+    terminal, outcome = value(declaration["sourceNativeTerminal"]), value(declaration["sourceOutcome"])
+    status, selection = declaration["sourceStatus"], context["selection"]
+    require(declaration["sourceNativeTerminal"] == scope["terminalEvidence"]
+        and type(terminal.get("actualNative")) is int and terminal["actualNative"] == 2
+        and terminal.get("allNativeDescendantsTerminal") is True
+        and terminal.get("bindingSHA256") == binding_sha
+        and outcome.get("bindingSHA256") == binding_sha and outcome.get("actualNative") == 2
+        and outcome.get("sourceFailed") is True and outcome.get("successClaimed") is False
+        and outcome.get("journalReceipts") == scope["outcomeRefs"]
+        and outcome.get("normalCLIStatus") == status
+        and status.get("daily_status") == "source_stopped" and status.get("daily_source_stop") == "empty_unresolved"
+        and status.get("daily_round") == context["round"]
+        and status.get("locked") is False and status.get("active_run") is None)
+    # Admission is storage-only: a genuine Source pause remains in force.
+    job.admission(job.plan_sha, source=False)
+    starts = [index for index, event in enumerate(events) if event == selection]
+    require(len(starts) == 1)
+    current = events[starts[0] + 1:]
+    latest, positive, reserved, closed = {}, set(), set(), set()
+    for event in current:
+        kind = event.get("type")
+        if kind == "end":
+            require(event.get("status") in {"bounded_complete", "empty_unresolved", "published"})
+        if kind in {"resume", "daily_round_started", "daily_round_finished"}:
+            require(False)
+        if kind == "date_reserved":
+            require(event["id"] not in reserved)
+            reserved.add(event["id"])
+        if kind == "date_closed":
+            require(event["id"] in reserved and event["id"] not in closed)
+            closed.add(event["id"])
+        if kind == "target":
+            identifier = (event.get("date"), event.get("stream"))
+            require(identifier[0] in selection["new_dates"])
+            latest[identifier] = {**latest.get(identifier, {}), **event}
+            if event.get("status") == "ready":
+                positive.add(identifier)
+    require(reserved == closed and any(event.get("type") == "end"
+        and event.get("status") == "empty_unresolved" for event in current))
+    published = {key for key, row in latest.items() if row.get("status") == "published"}
+    unresolved = [{"date": day, "stream": stream, "status": "empty_unresolved"}
+        for (day, stream), row in sorted(latest.items()) if row.get("status") == "empty_unresolved"]
+    require(positive == published and positive and len(unresolved) == 1
+        and all(row.get("status") in {"published", "empty_unresolved"} for row in latest.values()))
+    attempted = {day for day, _ in latest}
+    require(attempted == {identifier.rsplit(":", 1)[-1] for identifier in closed}
+        and type(status.get("daily_new_dates")) is int and status["daily_new_dates"] == len(attempted)
+        and set(latest) == {(row["date"], row["stream"]) for row in job.plan["targets"] if row["date"] in attempted})
+    empty = latest[(unresolved[0]["date"], unresolved[0]["stream"])]
+    folder = Path(empty["folder"]).resolve()
+    require(folder.is_relative_to(job.folder / "runs"))
+    receipt, result = json.loads(read(folder / "RECEIPT.json")), json.loads(read(folder / "RESULT.json"))
+    require(all(any(Path(item["path"]).resolve() == folder / name
+        and item["sha256"] == digest(read(folder / name)) for item in scope["outcomeRefs"])
+        for name in ("INTENT.json", "RESULT.json", "RECEIPT.json"))
+        and receipt.get("cleanup_status") == "complete" and receipt.get("status") in {"complete", "stopped"}
+        and receipt.get("intent_sha256") == digest(read(folder / "INTENT.json"))
+        and result.get("native") == empty.get("native") and type(result.get("native")) is int
+        and result["native"] in {0, 2}
+        and result.get("receipt_sha256") == empty.get("receipt_sha256") == digest(read(folder / "RECEIPT.json"))
+        and any({name: row.get(name) for name in ("date", "stream", "status")} == unresolved[0]
+            for row in receipt.get("targets", [])))
+    return {"schema": 1, "kind": "DAILY_KNOWN_FIRSTEMPTY_PARTIAL_V1", "round": context["round"],
+        "selection_sha256": digest(encoded(selection)), "selected_dates": selection["new_dates"],
+        "attempted_dates": [day for day in selection["new_dates"] if day in attempted],
+        "unattempted_dates": [day for day in selection["new_dates"] if day not in attempted],
+        "unresolved_targets": unresolved, "published_targets": [], "source_actual_native": 2,
+        "source_failure": True, "source_status": status, "source_terminal_ref": declaration["sourceNativeTerminal"],
+        "source_outcome_ref": declaration["sourceOutcome"]}
+
+
 def observed_raw_delivery(job, binding_ref, postcheck_ref, *, target_sha):
     """Return verified raw dates only; no authority, current-day or whole-data claim."""
     binding = value(binding_ref)
@@ -102,7 +207,7 @@ def observed_raw_delivery(job, binding_ref, postcheck_ref, *, target_sha):
     if contract_ref is None or digest(pin(contract_ref)) != digest(Path(inspect.getfile(raw_key)).read_bytes()):
         raise Stop("rolling_span_source_key_contract")
     stages, seen, rows, identity = [postcheck_ref], set(), {}, None
-    facts = []
+    facts, partials = [], []
     while stages:
         reference = stages.pop()
         if reference["sha256"] in seen:
@@ -153,8 +258,11 @@ def observed_raw_delivery(job, binding_ref, postcheck_ref, *, target_sha):
         terminal = value(scope["terminalEvidence"])
         if terminal.get("allNativeDescendantsTerminal") is not True:
             raise Stop("rolling_span_source_terminal_unknown")
-        allow_stopped = context.get("sourceFreeTerminal") is not None
-        if allow_stopped:
+        partial = _known_firstempty(job, context, scope, events, binding_sha)
+        if partial is not None:
+            partials.append(partial)
+        allow_stopped = context.get("sourceFreeTerminal") is not None or partial is not None
+        if context.get("sourceFreeTerminal") is not None:
             free = value(context["sourceFreeTerminal"])
             if free.get("actualNative") != 0 or free.get("allNativeDescendantsTerminal") is not True:
                 raise Stop("rolling_span_source_terminal_unknown")
@@ -214,9 +322,22 @@ def observed_raw_delivery(job, binding_ref, postcheck_ref, *, target_sha):
     if not rows:
         raise Stop("rolling_span_raw_floor_empty")
     dates = sorted({item["date"] for item in rows.values()})
-    return {"oldest_endpoint": dates[0], "verified_raw_dates": dates, "destinations": list(rows.values()),
+    result = {"oldest_endpoint": dates[0], "verified_raw_dates": dates, "destinations": list(rows.values()),
             "stage_facts": facts, "source_binding_sha256": binding_sha, "invocation": binding["invocation"],
             "round": identity[0]}
+    if partials:
+        if len(partials) != len(facts) or any(item != partials[0] for item in partials):
+            raise Stop("rolling_span_known_firstempty_changed")
+        partial = partials[0]
+        expected = {(row["date"], row["stream"]) for row in job.plan["targets"]
+            if row["date"] in partial["attempted_dates"]} - {
+            (row["date"], row["stream"]) for row in partial["unresolved_targets"]}
+        if {(row["date"], row["stream"]) for row in rows.values()} != expected or len(rows) != len(expected):
+            raise Stop("rolling_span_known_firstempty_delivery_unverified")
+        partial["published_targets"] = [{name: row[name] for name in ("date", "stream", "key", "revision", "sha256")}
+            for row in sorted(rows.values(), key=lambda item: (item["date"], item["stream"]))]
+        result["known_firstempty_partial"] = partial
+    return result
 
 
 def qualify_raw_floor(job, plan_sha, source_ref, *, manifest, fresh=False):

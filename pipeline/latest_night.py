@@ -94,10 +94,16 @@ def collect_heart_rate(store, garmin, wake_dates, *, timezone=None, reuse_checks
     return result
 
 
-def refresh_references(store, wake_dates, *, rolling_windows=None):
+def refresh_references(store, wake_dates, *, rolling_windows=None, fresh_endpoint=None):
     """Finish selected rolling work and retain the existing bounded calendar tail."""
     from .night_baseline_refresh import refresh_pending, refresh_recent_night_references
 
+    if fresh_endpoint is not None:
+        from .fresh_night_references import refresh_current_night
+
+        fresh = refresh_current_night(store, fresh_endpoint)
+        if fresh["status"] != "not_run_not_current":
+            return fresh
     cache = {}
     report = refresh_recent_night_references(store, wake_dates=wake_dates, snapshot_cache=cache,
                                             rolling_windows=rolling_windows)
@@ -174,7 +180,9 @@ def run(*, run_id: str, wake_date: str, request_id: str | None = None,
     if not source_checked:
         report["baseline_refresh"] = {"status": "not_run_source_failure"}
     elif report["sleep_status"] == "stored":
-        report["baseline_refresh"] = refresh_references(store, [wake_date])
+        report["baseline_refresh"] = refresh_references(
+            store, [wake_date], fresh_endpoint=(wake_date if all(report[f"{stream}_status"] == "stored"
+            for stream in ("sleep", "hrv", "heart_rate")) else None))
     else:
         from .night_baseline_refresh import refresh_pending
         report["baseline_refresh"] = refresh_pending(store)

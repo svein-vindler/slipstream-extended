@@ -76,8 +76,7 @@ def _affected_targets(job, pairs, universe, endpoints):
                  "reference_bulk_source_delivery_required")
         observed = observed_raw_delivery(job, pair["binding"], pair["postcheck"],
             target_sha=universe["storage_target_sha256"])
-        _require(all(fact["source_failure"] is False and type(fact["source_episode_native"]) is int
-                     and fact["source_episode_native"] in {0, 2} for fact in observed["stage_facts"]),
+        _require(_admitted_source_delivery(observed),
                  "reference_bulk_source_failure")
         for row in observed["destinations"]:
             identity = (row["key"], row["revision"], row["sha256"])
@@ -91,6 +90,14 @@ def _affected_targets(job, pairs, universe, endpoints):
         and window["first"] <= target["endpoint"] <= window["last"]
         for row in proofs for window in row["ranges"])]
     return targets, proofs
+
+
+def _admitted_source_delivery(observed):
+    partial = observed.get("known_firstempty_partial")
+    return all(type(fact["source_episode_native"]) is int and (
+        fact["source_failure"] is False and fact["source_episode_native"] in {0, 2}
+        or partial is not None and fact["source_failure"] is True and fact["source_episode_native"] == 2)
+        for fact in observed["stage_facts"])
 
 
 def _daily_endpoint_universe(job, plan_sha, source_delivery_refs, policy_ref):
@@ -120,7 +127,7 @@ def _daily_endpoint_universe(job, plan_sha, source_delivery_refs, policy_ref):
         _pin(reference)
     _require(isinstance(source_delivery_refs, list) and 1 <= len(source_delivery_refs) <= 64,
              "reference_bulk_source_delivery_required")
-    identity, selected, delivered = None, None, set()
+    identity, selected, delivered, partial = None, None, set(), None
     for pair in source_delivery_refs:
         _require(isinstance(pair, dict) and set(pair) == {"binding", "postcheck"},
                  "reference_bulk_source_delivery_required")
@@ -130,14 +137,21 @@ def _daily_endpoint_universe(job, plan_sha, source_delivery_refs, policy_ref):
         selection = postcheck["dailyContext"]["selection"]
         current_identity = (observed["source_binding_sha256"], observed["round"], encoded(selection))
         _require(identity is None or identity == current_identity, "reference_bulk_daily_selection_changed")
-        _require(all(fact["source_failure"] is False and type(fact["source_episode_native"]) is int
-                     and fact["source_episode_native"] in {0, 2} for fact in observed["stage_facts"]),
+        _require(_admitted_source_delivery(observed),
                  "reference_bulk_source_failure")
+        current_partial = observed.get("known_firstempty_partial")
+        _require(identity is None or current_partial == partial, "reference_bulk_daily_selection_changed")
+        partial = current_partial
         identity, selected = current_identity, selection["new_dates"]
         delivered.update(observed["verified_raw_dates"])
     _require(isinstance(selected, list) and 1 <= len(selected) <= policy["max_source_dates"]
-             and len(set(selected)) == len(selected) and set(selected) <= delivered,
+             and len(set(selected)) == len(selected)
+             and (partial is not None or set(selected) <= delivered),
              "reference_bulk_daily_selection_unverified")
+    if partial is not None:
+        _require(policy.get("windows") == [7, 28, 30, 90, 365]
+                 and set(partial["attempted_dates"]) == delivered, "reference_bulk_daily_partial_policy")
+        selected = sorted(delivered)
     endpoints = set()
     for value in selected:
         first = calendar_day(value)
@@ -151,6 +165,8 @@ def _daily_endpoint_universe(job, plan_sha, source_delivery_refs, policy_ref):
     result.update(schema=1, kind="reference-bulk-daily-universe", policy_ref=policy_ref,
                   source_delivery_refs=source_delivery_refs, source_dates=sorted(selected), endpoints=sorted(endpoints))
     _carry_windows(policy, result)
+    if partial is not None:
+        result["known_firstempty_partial"] = partial
     return result
 
 
@@ -673,6 +689,7 @@ def publish_bulk(job, plan_sha, scope_ref, folder, *, resource_plan_ref, carried
             group = groups[group_index]
             group_keys = {target["key"] for target in targets
                           if target["endpoint"] in group and target["key"] in remaining}
+            group = sorted({target["endpoint"] for target in targets if target["key"] in group_keys})
             batch = command / f"batch-{ordinal:04d}"
             batch.mkdir()
             guard = StorageGuard(root_store.new_stage(), set(), batch,
@@ -789,8 +806,9 @@ def _after_source_context(workset, proof, binding):
              and context.get("bulk_scope_ref") == request["scope"]
              and Path(context["bulk_workset"]).resolve() == workset.folder.resolve()
              and type(context.get("source_actual_native")) is int and context["source_actual_native"] in {0, 2}
-             and context.get("source_status", {}).get("daily_source_stop") is None
-             and context["source_status"].get("daily_status") in {"bounded_complete", "baselines_pending"},
+             and (context.get("known_firstempty_partial") is not None
+                  or context.get("source_status", {}).get("daily_source_stop") is None
+                  and context["source_status"].get("daily_status") in {"bounded_complete", "baselines_pending"}),
              "reference_bulk_after_source_unqualified")
     source_terminal = json.loads(_pin(context["source_native_terminal_ref"]))
     _require(type(source_terminal.get("actualNative")) is int
@@ -805,8 +823,14 @@ def _after_source_context(workset, proof, binding):
     job = Job(binding["job"])
     observed = observed_raw_delivery(job, context["source_binding_ref"], context["source_postcheck_ref"],
         target_sha=workset.binding["storage_target_sha256"])
-    _require(all(fact["source_failure"] is False and fact["source_episode_native"] == context["source_actual_native"]
-                 for fact in observed["stage_facts"]), "reference_bulk_source_failure")
+    partial = observed.get("known_firstempty_partial")
+    _require(_admitted_source_delivery(observed)
+             and all(fact["source_episode_native"] == context["source_actual_native"] for fact in observed["stage_facts"])
+             and context.get("known_firstempty_partial") == partial
+             and (partial is None or context["source_actual_native"] == 2
+                  and context["source_status"] == partial["source_status"]
+                  and context["source_native_terminal_ref"] == partial["source_terminal_ref"]),
+             "reference_bulk_source_failure")
     after_request = json.loads(_pin(binding["bulkAfterSource"]))
     daily_universe = json.loads(_pin(context["daily_endpoint_scope_ref"]))
     _require(scope["endpoint_scope_ref"] == context["daily_endpoint_scope_ref"]
@@ -1012,10 +1036,48 @@ def _validate_bulk_postcheck(workset, reference, targets, receipts):
 
 
 def _source_completion_event(workset, proof_ref, observed):
-    return {"type": "daily_round_finished", "round": observed["round"],
+    result = {"type": "daily_round_finished", "round": observed["round"],
         "bulk_scope_sha256": workset.scope_sha256, "bulk_postcheck": proof_ref,
         "calendar_references_complete": False,
         "calendar_postcheck": json.loads(_pin(proof_ref))["calendar_postcheck_ref"]}
+    partial = observed.get("known_firstempty_partial")
+    if partial is not None:
+        calendar = json.loads(_pin(result["calendar_postcheck"]))
+        calendar_result = json.loads(_pin(calendar["result_ref"]))
+        result.update(disposition="known_firstempty_partial", known_firstempty_partial=partial,
+            source_failure=True, source_actual_native=2, calendar_status=calendar_result["status"],
+            calendar_rest={"result_ref": calendar["result_ref"],
+                           "remaining_periods": calendar_result["calendar_remaining_periods"]})
+    return result
+
+
+def _calendar_remaining(periods, generated):
+    keys = {row["key"] for row in generated}
+    return [name for name, (first, last) in sorted(periods.items()) if any(
+        storage_key(normalize_args(start_date=first, end_date=last, period="custom", channel=channel)) not in keys
+        for channel in ("heart_rate", "hrv"))]
+
+
+def _partial_source_rows(job, events, partial):
+    """Prove the partial terminal at its historical prefix, without rewriting rows."""
+    rows = {(row["date"], row["stream"]): {**row, "status": "pending"} for row in job.plan["targets"]}
+    for event in events:
+        if event.get("type") == "target":
+            key = (event["date"], event["stream"])
+            _require(key in rows, "reference_bulk_source_completion_round")
+            rows[key].update(event)
+    expected = {(row["date"], row["stream"]): row for row in partial["published_targets"]}
+    unresolved = {(row["date"], row["stream"]) for row in partial["unresolved_targets"]}
+    for key, row in rows.items():
+        if row["date"] not in partial["selected_dates"]:
+            continue
+        if key in expected:
+            _require(row["status"] == "published" and all(row.get(field) == expected[key][field]
+                for field in ("revision", "sha256")) and row.get("destination_key") == expected[key]["key"],
+                "reference_bulk_source_completion_partial_changed")
+        else:
+            _require(row["status"] == ("empty_unresolved" if key in unresolved else "pending"),
+                     "reference_bulk_source_completion_partial_changed")
 
 
 class CalendarSlice:
@@ -1144,6 +1206,7 @@ def calendar_bulk(job, plan_sha, scope_ref, folder, rolling_postcheck_ref, *, re
         "primaryFailureCategory": getattr(primary, "category", "reference_bulk_calendar_failed") if primary else None,
         "cleanupFailureCategory": "reference_bulk_calendar_cleanup_unknown" if cleanup else None,
         "calendar_observation": "bounded_attempt" if capacity else "known_budget_deferred",
+        "calendar_remaining_periods": _calendar_remaining(selected.all_periods, generated),
         "producer_observations": [row["producer_observation"] for row in observed_rows]}
     write(directory / "RESULT.json", terminal)
     if primary is not None:
@@ -1176,6 +1239,9 @@ def validate_calendar_execution(job, plan_sha, result_ref):
              and scope.get("source_dates") == selected.dates and scope.get("source_round") == selected.round
              and scope.get("rolling_postcheck_ref") == result["original_rolling_postcheck_ref"]
              and result.get("after_source_ref") == proof["after_source_ref"], "reference_bulk_calendar_unqualified")
+    if "calendar_remaining_periods" in result:
+        _require(result["calendar_remaining_periods"] == _calendar_remaining(selected.all_periods, result["generated_targets"]),
+                 "reference_bulk_calendar_unqualified")
     before = pin(result["source_journal_before"], prefix=True)
     after = pin(result["source_journal_after"], prefix=True)
     old_events, new_events = _journal(result["source_journal_before"], job), _journal(result["source_journal_after"], job)
@@ -1309,6 +1375,8 @@ def validate_bulk_source_completion(job, plan_sha, completion_ref):
             _require(active is not None and active["round"] == event["round"], "reference_bulk_source_completion_round")
             active = None
     _require(active is not None and active["round"] == observed["round"], "reference_bulk_source_completion_round")
+    if observed.get("known_firstempty_partial") is not None:
+        _partial_source_rows(job, before, observed["known_firstempty_partial"])
     state = _publication_state(workset)
     _require(len(state["verified"]) == workset.build_summary()["product_count"]
              and all(state["verified"].get(target["key"]) == completion["ack_ref"]
@@ -1342,8 +1410,11 @@ def _finish_source_round(job, plan_sha, scope_ref, workset, proof_ref, proof):
         previous = body[:body.rfind(b"\n", 0, len(body) - 1) + 1]
         prior = {"path": str(journal_path.resolve()), "bytes": len(previous), "sha256": digest(previous)}
     else:
-        _require(active is not None and active["round"] == observed["round"]
-                 and all(row["status"] == "published" for row in job.snapshot()["rows"]
+        _require(active is not None and active["round"] == observed["round"], "reference_bulk_source_completion_round")
+        if observed.get("known_firstempty_partial") is not None:
+            _partial_source_rows(job, events, observed["known_firstempty_partial"])
+        else:
+            _require(all(row["status"] == "published" for row in job.snapshot()["rows"]
                          if row["date"] in active["dates"]), "reference_bulk_source_completion_round")
         prior = _reference(journal_path)
         job.append(event)

@@ -81,6 +81,7 @@ def select_hrv_batch(
     *,
     limit: int,
     retry_failures: bool = False,
+    defer_references: bool = False,
 ) -> list[str]:
     selected = []
     if limit <= 0:
@@ -143,6 +144,7 @@ def run(
     *,
     max_days: int = 50,
     retry_failures: bool = False,
+    defer_references: bool = False,
     store: R2Store | None = None,
     garmin=None,
 ) -> dict[str, Any]:
@@ -161,7 +163,8 @@ def run(
             retrying = previous_status == "complete_with_blocked" and retry_failures
             if not changed and not retrying:
                 from .night_baseline_refresh import refresh_pending
-                plan["baseline_refresh"] = refresh_pending(store)
+                plan["baseline_refresh"] = ({"status": "bounded_pending"} if defer_references
+                                        else refresh_pending(store))
                 log_report("hrv_backfill", plan)
                 return plan
             plan["status"] = "active"
@@ -258,7 +261,8 @@ def run(
     store.put(PLAN_KEY, json_bytes(plan), "application/json")
     from .night_baseline_refresh import refresh_pending
 
-    plan["baseline_refresh"] = refresh_pending(store)
+    plan["baseline_refresh"] = ({"status": "bounded_pending"} if defer_references
+                                        else refresh_pending(store))
     log_report("hrv_backfill", plan)
     return plan
 
@@ -273,8 +277,8 @@ def main():
     args = parser.parse_args()
     try:
         values = dict(max_days=args.max_days, retry_failures=args.retry_failures)
-        return run_command(
-            run, store_factory=R2Store, login=_login, now=datetime.now(timezone.utc), **values)
+        return run_command(run, store_factory=R2Store, login=_login,
+                    now=datetime.now(timezone.utc), **values)
     except ValueError as exc:
         parser.error(str(exc))
 
