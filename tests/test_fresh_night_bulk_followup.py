@@ -94,7 +94,7 @@ def test_scheduled_followup_runs_after_existing_operation(monkeypatch):
         assert kwargs["defer_references"] is True
         events.append("source-operation")
         return {"status":"complete"}
-    night_followup.run_command(operation,store_factory=lambda store=store:store,login=lambda garmin=garmin:garmin,
+    night_followup.run_command(operation,defer_references=True,store_factory=lambda store=store:store,login=lambda garmin=garmin:garmin,
         now=datetime(2026,9,30,7,tzinfo=UTC))
     assert events == ["source-operation","reference"]
 
@@ -155,7 +155,7 @@ def test_scheduled_backfill_sources_have_only_one_reference_producer(monkeypatch
         server,garmin=NightServer(),Garmin()
         store=sdk_store(server)
         store.put("summary/health_daily.csv",b"Date,Sleep Seconds,HRV Last Night Average,Weight KG\n2026-09-30,25200,44,\n","text/csv")
-        night_followup.run_command(operation,store_factory=lambda store=store:store,login=lambda garmin=garmin:garmin,
+        night_followup.run_command(operation,defer_references=True,store_factory=lambda store=store:store,login=lambda garmin=garmin:garmin,
             now=datetime(2026,9,30,7,tzinfo=UTC))
     assert len(observed) == 2
 

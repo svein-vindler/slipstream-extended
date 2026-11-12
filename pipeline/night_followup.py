@@ -90,7 +90,7 @@ def _stored_current_night(store, day: str, now: datetime) -> bool:
 
 def run_command(
     operation: Callable[..., Any], *, store_factory, login: Callable[[], Any],
-    now: datetime | None = None, **kwargs,
+    now: datetime | None = None, defer_references: bool = False, **kwargs,
 ):
     if os.environ.get("GITHUB_EVENT_NAME") != "schedule":
         return operation(**kwargs)
@@ -116,7 +116,9 @@ def run_command(
         night = {"heart_rate": hr, "baseline_refresh": (
             {"status": "not_run_source_failure"} if hr["status"] == "import_error"
             else {"status": "bounded_pending", "selected_remaining": 10})}
-    result = operation(store=store, garmin=garmin, defer_references=True, **kwargs)
+    if defer_references:
+        kwargs["defer_references"] = True
+    result = operation(store=store, garmin=garmin, **kwargs)
     from .fresh_night_references import refresh_current_night
 
     night["baseline_refresh"] = refresh_current_night(store, local_day.isoformat(), now=instant)
