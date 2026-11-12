@@ -41,6 +41,7 @@ def _child_main(workflow, event, scenario, directory):
     from contextlib import ExitStack
     from datetime import date, datetime, timezone
     from unittest.mock import patch
+    from urllib.parse import unquote, urlsplit
 
     import boto3
     from garminconnect import Garmin
@@ -85,7 +86,10 @@ def _child_main(workflow, event, scenario, directory):
     else:
         os.environ.pop("ACTIONS_CRON_EXPRESSION", None)
 
-    from scripts.benchmark_health_reuse import HealthClient, SyntheticGarmin
+    from scripts.benchmark_health_reuse import SyntheticGarmin
+    sys.path.insert(0, str(ROOT / "tests"))
+    from history_storage_fixture import BUCKET
+    from test_history_baseline_integration import sdk_store
 
     class Source(SyntheticGarmin):
         def get_activities_by_date(self, *args, **kwargs):
@@ -123,7 +127,6 @@ def _child_main(workflow, event, scenario, directory):
         def get_respiration_data(self, day):
             return {"calendarDate": day}
 
-    client = HealthClient()
     source = Source()
     if scenario in {"night_pending", "night_source_error"}:
         if scenario == "night_pending":
@@ -146,9 +149,35 @@ def _child_main(workflow, event, scenario, directory):
             raise RuntimeError(PRIVATE_MARKER + " email@example.invalid private/key")
         return source
 
+    from pipeline.sources import garmin as garmin_source
+
+    # This fixture imports the ordinary refresh module; bind its external login
+    # before that import so its normal default remains the synthetic provider.
+    with patch.object(garmin_source, "_login", login):
+        from test_recent_night_production import NightServer
+
+    class EntryServer(NightServer):
+        def __init__(self):
+            super().__init__()
+            self.reads, self.writes = [], []
+
+        def send(self, request):
+            key = unquote(urlsplit(request.url).path).removeprefix("/" + BUCKET + "/")
+            if request.method == "GET":
+                self.reads.append(key)
+            elif request.method == "PUT":
+                self.writes.append(key)
+            return super().send(request)
+
+    # The all-window producer observes the real SDK transport and endpoint.
+    # Keep the external HTTP fake; do not replace the client's internal ABI.
+    server = EntryServer()
+    store = sdk_store(server)
+    client = store.client
+    os.environ["R2_BUCKET"] = BUCKET
+
     from pipeline.r2_store import R2Store
 
-    store = R2Store(client=client, bucket="synthetic-entrypoints")
     summaries = {
         "activities.csv": b"Activity ID,Activity Name,Activity Type,Date\n",
         "health_daily.csv": b"Date,Sleep Seconds,Weight KG,HRV Last Night Average\n2026-09-30,25200,,50\n",
@@ -244,8 +273,8 @@ def _child_main(workflow, event, scenario, directory):
             runpy.run_module("pipeline.actions_receipt", run_name="__main__")
         finally:
             observation = {"logins": len(logins), "source_calls": source.calls,
-                           "reads": client.reads, "writes": client.writes,
-                           "objects": sorted(client.objects)}
+                           "reads": server.reads, "writes": server.writes,
+                           "objects": sorted(server.objects)}
             if (directory / "diagnostics.json").is_file():
                 observation["diagnostics"] = json.loads((directory / "diagnostics.json").read_text())
             (directory / "observation.json").write_text(json.dumps(observation), encoding="utf-8")

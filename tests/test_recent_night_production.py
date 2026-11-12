@@ -190,7 +190,8 @@ def test_general_refresh_without_activity_changes_reuses_hr_and_generates_night_
     heart_days = [params["day"] for path, params in garmin.calls if path == "heart"]
     assert len(heart_days) == len(set(heart_days)), "General recent-night work fetched HR twice"
     assert not any(key.startswith("activities/") for key in server.objects)
-    for first in ("2026-09-03", "2026-09-01", "2026-07-03"):
+    for width in (7, 28, 30, 90, 365):
+        first = (date.fromisoformat(DAY) - timedelta(days=width - 1)).isoformat()
         for channel in ("heart_rate", "hrv"):
             key = storage_key(normalize_args(start_date=first, end_date=DAY,
                                             period="custom", channel=channel))
@@ -284,7 +285,7 @@ def test_hr_source_check_read_failure_stops_scheduled_job_without_refetch(monkey
 @pytest.mark.parametrize("module_name", [
     "health_detail_backfill", "hrv_backfill", "activity_backfill_scheduler", "activity_refresh",
 ])
-def test_normal_scheduled_cli_imports_hr_and_all_six_latest_products(monkeypatch, module_name):
+def test_normal_scheduled_cli_imports_hr_and_all_ten_latest_products(monkeypatch, module_name):
     clock(monkeypatch)
     server, garmin = NightServer(), Garmin()
     store = sdk_store(server)
@@ -303,7 +304,8 @@ def test_normal_scheduled_cli_imports_hr_and_all_six_latest_products(monkeypatch
     module.main()
 
     assert f"refresh/checks/v1/health/signals/{DAY}.json" in server.objects
-    for first in ("2026-09-03", "2026-09-01", "2026-07-03"):
+    for width in (7, 28, 30, 90, 365):
+        first = (date.fromisoformat(DAY) - timedelta(days=width - 1)).isoformat()
         for channel in ("heart_rate", "hrv"):
             assert storage_key(normalize_args(start_date=first, end_date=DAY,
                 period="custom", channel=channel)) in server.objects

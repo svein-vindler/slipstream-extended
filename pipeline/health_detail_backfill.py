@@ -524,7 +524,7 @@ def main():
             repair_body_end=args.repair_body_end,
             skip_sleep=args.skip_sleep,
         )
-        return run_command(run, store_factory=R2Store, login=_login,
+        return run_command(run, store_factory=R2Store, login=_login, defer_references=True,
                     now=datetime.now(UTC), **values)
     except ValueError as exc:
         parser.error(str(exc))
