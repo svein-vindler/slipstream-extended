@@ -107,16 +107,19 @@ def run_command(
 
     if not _stored_current_night(store, local_day.isoformat(), instant):
         night = recent_health.run(days=1, store=store, garmin=source(), today=local_day,
-                                  night_references=True)
+                                  night_references=True, defer_fresh_references=True)
     else:
-        from .latest_night import collect_heart_rate, refresh_references
+        from .latest_night import collect_heart_rate
 
         hr = collect_heart_rate(store, garmin, [local_day.isoformat()],
             timezone=os.environ.get("HEALTH_TIMEZONE"), reuse_checks=True, now=instant, login=source)
         night = {"heart_rate": hr, "baseline_refresh": (
             {"status": "not_run_source_failure"} if hr["status"] == "import_error"
-            else refresh_references(store, [local_day.isoformat()]))}
-    result = operation(store=store, garmin=garmin, **kwargs)
+            else {"status": "bounded_pending", "selected_remaining": 10})}
+    result = operation(store=store, garmin=garmin, defer_references=True, **kwargs)
+    from .fresh_night_references import refresh_current_night
+
+    night["baseline_refresh"] = refresh_current_night(store, local_day.isoformat(), now=instant)
     if isinstance(result, dict):
         result["night_followup"] = night
         result["baseline_refresh"] = night["baseline_refresh"]

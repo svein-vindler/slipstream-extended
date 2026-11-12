@@ -8,7 +8,7 @@ import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from .activity_backfill import is_job_stopping_error
@@ -110,7 +110,7 @@ def history_dates(health_csv: bytes, column: str) -> list[str]:
 
 def new_plan(stream: DetailStream, health_csv: bytes) -> dict[str, Any]:
     dates = history_dates(health_csv, stream.summary_column)
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     plan: dict[str, Any] = {
         "schema_version": 1,
         "kind": f"{stream.name}-backfill-plan",
@@ -214,6 +214,7 @@ def run_stream(
     refresh_recent_days: int = 0,
     repair_dates: frozenset[str] = frozenset(),
     request_pause: float = 0.15,
+    defer_references: bool = False,
 ) -> dict[str, Any]:
     if not 1 <= max_days <= MAX_DAYS_PER_STREAM:
         raise ValueError(
@@ -241,7 +242,8 @@ def run_stream(
                 })
                 if stream.name == "sleep":
                     from .night_baseline_refresh import refresh_pending
-                    passive["baseline_refresh"] = refresh_pending(store)
+                    passive["baseline_refresh"] = ({"status": "bounded_pending"} if defer_references
+                                            else refresh_pending(store))
                 return passive
             plan["status"] = "active"
             plan.pop("completed_at", None)
@@ -251,7 +253,8 @@ def run_stream(
             store.put(stream.plan_key, json_bytes(plan), "application/json")
             if stream.name == "sleep":
                 from .night_baseline_refresh import refresh_pending
-                plan["baseline_refresh"] = refresh_pending(store)
+                plan["baseline_refresh"] = ({"status": "bounded_pending"} if defer_references
+                                            else refresh_pending(store))
             return plan
 
     target_dates = plan.get("target_dates")
@@ -292,7 +295,7 @@ def run_stream(
         failure = {
             "attempts": attempts,
             "last_error": str(exc),
-            "last_attempt": datetime.now(timezone.utc).isoformat(),
+            "last_attempt": datetime.now(UTC).isoformat(),
         }
         failures[day] = failure
         failed.append({"date": day, **failure})
@@ -385,7 +388,7 @@ def run_stream(
         if remaining <= blocked
         else "active"
     )
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     plan.update({
         "status": status,
         "updated_at": now,
@@ -409,7 +412,8 @@ def run_stream(
         })
     if stream.name == "sleep":
         from .night_baseline_refresh import refresh_pending
-        plan["baseline_refresh"] = refresh_pending(store)
+        plan["baseline_refresh"] = ({"status": "bounded_pending"} if defer_references
+                                            else refresh_pending(store))
     return plan
 
 
@@ -422,6 +426,7 @@ def run(
     repair_body_start: str | None = None,
     repair_body_end: str | None = None,
     skip_sleep: bool = False,
+    defer_references: bool = False,
     store: R2Store | None = None,
     garmin=None,
 ) -> dict[str, Any]:
@@ -467,6 +472,7 @@ def run(
             get_garmin=get_garmin,
             retry_failures=retry_failures,
             refresh_recent_days=refresh_recent_days,
+            defer_references=defer_references,
         ) if not skip_sleep else {"status": "skipped", "attempted_this_run": 0},
         "body_composition": run_stream(
             STREAMS["body_composition"],
@@ -476,6 +482,7 @@ def run(
             get_garmin=get_garmin,
             retry_failures=retry_failures,
             refresh_recent_days=refresh_recent_days,
+            defer_references=defer_references,
             repair_dates=repair_dates,
             request_pause=0.75,
         ),
@@ -517,8 +524,8 @@ def main():
             repair_body_end=args.repair_body_end,
             skip_sleep=args.skip_sleep,
         )
-        return run_command(
-            run, store_factory=R2Store, login=_login, now=datetime.now(timezone.utc), **values)
+        return run_command(run, store_factory=R2Store, login=_login,
+                    now=datetime.now(UTC), **values)
     except ValueError as exc:
         parser.error(str(exc))
 
