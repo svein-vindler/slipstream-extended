@@ -1229,7 +1229,7 @@ def _selected_prepared_targets(prepared_manifest, prepared_target_keys):
         return prepared_manifest.targets if prepared_manifest is not None else None
     require(prepared_manifest is not None
             and isinstance(prepared_target_keys, (set, frozenset))
-            and 1 <= len(prepared_target_keys) <= 42
+            and 1 <= len(prepared_target_keys) <= 70
             and all(isinstance(key, str) for key in prepared_target_keys),
             "Exact prepared target keys required")
     targets = [target for target in prepared_manifest.targets if target["key"] in prepared_target_keys]
