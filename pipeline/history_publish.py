@@ -287,12 +287,18 @@ class StorageGuard:
                 body.seek(position)
             else:
                 length = int(headers.get("content-length", "-1"))
-            if (
-                length < 0
-                or self.body_bytes + length > 2097152
-                or self.execution_context["body_bytes"] - self.baseline["body_bytes"] + self.shared_cost["body_bytes"] + length > self.write_byte_limit
-            ):
-                raise Stop("storage_bytes")
+            execution_bytes = (self.execution_context["body_bytes"]
+                               - self.baseline["body_bytes"] + self.shared_cost["body_bytes"])
+            reason = ("body_length_unknown" if length < 0 else
+                      "phase_write_bytes" if self.body_bytes + length > 2097152 else
+                      "execution_write_bytes" if execution_bytes + length > self.write_byte_limit else None)
+            if reason is not None:
+                error = Stop("storage_bytes")
+                error.storage_byte_details = {"reason": reason, "request_bytes": length,
+                    "phase_bytes_before": self.body_bytes, "phase_limit_bytes": 2097152,
+                    "execution_bytes_before": execution_bytes,
+                    "execution_limit_bytes": self.write_byte_limit}
+                raise error
             if self.bulk_account is not None:
                 self.bulk_account.admit(kind, byte_count=length)
             self.body_bytes += length
