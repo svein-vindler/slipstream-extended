@@ -62,7 +62,7 @@ def make_plan(folder, *, phase, workset_sha256, target_count, inventory_requests
                 source_bytes, product_count, product_bytes, queue_bytes))
           and 1 <= target_count <= 2436 and product_count <= target_count
           and 0 < queue_bytes <= 262144 and isinstance(carried, dict)
-          and inventory_requests <= 160 and source_count <= 1986
+          and inventory_requests <= 200 and source_count <= 1986
           and source_bytes <= source_count * 524288
           and product_bytes <= product_count * 262144, "bulk_resource_basis")
     _need(phase == "publication" or product_count == product_bytes == 0,
