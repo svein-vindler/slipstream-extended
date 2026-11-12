@@ -181,6 +181,11 @@ def test_general_refresh_without_activity_changes_reuses_hr_and_generates_night_
     monkeypatch, tmp_path,
 ):
     clock(monkeypatch)
+    # The current-only producer and its deadline must share the test's UTC day.
+    for module in ("fresh_night_references", "reference_bulk_budget", "summary_export"):
+        monkeypatch.setattr(f"pipeline.{module}.datetime", latest_night.datetime)
+    from pipeline.night_baseline_refresh import QUEUE_KEY
+
     monkeypatch.setattr("pipeline.sources.garmin_health.time.sleep", lambda _: None)
     server, garmin = NightServer(), GeneralGarmin()
 
@@ -190,15 +195,22 @@ def test_general_refresh_without_activity_changes_reuses_hr_and_generates_night_
     heart_days = [params["day"] for path, params in garmin.calls if path == "heart"]
     assert len(heart_days) == len(set(heart_days)), "General recent-night work fetched HR twice"
     assert not any(key.startswith("activities/") for key in server.objects)
+    latest_keys = []
     for width in (7, 28, 30, 90, 365):
         first = (date.fromisoformat(DAY) - timedelta(days=width - 1)).isoformat()
         for channel in ("heart_rate", "hrv"):
             key = storage_key(normalize_args(start_date=first, end_date=DAY,
                                             period="custom", channel=channel))
+            latest_keys.append(key)
             assert key in server.objects, "No activity changes prevented the latest rolling reference"
     recent = next(row for row in report["stages"] if row["stage"] == "recent_health")
-    assert recent["baseline_refresh"]["selected_remaining"] > 0
-    assert report["status"] == "partial"
+    assert recent["baseline_refresh"]["selected_remaining"] == 0
+    assert recent["baseline_refresh"]["products_written"] == 10
+    assert report["status"] == "complete"
+    assert any(key.startswith("summary/generations/v2/" + DAY.replace("-", "/") + "/")
+               for key in server.objects)
+    pending_before = json.loads(server.objects[QUEUE_KEY][0])["pending"]
+    assert pending_before, "The current-night producer must retain older queued work"
     garmin.calls.clear()
 
     resumed = refresh.run(refresh.RefreshRequest(run_id="21"), data_dir=str(tmp_path),
@@ -206,14 +218,10 @@ def test_general_refresh_without_activity_changes_reuses_hr_and_generates_night_
 
     recent = next(row for row in resumed["stages"] if row["stage"] == "recent_health")
     assert recent["baseline_refresh"]["selected_remaining"] == 0
-    for offset in range(3):
-        end = date.fromisoformat(DAY) - timedelta(days=offset)
-        for width in (28, 30, 90):
-            for channel in ("heart_rate", "hrv"):
-                key = storage_key(normalize_args(
-                    start_date=(end - timedelta(days=width - 1)).isoformat(),
-                    end_date=end.isoformat(), period="custom", channel=channel))
-                assert key in server.objects
+    assert recent["baseline_refresh"]["products_unchanged"] == 10
+    assert resumed["status"] == "complete"
+    assert all(key in server.objects for key in latest_keys)
+    assert json.loads(server.objects[QUEUE_KEY][0])["pending"] == pending_before
     print(json.dumps({"synthetic_night_ledger": "general_second_cycle", "selected_remaining": 0,
         "stage_r2": recent["r2_sdk_operations"],
         "component": recent["baseline_refresh"]["component_operations"]}))
