@@ -513,6 +513,18 @@ def failure_details(error, *, stage="cli", operation=None):
                     "unsupported",
                 }:
                     result["reason"] = category
+                if category == "storage_bytes":
+                    details = getattr(current, "storage_byte_details", None)
+                    fields = ("request_bytes", "phase_bytes_before", "phase_limit_bytes",
+                              "execution_bytes_before", "execution_limit_bytes")
+                    if (isinstance(details, dict) and isinstance(details.get("reason"), str)
+                            and details["reason"] in {
+                            "body_length_unknown", "phase_write_bytes", "execution_write_bytes"}
+                            and all(type(details.get(key)) is int
+                                    and (-1 if key == "request_bytes" else 0) <= details[key] <= 10**15
+                                    for key in fields)):
+                        result["reason"] = details["reason"]
+                        result["byte_budget"] = {key: details[key] for key in fields}
                 break
             if isinstance(baseline_stop, type) and isinstance(current, baseline_stop):
                 result = {

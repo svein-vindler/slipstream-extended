@@ -113,7 +113,8 @@ class R2Store:
                 aws_access_key_id=access_key,
                 aws_secret_access_key=secret_key,
                 region_name="auto",
-                config=Config(connect_timeout=5, read_timeout=20, retries={"total_max_attempts": 1}),
+                config=Config(connect_timeout=5, read_timeout=20, retries={"total_max_attempts": 1},
+                              request_checksum_calculation="when_required"),
             )
         self.client = client
         self.max_bucket_bytes = _limit(
