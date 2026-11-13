@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import time
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from urllib.parse import urlsplit
 
@@ -59,6 +60,24 @@ MAX_PENDING = 128
 MAX_QUEUE_BYTES = 262144
 MAX_PERIODS = 2
 MAX_LOCAL_PERIODS = 8
+_COMPONENT_LIMITS = {"get": 400, "list": 100, "put": 250}
+_SUMMARY_COMPONENT_LIMITS = {**_COMPONENT_LIMITS, "get": 800}
+
+
+@contextmanager
+def summary_component_budget(store):
+    """Finite read allowance for the ordinary summary importer plus references.
+
+    Counters, failure latches, byte/write/bucket budgets and deadlines persist.
+    Other callers, including local bulk, retain the smaller component frame.
+    """
+    require(getattr(store, "_night_baseline_component_limits", None) is None,
+            "Nested summary reference budget")
+    store._night_baseline_component_limits = dict(_SUMMARY_COMPONENT_LIMITS)
+    try:
+        yield
+    finally:
+        del store._night_baseline_component_limits
 
 
 class BaselineRefreshStop(R2BudgetError):
@@ -309,6 +328,7 @@ class _WireBudget:
         previous = getattr(client, "_night_baseline_budget_state", None)
         require(previous is None or not previous["failed"], "Prior component transport failure")
         owner = client if budget_owner is None else budget_owner
+        self.limits = dict(getattr(owner, "_night_baseline_component_limits", _COMPONENT_LIMITS))
         self.state = getattr(owner, "_night_baseline_budget_state", None)
         if self.state is None:
             self.state = {
@@ -412,7 +432,7 @@ class _WireBudget:
             else "unknown"
         )
         require(kind in self.state["counts"], "Night baseline unexpected operation")
-        if self.state["counts"][kind] >= {"get": 400, "list": 100, "put": 250}[kind]:
+        if self.state["counts"][kind] >= self.limits[kind]:
             raise ComponentBudgetDeferred("Night baseline component operation budget")
         self.state["counts"][kind] += 1
         self.operation = kind
@@ -512,10 +532,11 @@ class _WireBudget:
 
 
 class _IO:
-    LIMITS = {"get": 400, "list": 100, "put": 250}
+    LIMITS = _COMPONENT_LIMITS
 
     def __init__(self, store):
         self.store, self.bytes, self.closed = store, 0, False
+        self.LIMITS = dict(getattr(store, "_night_baseline_component_limits", _COMPONENT_LIMITS))
         client = getattr(store, "client", None)
         self.observer = (
             _WireBudget(client, budget_owner=store)
@@ -835,7 +856,7 @@ def source_capacity(store, requested, *, checkpoint_puts=6):
         io = _IO(store)
         try:
             queue, _ = _read_queue(io)
-            return MAX_PENDING - len(queue["pending"]), max(0, 400 - io.counts()["get"])
+            return MAX_PENDING - len(queue["pending"]), max(0, io.LIMITS["get"] - io.counts()["get"])
         except ComponentBudgetDeferred:
             return 0, 0
         finally:
@@ -1626,7 +1647,7 @@ def publish_prepared_rows(io, queue, revision, rows, *, report, reserve_writes=0
         reserve = 2 * len(group) + sum(9 if before else 3 for _, _, before, _ in products)
         reads = (0 if rolling_group else 2 * len(proof["objects"])) + 2 * len(group)
         reads += sum(11 if before else 3 for _, _, before, _ in products)
-        if io.counts()["get"] + reads > 400:
+        if io.counts()["get"] + reads > io.LIMITS["get"]:
             return False
         estimated = sum(len(data) + (2 * len(before.data) + 2048 if before else 0)
                         for _, data, before, _ in products)

@@ -12,6 +12,7 @@ from botocore.exceptions import ClientError
 
 from .granular import json_bytes
 from .health_writer import write_health_dataset
+from .night_baseline_refresh import summary_component_budget
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2Store, missing_object
 from .signal_series import DailySignalCollector
@@ -162,7 +163,8 @@ def run(data_dir="data", *, store=None, client=None, now=None, force_reconcile=F
     # Receipts are published only after both summaries, snapshots and manifest
     # have been successfully exported. Partial metrics retain old CSV values.
     manifest = export_summaries(data_dir, store=store, base=base, flow_id=flow_id)
-    signal_report = signals.publish(source_checks=night_source_checks)
+    with summary_component_budget(store):
+        signal_report = signals.publish(source_checks=night_source_checks)
     hashes = {entry["name"]: entry["sha256"] for entry in manifest["files"]}
     ready = {"activities": activity_complete, "health": health_complete}
     checkpoints = 0
