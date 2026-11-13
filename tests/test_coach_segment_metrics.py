@@ -1,6 +1,7 @@
 """New segment behavior through real SDK sources and Coach publication."""
 import base64
 import gzip
+import hashlib
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -28,6 +29,31 @@ def legacy_uncomputed_distance_view(metrics):
             metric.update(status="unavailable", value=None)
             metric["coverage"].update(valid_seconds=0, contributing_intervals=0, status="none")
     return result
+
+
+def _assert_profile_only_fit_change(frozen, fresh):
+    from garmin_fit_sdk import Decoder, Profile, Stream
+
+    assert hashlib.sha256(frozen).hexdigest() == (
+        "d73aa36ff1b51f7cdb3ec4196b011b7e86fc7c499c9c4a3291724af347ec2381")
+    assert len(frozen) == len(fresh) == 360
+    assert frozen[:2] == fresh[:2] == b"\x0e\x20"
+    assert frozen[4:12] == fresh[4:12]  # Data size and .FIT signature.
+    assert frozen[14:] == fresh[14:]  # Every message byte and the file CRC.
+    assert int.from_bytes(frozen[2:4], "little") == 21218
+    profile = Profile["version"]["major"] * 1000 + Profile["version"]["minor"]
+    assert int.from_bytes(fresh[2:4], "little") == profile == 21221
+    assert hashlib.sha256(fresh).digest() != hashlib.sha256(frozen).digest()
+    for body in (frozen, fresh):
+        decoder = Decoder(Stream.from_byte_array(body))
+        assert decoder.is_fit() and decoder.check_integrity()
+    for scale in (False, True):
+        old_messages, old_errors = Decoder(Stream.from_byte_array(frozen)).read(
+            apply_scale_and_offset=scale, merge_heart_rates=False)
+        new_messages, new_errors = Decoder(Stream.from_byte_array(fresh)).read(
+            apply_scale_and_offset=scale, merge_heart_rates=False)
+        assert old_errors == new_errors == []
+        assert old_messages == new_messages
 
 
 def test_real_source_segments_keep_main_recovery_and_raw_scalar_policy(tmp_path, record_property):
@@ -459,11 +485,30 @@ def test_continuous_main_basis_remains_consistent_when_source_is_unavailable(tmp
 
 
 @pytest.mark.parametrize("gzip_os", [None, 3], ids=["native-gzip", "linux312-gzip-os"])
-def test_same_genuine_source_workload_keeps_storage_operation_budget(tmp_path, record_property, gzip_os):
+def test_same_genuine_source_workload_keeps_storage_operation_budget(
+        tmp_path, monkeypatch, record_property, gzip_os):
     from scripts.build_gct_sides_contract import ACTIVITY, declare, source_store
 
     fixture = json.loads((Path(__file__).parent / "fixtures/coach_engine_150_segment_transition.json").read_text())
     before = {key: base64.b64decode(body) for key, body in fixture["left"]["objects_base64"].items()}
+    from scripts import build_running_segments_contract as sources
+
+    fit_key, frozen_fit = next((key, body) for key, body in before.items()
+                               if key.endswith(".fit"))
+    _assert_profile_only_fit_change(frozen_fit, sources.synthetic_fit(sparse=False))
+    original_download = sources.SyntheticGarmin.download_activity
+
+    def frozen_original_download(self, activity_id, *, dl_fmt):
+        from garminconnect import Garmin
+
+        if dl_fmt == Garmin.ActivityDownloadFormat.ORIGINAL:
+            assert activity_id == 42 and not self.sparse
+            return frozen_fit
+        return original_download(self, activity_id, dl_fmt=dl_fmt)
+
+    # Replay the actual historical input through the current decoder/exporter.
+    # Its raw hash and context bindings must not follow a newly encoded header.
+    monkeypatch.setattr(sources.SyntheticGarmin, "download_activity", frozen_original_download)
     store = source_store(tmp_path)
     declare(store)
     if gzip_os is not None:
@@ -489,6 +534,7 @@ def test_same_genuine_source_workload_keeps_storage_operation_budget(tmp_path, r
         store.objects[key] = before[key]
     coach_backfill.run_one(activity=ACTIVITY, store=store)
     assert store.counts == fixture["left"]["counts"]
+    assert store.objects[fit_key] == frozen_fit
     pointer, _ = selected(store)
     old_canonical = next(body for key, body in before.items() if "/canonical/" in key)
     record_property("same_source_before15_counts", json.dumps(fixture["left"]["counts"]))

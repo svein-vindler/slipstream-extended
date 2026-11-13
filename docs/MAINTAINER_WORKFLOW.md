@@ -172,6 +172,13 @@ Coach identity and historical-byte preservation, encrypted-backup compatibility
 and authenticated JSON/SSE reader checks. An SDK update must not automatically
 regenerate stored analyses or rewrite history.
 
+For newly decoded sources, SDK 21.221.0 omits scalar NaN fields and entirely
+invalid NaN arrays. They remain unavailable, never zero or valid measurements;
+mixed NaN/finite arrays retain null placeholders and finite values. Stored JSON
+and its content hash can therefore differ from older decoding. Preserve actual
+raw FIT bytes and their SHA256; this update does not force reingestion,
+regenerate stored analyses or migrate historical data.
+
 ### Source maps and existing installations
 
 [Wrangler 4.151](https://github.com/cloudflare/workers-sdk/releases/tag/wrangler%404.151.0)
