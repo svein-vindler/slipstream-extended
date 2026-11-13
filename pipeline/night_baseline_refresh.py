@@ -1298,7 +1298,22 @@ def _materialize_prepared(queue, targets, **kwargs):
                 if target["window_days"] == n and target["channel"] == channel
                 for interval in rolling.intersect(ranges, target["endpoint"], target["endpoint"])
             ])
-    if not rolling.materialize(view, **kwargs):
+    # The ordinary scheduler admits one endpoint per window/channel. A sealed
+    # bulk scope can fill the same bounded cohort from its declared endpoints;
+    # keep the common scheduler's held-source, capacity and ordering checks.
+    remaining = kwargs["limit"]
+    changed = False
+    for _ in range(remaining):
+        before = len(view["pending"])
+        if not rolling.materialize(view, **{**kwargs, "limit": remaining}):
+            break
+        added = len(view["pending"]) - before
+        require(added > 0, "Prepared materialization made no progress")
+        changed = True
+        remaining -= added
+        if not remaining:
+            break
+    if not changed:
         return False
     for name, row in view["pending"].items():
         if name not in queue["pending"]:
@@ -1376,7 +1391,7 @@ def _today(timezone):
     return datetime.now(UTC).astimezone(configured).date().isoformat()
 
 
-def _preserve_reference(store, queue, queue_revision, row, key, before):
+def _reference_history_entries(key, before):
     old = _decode(before.data)
     identity = old.get("source_identity")
     args_hash = old.get("args_sha256")
@@ -1400,11 +1415,14 @@ def _preserve_reference(store, queue, queue_revision, row, key, before):
         "content_type": before.content_type,
         "encoding": before.encoding,
     }
-    for suffix, data, encoding in (
+    return [(prefix + suffix, data, encoding) for suffix, data, encoding in (
         ("product.json", before.data, before.encoding),
         ("provenance.json", canonical(provenance).encode(), None),
-    ):
-        target = prefix + suffix
+    )]
+
+
+def _preserve_reference(store, queue, queue_revision, row, key, before):
+    for target, data, encoding in _reference_history_entries(key, before):
         existing = _snapshot(store, target)
         if existing is not None:
             require(
@@ -1428,6 +1446,71 @@ def _preserve_reference(store, queue, queue_revision, row, key, before):
         row.pop("inflight")
         queue_revision = _save_queue(store, queue, queue_revision)
     return queue_revision
+
+
+def _prepared_bulk_write_bound(queue, group):
+    """Price typed PUTs and every existing protocol checkpoint before intent.
+
+    No storage reads or writes: assume both history objects need creating and
+    future opaque revisions take their maximum JSON-escaped size. Queue bodies
+    above the existing cap cannot be written by _save_queue in the first place.
+    Ordinary refresh deliberately retains its established admission estimate.
+    """
+    projected = copy.deepcopy(queue)
+    attempts, byte_count = 0, 0
+    revision = '"' + '\\' * 1022 + '"'
+
+    def price(data):
+        nonlocal attempts, byte_count
+        attempts += 1
+        byte_count += len(data)
+
+    def checkpoint():
+        nonlocal attempts, byte_count
+        attempts += 1
+        byte_count += min(MAX_QUEUE_BYTES, len(canonical(projected).encode()))
+
+    for item in group:
+        row = projected["pending"][item["name"]]
+        row["phase"] = "publishing"
+        row["source_proof_sha256"] = item["proof_hash"]
+        row.pop("validated_progress", None)
+    checkpoint()
+    for item in group:
+        row = projected["pending"][item["name"]]
+        for key, data, before, _ in item["chosen"]:
+            if before is not None:
+                for target, history, _ in _reference_history_entries(key, before):
+                    sha = hashlib.sha256(history).hexdigest()
+                    row["inflight"] = {"key": target, "sha256": sha, "revision": None}
+                    checkpoint()
+                    price(history)
+                    history_map = row.setdefault("history", {})
+                    receipt = {"revision": revision, "sha256": sha}
+                    # An already existing immutable object skips its ledger
+                    # update. Retained metadata may therefore be larger than a
+                    # new receipt; never shrink it in the admission forecast.
+                    if len(canonical(receipt).encode()) >= len(canonical(history_map.get(target)).encode()):
+                        history_map[target] = receipt
+                    row.pop("inflight")
+                    checkpoint()
+            sha = hashlib.sha256(data).hexdigest()
+            row["inflight"] = {"key": key, "sha256": sha,
+                               "revision": before.revision if before else None}
+            checkpoint()
+            price(data)
+            row.setdefault("completed", {})[key] = {"revision": revision, "sha256": sha}
+            row.pop("inflight")
+            checkpoint()
+    for item in group:
+        if len(item["chosen"]) < len(item["pending"]):
+            row = projected["pending"][item["name"]]
+            row["phase"] = "dirty"
+            row["validated_progress"] = item["proof_hash"]
+        else:
+            del projected["pending"][item["name"]]
+    checkpoint()
+    return attempts, byte_count
 
 
 def prepare_reference(values, args, proof):
@@ -1649,9 +1732,12 @@ def publish_prepared_rows(io, queue, revision, rows, *, report, reserve_writes=0
         reads += sum(11 if before else 3 for _, _, before, _ in products)
         if io.counts()["get"] + reads > io.LIMITS["get"]:
             return False
-        estimated = sum(len(data) + (2 * len(before.data) + 2048 if before else 0)
-                        for _, data, before, _ in products)
-        estimated += (reserve + 1) * min(MAX_QUEUE_BYTES, len(canonical(queue).encode()) + 65536)
+        if prepared_manifest is not None:
+            reserve, estimated = _prepared_bulk_write_bound(queue, group)
+        else:
+            estimated = sum(len(data) + (2 * len(before.data) + 2048 if before else 0)
+                            for _, data, before, _ in products)
+            estimated += (reserve + 1) * min(MAX_QUEUE_BYTES, len(canonical(queue).encode()) + 65536)
         if not io.can_write_group(attempts=reserve + reserve_writes, byte_count=estimated):
             return False
         from .night_reference_sources import rolling_fence_list_bound

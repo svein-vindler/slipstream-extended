@@ -78,8 +78,8 @@ def test_batch_limit_is_explicitly_incomplete_and_unverified_checkpoint_has_zero
         tmp_path, days=3, publish=False)
     result = publish_bulk(job, job.plan_sha, scope_ref, folder, resource_plan_ref=plan,
         carried=carried, store_factory=lambda: sdk_store(server), max_batches=1)
-    assert result["status"] == "verification_pending" and result["published_products"] == 6
-    assert result["total_products"] == 18 and result["unpublished_products"] == 12
+    assert result["status"] == "verification_pending" and result["published_products"] == 8
+    assert result["total_products"] == 18 and result["unpublished_products"] == 10
     assert result["publication_complete"] is False and result["verified_products"] == 0
     terminal = json.loads(read(next((folder / "publications").glob("*/TERMINAL.json"))))
     assert terminal["status"] == "bounded_pending"
