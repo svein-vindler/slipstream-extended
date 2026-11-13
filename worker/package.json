@@ -15,17 +15,17 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
     "@modelcontextprotocol/server": "2.4.0",
-    "agents": "0.32.0",
-    "jose": "6.2.15",
+    "agents": "0.33.0",
+    "jose": "6.2.16",
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "1.5.0",
+    "@cloudflare/vitest-plugin": "1.6.0",
     "@modelcontextprotocol/client": "2.4.0",
     "@types/node": "^26.6.6",
     "typescript": "^7.0.2",
     "vitest": "^4.1.12",
-    "wrangler": "4.156.2"
+    "wrangler": "4.158.0"
   },
   "overrides": {
     "agents@0.24.0": {
