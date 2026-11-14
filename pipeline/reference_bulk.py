@@ -894,9 +894,18 @@ def _validate_bulk_postcheck(workset, reference, targets, receipts):
     _require(proof.get("resource_plan_ref") == workset.status()["resource_plans"].get("publication"),
              "reference_bulk_resource_phase")
     planned = {target["key"]: target for target in workset.targets}
-    from .reference_verification_policy import validate_policy
+    from .reference_verification_policy import (
+        MODE,
+        validate_daily_after_source_policy,
+        validate_policy,
+    )
 
-    verification = validate_policy(workset, binding, targets)
+    daily_request = json.loads(_pin(binding["bulkAfterSource"])) if binding.get("operation") == "daily" else {}
+    if daily_request.get("verification_policy") == MODE:
+        verification = validate_daily_after_source_policy(workset, proof["binding_ref"], proof["after_source_ref"],
+            proof.get("verification_policy_ref"), targets)
+    else:
+        verification = validate_policy(workset, binding, targets)
     canary = verification["policy_ref"] is not None
     if canary:
         _require(proof.get("verification_policy_ref") == verification["policy_ref"]

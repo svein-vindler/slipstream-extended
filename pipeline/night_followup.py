@@ -121,7 +121,9 @@ def run_command(
     result = operation(store=store, garmin=garmin, **kwargs)
     from .fresh_night_references import refresh_current_night
 
-    night["baseline_refresh"] = refresh_current_night(store, local_day.isoformat(), now=instant)
+    # Keep explicit clocks fixed; sample normal execution again after source and job work.
+    validation_now = now if now is not None else datetime.now(timezone.utc)
+    night["baseline_refresh"] = refresh_current_night(store, local_day.isoformat(), now=validation_now)
     if isinstance(result, dict):
         result["night_followup"] = night
         result["baseline_refresh"] = night["baseline_refresh"]
