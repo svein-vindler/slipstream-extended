@@ -277,8 +277,8 @@ def main():
     args = parser.parse_args()
     try:
         values = dict(max_days=args.max_days, retry_failures=args.retry_failures)
-        return run_command(run, store_factory=R2Store, login=_login, defer_references=True,
-                    now=datetime.now(timezone.utc), **values)
+        return run_command(run, store_factory=R2Store, login=_login,
+                           defer_references=True, **values)
     except ValueError as exc:
         parser.error(str(exc))
 

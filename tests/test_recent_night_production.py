@@ -74,7 +74,8 @@ def clock(monkeypatch, day=DAY):
             instant = cls.fromisoformat(day + "T07:00:00+00:00")
             return instant.astimezone(tz) if tz else instant.replace(tzinfo=None)
 
-    for module in ("latest_night", "health_sync", "signal_series", "freshness", "night_baseline_refresh"):
+    for module in ("latest_night", "health_sync", "signal_series", "freshness", "night_baseline_refresh",
+                   "night_followup"):
         monkeypatch.setattr(f"pipeline.{module}.datetime", Instant)
     for module in ("refresh", "refresh_summaries", "summary_publication"):
         monkeypatch.setattr(f"pipeline.{module}.datetime", Instant)

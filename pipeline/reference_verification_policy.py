@@ -16,6 +16,7 @@ from .rolling_night_references import LEGACY_WINDOWS, window_selection
 
 MODE = "ALLSDK_EXACT_CONNECTED_READER_CANARY_V1"
 ALL_MODE = "ALLSDK_EXACT_CONNECTED_READER_ALL_V1"
+DAILY_MODE = "DAILY_AFTER_SOURCE_CANARY_POLICY_V1"
 ALGORITHM = "SIX_GROUP_ENDPOINTS_MONTH_YEAR_CHANNEL_DST_V1"
 DECLARED_ALGORITHM = "DECLARED_GROUP_ENDPOINTS_CHANNEL_DST_V2"
 MAX_CANARIES = 34
@@ -244,7 +245,12 @@ def validate_policy(workset, binding, targets):
     if policy is None:
         return {"policy_ref": None, "mode": ALL_MODE,
                 "selected_keys": [target["key"] for target in targets], "coverage": None, "get_counts": None}
-    expected = _expected(workset, binding["invocation"], policy["prior_checkpoint"])
+    return _validated_selection(workset, binding["invocation"], policy, targets, binding["bulkVerificationPolicy"])
+
+
+def _validated_selection(workset, invocation, policy, targets, reference):
+    """The same full deterministic policy/target validation for both callers."""
+    expected = _expected(workset, invocation, policy["prior_checkpoint"])
     _need(encoded(policy) == encoded(expected), "reference_verification_policy_changed")
     _need(digest(encoded(_identities(targets, _windows(workset.binding)))) == policy["pending_targets_sha256"]
           and len(targets) == policy["pending_target_count"], "reference_verification_policy_pending_scope")
@@ -254,9 +260,71 @@ def validate_policy(workset, binding, targets):
                 "selection_sha256": policy["selection_sha256"]}
     get_counts = {"sdk": len(targets), "connected_reader": len(keys),
                   "independent": len(targets) + len(keys), "reader_observations": len(keys)}
-    return {"policy_ref": binding["bulkVerificationPolicy"], "mode": MODE,
+    return {"policy_ref": reference, "mode": MODE,
             "selected_keys": keys, "coverage": coverage, "get_counts": get_counts,
             "prior_independent_gets": policy["prior_independent_gets"]}
+
+
+def _daily_context(workset, binding_ref, after_source_ref):
+    from .reference_bulk import _after_source_context
+
+    binding = json.loads(_pin(binding_ref))
+    _need(binding.get("operation") == "daily" and binding.get("deferReferenceBuildToBulk") is True
+          and "bulkVerificationPolicy" not in binding, "daily_verification_policy_binding")
+    request = json.loads(_pin(binding["bulkAfterSource"]))
+    required = {"endpoint_scope_ref", "today", "timezone", "deadline_utc", "workset_root", "carried_ref"}
+    _need(set(request) == required | {"verification_policy"} and request["verification_policy"] == MODE,
+          "daily_verification_policy_explicit_activation_required")
+    context, _ = _after_source_context(workset,
+        {"binding_ref": binding_ref, "after_source_ref": after_source_ref}, binding)
+    terminal = json.loads(_pin(context["source_native_terminal_ref"]))
+    _need(type(terminal.get("activeNativeProcesses")) is int and terminal["activeNativeProcesses"] == 0
+          and terminal.get("parentPhysicallyTerminal") is True,
+          "daily_verification_policy_source_not_terminal")
+    scope = json.loads(_pin(context["bulk_scope_ref"]))
+    universe = json.loads(_pin(context["daily_endpoint_scope_ref"]))
+    _need(binding.get("targetSHA256") == workset.binding["storage_target_sha256"]
+          and binding.get("plan", {}).get("sha256") == workset.binding["job_plan_sha256"]
+          and scope.get("job_plan_sha256") == binding["plan"]["sha256"]
+          and scope.get("storage_target_sha256") == binding["targetSHA256"]
+          and all(scope.get(key) == request[key] for key in ("today", "timezone", "deadline_utc"))
+          and _windows(scope) == _windows(universe) == _windows(workset.binding)
+          and Path(request["workset_root"]).resolve().is_relative_to(Path(binding["job"]).resolve()),
+          "daily_verification_policy_scope_changed")
+    return binding
+
+
+def create_daily_after_source_policy(job, plan_sha, scope_ref, folder, *, binding_ref, after_source_ref, output):
+    """Seal an explicit daily phase policy; no new permission, allowance or I/O client."""
+    from .reference_bulk import load_bulk_workset
+
+    workset, _ = load_bulk_workset(job, plan_sha, scope_ref, folder)
+    binding = _daily_context(workset, binding_ref, after_source_ref)
+    _need(not (workset.folder / "PUBLICATION-CHECKPOINTS.jsonl").exists(),
+          "daily_verification_policy_fresh_workset_required")
+    output = Path(output)
+    _need(output.is_absolute(), "reference_verification_policy_output")
+    raw = create_canary_policy(job, plan_sha, scope_ref, folder, new_invocation=binding["invocation"],
+                               output=output.with_name(output.stem + "-SELECTION.json"))
+    write(output, {"schema": 1, "kind": DAILY_MODE, "binding_ref": binding_ref,
+                   "after_source_ref": after_source_ref, "policy_ref": raw})
+    return _ref(output)
+
+
+def validate_daily_after_source_policy(workset, binding_ref, after_source_ref, reference, targets):
+    """Validate real daily identity and the same shared deterministic selection at ACK."""
+    binding = _daily_context(workset, binding_ref, after_source_ref)
+    phase = json.loads(_pin(reference))
+    _need(type(phase) is dict
+          and set(phase) == {"schema", "kind", "binding_ref", "after_source_ref", "policy_ref"}
+          and type(phase.get("schema")) is int and phase["schema"] == 1 and phase.get("kind") == DAILY_MODE
+          and phase["binding_ref"] == binding_ref and phase["after_source_ref"] == after_source_ref,
+          "daily_verification_policy_phase_changed")
+    policy = json.loads(_pin(phase["policy_ref"]))
+    _need(type(policy) is dict and set(policy) in (FIELDS, FIELDS | {"windows"})
+          and policy.get("prior_checkpoint") is None and policy.get("new_invocation") == binding["invocation"],
+          "daily_verification_policy_fresh_scope_required")
+    return _validated_selection(workset, binding["invocation"], policy, targets, reference)
 
 
 def create_canary_policy(job, plan_sha, scope_ref, folder, *, new_invocation, output, completion_ref=None):

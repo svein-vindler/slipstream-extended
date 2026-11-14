@@ -284,7 +284,7 @@ def main():
             force=args.force,
         )
         return run_command(
-            run, store_factory=R2Store, login=_login, now=datetime.now(timezone.utc), **values)
+            run, store_factory=R2Store, login=_login, **values)
     except ValueError as exc:
         parser.error(str(exc))
 

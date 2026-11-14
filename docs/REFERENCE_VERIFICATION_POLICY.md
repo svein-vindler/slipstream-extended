@@ -1,13 +1,15 @@
 # Explicit full SDK verification with connected-reader canaries
 
 `ALLSDK_EXACT_CONNECTED_READER_CANARY_V1` is an explicit verification policy for
-a historical, source-free bulk continuation. It changes no product bytes,
-permissions, account allowance, rate limit or deadline. The absence of
-`bulkVerificationPolicy` in the operation binding preserves full SDK **and**
-full connected-reader verification. An explicit null or invalid policy cannot
-silently select the default or a smaller sample.
+historical, source-free bulk continuation and fresh daily-after-source bulk.
+It changes no product bytes, permissions, account allowance, rate limit or
+deadline. Full SDK **and** full connected-reader verification remain the default
+when neither mode explicitly activates its policy: `bulkVerificationPolicy`
+for rolling continuation, or `bulkAfterSource.verification_policy` for daily.
+An explicit null or invalid policy cannot silently select the default or a
+smaller sample. Existing rolling activation and all resource bounds stay unchanged.
 
-For the opt-in policy, every new pending product still receives the existing
+For the opt-in policy, every produced product in the sealed pending set receives the existing
 independent SDK byte, native revision, header and source/context postimage
 checks. Only the number of connected-reader functional checks is reduced.
 An unchecked connected-reader target must never be reported as reader-verified.
@@ -15,8 +17,8 @@ An unchecked connected-reader target must never be reported as reader-verified.
 ## Deterministic selection
 
 Selection uses actual pending target identities and the pinned scope timezone;
-it reads no source objects. There are six groups: `heart_rate` and `hrv`, each
-with 28-, 30- and 90-day windows.
+it reads no source objects. For the legacy three-window scope, there are six
+groups: `heart_rate` and `hrv`, each with 28-, 30- and 90-day windows.
 
 For each nonempty group, sort available endpoint dates and select:
 
@@ -53,11 +55,26 @@ schema is the module's strict `FIELDS` set; caller-supplied counts or a
 self-selected target subset are not authority.
 
 Root must explicitly put the resulting path/bytes/SHA256 pin in the new
-operation binding's `bulkVerificationPolicy`. The ordinary entry initially
+operation binding's `bulkVerificationPolicy`. The ordinary rolling entry
 permits this only with the existing historical `bulkContinuation` transition.
+
+For daily-after-source, explicitly set `verification_policy` to
+`ALLSDK_EXACT_CONNECTED_READER_CANARY_V1` in the pinned `bulkAfterSource` request.
+After genuine source delivery and physical source termination with no active
+native children, the operator creates a `DAILY_AFTER_SOURCE_CANARY_POLICY_V1`
+phase wrapper for a fresh sealed workset before publication, with no prior
+publication checkpoint. It pins the actual daily binding, after-source context
+and deterministic selection policy; the operation remains `daily`. The shared
+validation binds the source/build seals, invocation, plan, scope, target,
+windows, timezone and original deadline. Native ACK independently validates
+this same genuine context and phase wrapper. Every produced sealed product
+still requires full SDK verification; only connected-reader coverage is reduced
+to the existing deterministic selection, at most 34 targets. Declared-window
+scopes use their existing selector; the three-window example above is unchanged.
+
 No environment flag, scheduler, global daily default or mere file existence
-activates the policy. Lower-level engine support remains explicit; no later
-activation is implied.
+activates either policy. Daily without explicit activation retains all readers.
+Neither mode adds permission, source calls, retries or resource allowance.
 
 ## Evidence and accounting
 
@@ -69,7 +86,8 @@ reads are not substituted for that production connected-reader call.
 The scope and proof pin the policy and selection before verification. Proof
 fields explicitly separate:
 
-- `verification_policy_ref`: the exact binding policy pin;
+- `verification_policy_ref`: the exact policy pin (binding policy for rolling,
+  phase-wrapper pin for daily);
 - `verification_coverage`: policy mode, SDK target count, connected-reader
   target/GET count, targets not checked through the reader, selection digest;
 - `verification_gets`: actual SDK, connected-reader and combined independent
