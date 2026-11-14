@@ -4,13 +4,13 @@
 #
 #    pip-compile --generate-hashes --index-url=https://pypi.org/simple --newline=LF --no-emit-index-url --no-strip-extras --output-file=requirements.txt --pip-args='--retries 0 --timeout 20 --keyring-provider disabled' requirements.in
 #
-boto3==1.43.126 \
-    --hash=sha256:5fda4a3dd2782c134a01d1678911962c2860dd8de8cd10bef168ba1507b371a9 \
-    --hash=sha256:dd701a973b02a73930e546a6a15d13edbfbedc3180bb3d55b0a88678c284ccd6
+boto3==1.44.0 \
+    --hash=sha256:5d311d2988ae560f83e5fb8a284cb57b48e2c8d444ecb78a6d6752ae1740e04a \
+    --hash=sha256:ae3009db1294fd4ca2e30d9592ead8ab56f0e270bcad0b95e555f03f7875716d
     # via -r requirements.in
-botocore==1.43.127 \
-    --hash=sha256:93bae360fb3a6f1b8e36593faa8bbbfa05b19866f7a37e9606a98f13394156f8 \
-    --hash=sha256:aa0e3188679a2164a2098a14ea9b59520520cb573aaee9999d852480691e134a
+botocore==1.44.3 \
+    --hash=sha256:44d86fff55ce2d014bd72183ebc164b21b36598253b8234d4f59e8600e09b8b3 \
+    --hash=sha256:793eac2a7ca167e9376b136cf000e1675e9ffe8d7ec609160cc1ee00b93ace28
     # via
     #   boto3
     #   s3transfer
@@ -358,12 +358,6 @@ six==1.17.0 \
     --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274 \
     --hash=sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81
     # via python-dateutil
-tzdata==2026.6 ; sys_platform == "win32" \
-    --hash=sha256:0a10eec6e13ef16b627fabed9a5f2ba61a62b1c67f327305f4e7e412a70b4aec \
-    --hash=sha256:85d2cd9c09f81f0bb29db27759fc83af4f1e620efb814f8c5bf8b4cc4feece6d
-    # via
-    #   -r requirements.in
-    #   garminconnect
 ua-generator==2.1.6 \
     --hash=sha256:532b8769f3dbb914b5ace2846a47cdfa2b3a2d17a9c82cfef53d19280045b18e \
     --hash=sha256:877285e6adab3d6b0f9b295d954d121fc21a0305be8526038218e8f08be76df6
