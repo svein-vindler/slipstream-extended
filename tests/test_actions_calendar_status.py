@@ -13,6 +13,7 @@ from test_history_baseline_integration import sdk_store
 from test_recent_night_production import DAY, NightServer, clock
 
 from pipeline import actions_receipt, refresh
+from pipeline.reference_coverage import CalendarCoverage
 
 
 @pytest.fixture
@@ -31,13 +32,21 @@ def morning(monkeypatch, tmp_path):
         'refresh/checks/v1/night/'))}
     current = {'status': 'complete', 'windows': [7, 28, 30, 90, 365],
                'selected_remaining': 0, 'producer_publication_complete': True,
-               'wholeDataVerified': False, 'products_written': 10}
+               'wholeDataVerified': False, 'products_written': 10,
+               'coverage': {'coverage_complete': True}}
     # Public producer-result seams: the actual parent routing and status logic
     # execute, while expensive byte/publication paths reuse the frozen v1 proof.
     monkeypatch.setattr('pipeline.fresh_night_references.refresh_current_night',
                         lambda *args, **kwargs: copy.deepcopy(current))
     calendar_result = {}
     requested = []
+    # The mocked calendar producer selects no rows through the real observer.
+    # Its held/pending status still controls the parent independently of this
+    # explicitly empty selected-product scope.
+    empty_coverage = {'coverage_complete': True, 'source_partial': False,
+                      'scope': 'no_selected_calendar_products',
+                      'counts': {'planned': 0, 'requested': 0, 'published': 0, 'verified': 0},
+                      'rows': []}
 
     def calendar(store, **kwargs):
         requested.append(kwargs)
@@ -69,8 +78,14 @@ def morning(monkeypatch, tmp_path):
         assert baseline['selected_remaining'] == 0
         assert baseline['producer_publication_complete'] is True
         assert baseline['status'] == 'complete'
-        assert baseline['calendar_refresh'] == value
-        assert requested[-1] == {'rolling_endpoints': []}
+        assert baseline['coverage'] == current['coverage']
+        assert baseline['calendar_refresh'] == {**value, 'coverage': empty_coverage}
+        assert set(requested[-1]) == {'rolling_endpoints', 'coverage_observer'}
+        assert requested[-1]['rolling_endpoints'] == []
+        observer = requested[-1]['coverage_observer']
+        assert isinstance(observer, CalendarCoverage)
+        assert observer.result() == empty_coverage
+        assert calendar_result == value
         assert source.calls == original_calls
         assert all(server.objects[key] == value for key, value in checkpoints.items())
         return report, receipt
