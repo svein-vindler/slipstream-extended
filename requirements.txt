@@ -4,9 +4,9 @@
 #
 #    pip-compile --generate-hashes --index-url=https://pypi.org/simple --newline=LF --no-emit-index-url --no-strip-extras --output-file=requirements.txt --pip-args='--retries 0 --timeout 20 --keyring-provider disabled' requirements.in
 #
-boto3==1.44.0 \
-    --hash=sha256:5d311d2988ae560f83e5fb8a284cb57b48e2c8d444ecb78a6d6752ae1740e04a \
-    --hash=sha256:ae3009db1294fd4ca2e30d9592ead8ab56f0e270bcad0b95e555f03f7875716d
+boto3==1.44.2 \
+    --hash=sha256:70c02826640da17c15067033af01667059dde5e86057c2d1227cd8523c2f24dd \
+    --hash=sha256:d62ff8a9eb06cab9f0b4242d7a2907a8fff9cca630e27ef736660f9d53e5b18e
     # via -r requirements.in
 botocore==1.44.3 \
     --hash=sha256:44d86fff55ce2d014bd72183ebc164b21b36598253b8234d4f59e8600e09b8b3 \
