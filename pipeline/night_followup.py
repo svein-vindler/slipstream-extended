@@ -161,11 +161,15 @@ def run_morning(*, store, login, now=None):
 
     # An empty rolling endpoint filter retains the existing week/month tail
     # without discovering or draining the historical rolling-reference queue.
-    calendar = refresh_pending(store, rolling_endpoints=[])
+    from .reference_coverage import CalendarCoverage
+    coverage=CalendarCoverage()
+    calendar = refresh_pending(store, rolling_endpoints=[],coverage_observer=coverage)
+    calendar['coverage']=coverage.result()
     baseline = night["baseline_refresh"]
     baseline["calendar_refresh"] = calendar
     night.update(kind="recent-health-sync", streams=streams,
                  status=night.get("status", "complete" if heart.get("status") == "stored" else "partial"))
-    if _calendar_incomplete(calendar):
+    if (_calendar_incomplete(calendar) or calendar['coverage']['coverage_complete'] is not True
+            or baseline.get('coverage',{}).get('coverage_complete') is not True):
         night["status"] = "partial"
     return night

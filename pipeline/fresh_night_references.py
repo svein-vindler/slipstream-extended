@@ -111,7 +111,10 @@ def refresh_current_night(store, wake_date, *, now=None, folder=None):
         store_factory=factory, max_batches=2)
     reports = [json.loads(path.read_bytes())["report"] for path in
                sorted((folder / "publications").glob("*/batch-*/RESULT.json"))]
-    result = {"status": "complete" if published["publication_complete"] else "bounded_pending",
+    from .reference_coverage import producer_coverage
+    coverage=producer_coverage(workset,published)
+    result = {"status": "complete" if published["publication_complete"] and coverage['coverage_complete'] else "bounded_pending",
+        'coverage':coverage,
         "windows": list(WINDOWS), "selected_remaining": published["unpublished_products"],
         "products_written": sum(report["products_written"] for report in reports),
         "products_unchanged": sum(report["products_unchanged"] for report in reports),

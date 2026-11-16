@@ -565,6 +565,9 @@ class _CapturedStore:
             if product.get("args") == planned["args"]:
                 path = self.folder / (digest(name.encode()) + ".json")
                 value = {**proof, "args": product["args"], "source_identity": product["source_identity"],
+                         'coverage_product':{**{key:product.get(key) for key in
+                             ('args','kind','schema_version','method_version','source_identity')},
+                             'source_partial':product.get('source_nights',0)<product.get('nights_requested',0)},
                          "content_type": snapshot.content_type, "encoding": snapshot.encoding,
                          "decoded_sha256": digest(decoded),
                          "endpoint": planned["endpoint"], "window_days": planned["window_days"],

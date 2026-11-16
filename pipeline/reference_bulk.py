@@ -646,13 +646,7 @@ def publish_bulk(job, plan_sha, scope_ref, folder, *, resource_plan_ref, carried
         validate_completion_receipt(workset, _reference(reconciliation))
         _require(completion["resource_plan_ref"] == resource_plan_ref, "bulk_completion_plan_changed")
     sources = {row["key"] for row in workset.required_sources()}
-    targets = []
-    for target in workset.targets:
-        day = target["endpoint"]
-        key = f"health/sleep/v1/{day[:4]}/{day[5:7]}/{day}.json"
-        if key in sources or key + ".gz" in sources:
-            workset.product_for(target["key"])
-            targets.append(target)
+    targets = workset.publication_targets()
     endpoints = list(dict.fromkeys(target["endpoint"] for target in targets))
     groups = [endpoints[index:index + 7] for index in range(0, len(endpoints), 7)]
     command = (completion_directory(workset, completion_ref) / "publications" if completion_ref is not None
@@ -1362,6 +1356,7 @@ def validate_bulk_source_completion(job, plan_sha, completion_ref):
     workset, _ = load_bulk_workset(job, plan_sha, completion["scope_ref"], completion["workset"])
     proof = json.loads(_pin(completion["ack_ref"]))
     _validate_bulk_postcheck(workset, completion["ack_ref"], proof["generated_targets"], proof["publication_receipts"])
+    validate_bulk_coverage(workset, proof)
     _validate_calendar_postcheck(workset, proof)
     binding = json.loads(_pin(proof["binding_ref"]))
     context, observed = _after_source_context(workset, proof, binding)
@@ -1452,6 +1447,15 @@ def validate_closed_source_cohort(job, plan_sha, round_id, *, before_sequence):
     return True
 
 
+def validate_bulk_coverage(workset, proof):
+    """Check requested rolling products after the existing proof validator succeeds."""
+    from .reference_coverage import bulk_coverage
+
+    coverage = bulk_coverage(workset, proof)
+    _require(coverage['coverage_complete'], 'reference_bulk_requested_coverage_incomplete')
+    return coverage
+
+
 def acknowledge_bulk(job, plan_sha, scope_ref, folder, proof_ref, *, resource_plan_ref, carried, completion_ref=None):
     """Advance only after the whole currently published set has genuine aggregate evidence."""
     from .reference_bulk_budget import BulkAccount
@@ -1465,12 +1469,14 @@ def acknowledge_bulk(job, plan_sha, scope_ref, folder, proof_ref, *, resource_pl
     repeated = proof_ref in state["verified"].values()
     original = json.loads(_pin(proof_ref)) if repeated else current
     proof = _validate_bulk_postcheck(workset, proof_ref, original["generated_targets"], original["publication_receipts"])
+    coverage = validate_bulk_coverage(workset, proof)
     if "after_source_ref" in proof:
         _validate_calendar_postcheck(workset, proof)
     if not repeated:
         _require(proof["account_snapshot"] == account.snapshot(), "reference_bulk_meter_changed")
         _publication_checkpoint(workset, state, "verified", proof_ref)
     result = {**_publication_result(workset, account, resource_plan_ref, _publication_state(workset)), "phase": "ack"}
+    result['coverage'] = coverage
     if "verification_policy_ref" in proof:
         result.update(verification_policy_ref=proof["verification_policy_ref"],
                       verification_coverage=proof["verification_coverage"], verification_gets=proof["verification_gets"])
