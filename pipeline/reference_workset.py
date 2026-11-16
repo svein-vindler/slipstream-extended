@@ -515,6 +515,19 @@ class ReferenceWorkset:
         _require(key in self._products, "reference_workset_product_not_ready")
         return self._load_artifact(self._products[key], key)
 
+    def publication_targets(self):
+        """Return exactly genuine sealed products; known gaps are not publications."""
+        self.assert_sealed()
+        targets = []
+        for target in self._targets:
+            if target['key'] not in self._products:
+                _require(target['key'] in self._outcomes, 'reference_workset_product_unresolved')
+                continue
+            artifact = self.product_for(target['key'])
+            _require(artifact['key'] == target['key'], 'reference_workset_product_target')
+            targets.append(copy.deepcopy(target))
+        return targets
+
     def pending_targets(self):
         return [copy.deepcopy(target) for target in self._targets
                 if target["key"] not in self._products and target["key"] not in self._outcomes]

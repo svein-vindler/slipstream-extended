@@ -1666,6 +1666,9 @@ def publish_prepared_rows(io, queue, revision, rows, *, report, reserve_writes=0
         pending = []
         for artifact in artifacts:
             value, data, checked_proof = _prepared_value(artifact, row)
+            coverage=getattr(io,'coverage_observer',None)
+            if coverage is not None:
+                coverage.expect_source(artifact['key'],value)
             require(checked_proof == proof and artifact["source_proof_sha256"] == proof_hash,
                     "Prepared reference row proof conflict")
             for key, binding in row["sources"].items():
@@ -1707,6 +1710,8 @@ def publish_prepared_rows(io, queue, revision, rows, *, report, reserve_writes=0
                         and (unchanged or artifact["sha256"] == complete["sha256"]),
                         "Known completed reference changed")
             if complete or unchanged:
+                if coverage is not None:
+                    coverage.stage(name,key,before)
                 report["products_unchanged"] += 1
             else:
                 pending.append((key, data, before, False))
@@ -1793,6 +1798,9 @@ def publish_prepared_rows(io, queue, revision, rows, *, report, reserve_writes=0
                                "revision": before.revision if before else None}
             revision = _save_queue(io, queue, revision)
             after = _cas(io, key, data, before)
+            coverage=getattr(io,'coverage_observer',None)
+            if coverage is not None:
+                coverage.stage(record['name'],key,after)
             row.setdefault("completed", {})[key] = {"revision": after.revision,
                 "sha256": hashlib.sha256(data).hexdigest()}
             row.pop("inflight")
@@ -1801,6 +1809,9 @@ def publish_prepared_rows(io, queue, revision, rows, *, report, reserve_writes=0
     validate_current()
     completed = []
     for record in chosen:
+        coverage=getattr(io,'coverage_observer',None)
+        if coverage is not None:
+            coverage.confirm(record['name'])
         if len(record["chosen"]) < len(record["pending"]):
             record["row"]["phase"] = "dirty"
             record["row"]["validated_progress"] = record["proof_hash"]
@@ -1821,6 +1832,7 @@ def refresh_pending(
     store, *, today=None, timezone=None, max_periods=MAX_PERIODS, reserve_writes=0,
     snapshot_cache=None, period_names=None, rolling_sources=None, rolling_endpoints=None,
     prepared_manifest=None, prepared_target_keys=None, batch_local_preparation=False, rolling_windows=None,
+    coverage_observer=None,
 ):
     """Bounded stored-only drain with optional verified local calculation inputs.
 
@@ -1855,6 +1867,10 @@ def refresh_pending(
         "Prepared targets outside refresh endpoints")
     prepared_keys = {target["key"] for target in prepared_targets} if prepared_targets is not None else None
     io = _IO(store)
+    if coverage_observer is not None:
+        from .reference_coverage import CalendarCoverage
+        require(type(coverage_observer) is CalendarCoverage,'Known coverage observer required')
+        io.coverage_observer=coverage_observer
     report = {
         "periods_completed": 0,
         "local_snapshot_hits": 0,
@@ -1978,6 +1994,9 @@ def refresh_pending(
         # this phase; daily source consumers can continue their existing drain.
         calendars = [name for name in eligible if not queue["pending"][name].get("rolling_window")]
         selected = (calendars or eligible)[:max_periods]
+        if coverage_observer is not None:
+            for name in selected:
+                coverage_observer.request_period(name,queue['pending'][name])
         staged_rows = []
         if batch_local_preparation and selected and not calendars:
             first = min(queue["pending"][name]["start_date"] for name in selected)
