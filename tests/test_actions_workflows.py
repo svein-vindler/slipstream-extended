@@ -9,7 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 CASES = [
     ("refresh.yml", "0 8 * * 1-5", "--workflow", None, "250", "536870912"),
-    ("activity-refresh.yml", "15 23 * * *", '"${args[@]}"', 30, "250", "536870912"),
+    ("activity-refresh.yml", "0 12,18 * * *", '"${args[@]}"', 30, "250", "536870912"),
     ("scheduled-activity-backfill.yml", "30 2,8,14,20 * * *", '--max-activities "$MAX_ACTIVITIES"', 30, "250", "536870912"),
     ("scheduled-health-detail-backfill.yml", "0 8 * * 1-5", '"${args[@]}"', 30, "250", "536870912"),
     ("scheduled-hrv-backfill.yml", "0 8 * * 1-5", '"${args[@]}"', 30, "250", "536870912"),
@@ -76,7 +76,9 @@ def test_shared_receipt_validation_omits_untrusted_timestamp_from_failure():
 def test_sleep_workflows_use_native_oslo_weekday_and_weekend_mornings(name):
     text = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
     schedule = text.split("  schedule:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
-    assert schedule == (
+    broad = ('    - cron: "15 3 * * *"\n'
+             '      timezone: "Europe/Oslo"\n') if name == "refresh.yml" else ""
+    assert schedule == broad + (
         '    - cron: "0 8 * * 1-5"\n'
         '      timezone: "Europe/Oslo"\n'
         '    - cron: "0 10 * * 0,6"\n'
@@ -88,10 +90,11 @@ def test_receipt_nominal_schedules_match_actual_yaml_for_all_six_workflows():
     from pipeline.actions_receipt_schema import configured_schedules
 
     expected = {
-        "refresh.yml": [("0 8 * * 1-5", "Europe/Oslo"), ("0 10 * * 0,6", "Europe/Oslo")],
+        "refresh.yml": [("15 3 * * *", "Europe/Oslo"),
+                        ("0 8 * * 1-5", "Europe/Oslo"), ("0 10 * * 0,6", "Europe/Oslo")],
         "scheduled-health-detail-backfill.yml": [("0 8 * * 1-5", "Europe/Oslo"), ("0 10 * * 0,6", "Europe/Oslo")],
         "scheduled-hrv-backfill.yml": [("0 8 * * 1-5", "Europe/Oslo"), ("0 10 * * 0,6", "Europe/Oslo")],
-        "activity-refresh.yml": [("15 23 * * *", "UTC")],
+        "activity-refresh.yml": [("0 12,18 * * *", "Europe/Oslo")],
         "scheduled-activity-backfill.yml": [("30 2,8,14,20 * * *", "UTC")],
         "coach-input-backfill.yml": [("40 2,8,14,20 * * *", "UTC")],
     }

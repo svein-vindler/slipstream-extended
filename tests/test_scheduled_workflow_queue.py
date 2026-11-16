@@ -213,6 +213,11 @@ def test_successful_created_activity_completion_retains_morning_jobs_and_coach()
 def test_actual_reconciliation_cli_keeps_nominal_oslo_mornings_distinct_from_delivery(
     tmp_path, day, expected_utc,
 ):
+    broad_utc = {
+        "2026-11-11": "2026-11-11T02:15:00Z", "2026-11-14": "2026-11-14T02:15:00Z",
+        "2026-03-29": "2026-03-29T01:15:00Z", "2026-03-30": "2026-03-30T01:15:00Z",
+        "2026-10-25": "2026-10-25T02:15:00Z", "2026-10-26": "2026-10-26T02:15:00Z",
+    }
     refs = []
     for index, workflow in enumerate(MORNING_WORKFLOWS):
         text = (WORKFLOWS / workflow).read_text()
@@ -246,6 +251,7 @@ def test_actual_reconciliation_cli_keeps_nominal_oslo_mornings_distinct_from_del
     assert result.stdout == result.stderr == ""
     report = json.loads(output_path.read_text())
     assert [(item["workflow"], item["scheduled_for"]) for item in report["occurrences"]] == [
+        ("refresh.yml", broad_utc[day]),
         ("refresh.yml", expected_utc),
         ("scheduled-health-detail-backfill.yml", expected_utc),
         ("scheduled-hrv-backfill.yml", expected_utc),

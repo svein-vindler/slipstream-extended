@@ -29,7 +29,7 @@ def _synthetic_environment():
     return values
 
 
-def _child_main(workflow, event, scenario, directory):
+def _child_main(workflow, event, scenario, directory, cron=""):
     # Direct pytest/CI is safe independently of the local qualification runner.
     # Remove selectors by name before importing a provider/storage SDK.
     clean = _synthetic_environment()
@@ -74,15 +74,15 @@ def _child_main(workflow, event, scenario, directory):
                  "BACKFILL_START_YEAR", "BACKFILL_END_YEAR", "SYNC_REQUEST_ID"):
         os.environ.pop(name, None)
     crons = {
-        "refresh.yml": "0 8 * * 1-5",
+        "refresh.yml": "15 3 * * *",  # general incremental payload, not morning
         "scheduled-health-detail-backfill.yml": "0 8 * * 1-5",
         "scheduled-hrv-backfill.yml": "0 8 * * 1-5",
-        "activity-refresh.yml": "15 23 * * *",
+        "activity-refresh.yml": "0 12,18 * * *",
         "scheduled-activity-backfill.yml": "30 2,8,14,20 * * *",
         "coach-input-backfill.yml": "40 2,8,14,20 * * *",
     }
     if event == "schedule":
-        os.environ["ACTIONS_CRON_EXPRESSION"] = crons[workflow]
+        os.environ["ACTIONS_CRON_EXPRESSION"] = cron or crons[workflow]
     else:
         os.environ.pop("ACTIONS_CRON_EXPRESSION", None)
 
@@ -280,13 +280,13 @@ def _child_main(workflow, event, scenario, directory):
             (directory / "observation.json").write_text(json.dumps(observation), encoding="utf-8")
 
 
-def invoke(tmp_path, workflow, *, event="workflow_dispatch", scenario="no_work"):
+def invoke(tmp_path, workflow, *, event="workflow_dispatch", scenario="no_work", cron=None):
     driver = "import runpy,sys; ns=runpy.run_path(sys.argv[1]); ns['_child_main'](*sys.argv[2:])"
     child_env = _synthetic_environment()
     child_env["PYTHONPATH"] = str(ROOT.resolve())
     result = subprocess.run(
         [sys.executable, "-B", "-X", "utf8", "-c", driver, str(Path(__file__).resolve()),
-         workflow, event, scenario, str(tmp_path)],
+         workflow, event, scenario, str(tmp_path), cron or ""],
         cwd=ROOT, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
         env=child_env,
     )
@@ -296,6 +296,11 @@ def invoke(tmp_path, workflow, *, event="workflow_dispatch", scenario="no_work")
     assert receipt["native_exit"] == result.returncode
     assert receipt["event"] == event
     assert receipt["context_status"] == "valid"
+    if event == "schedule" and workflow in {"refresh.yml", "activity-refresh.yml"}:
+        assert receipt["cron_expression"] == (cron or {
+            "refresh.yml": "15 3 * * *", "activity-refresh.yml": "0 12,18 * * *",
+        }[workflow])
+        assert receipt["cron_timezone"] == "Europe/Oslo"
     assert receipt["scheduled_for"] is None and receipt["occurrence_id"] is None
     output = result.stdout + result.stderr + json.dumps(receipt)
     assert PRIVATE_MARKER not in output
@@ -339,21 +344,35 @@ def test_real_activity_entry_preserves_primary_failure_and_safe_receipt(tmp_path
     assert observation["source_calls"] == [["activities", "synthetic"]]
 
 
-def test_scheduled_activity_keeps_night_source_error_visible_when_activity_work_is_empty(tmp_path):
+def test_scheduled_morning_keeps_night_source_error_visible_when_activity_work_is_empty(tmp_path):
     result, receipt, observation = invoke(
-        tmp_path, "activity-refresh.yml", event="schedule", scenario="night_source_error")
+        tmp_path, "refresh.yml", event="schedule", scenario="night_source_error", cron="0 8 * * 1-5")
+    assert result.returncode == 1 and receipt["command_outcome"] == "failure"
+    assert receipt["data_outcome"] == "error"
+    calls = {row[0] for row in observation["source_calls"]}
+    assert {"sleep", "hrv"}.issubset(calls) and "activities" not in calls
+    assert observation["diagnostics"]["stages"][0]["stage"] == "latest_night"
+
+
+@pytest.mark.parametrize("scenario", ["night_pending", "night_source_error"])
+def test_scheduled_activity_does_not_take_over_morning_night_work(tmp_path, scenario):
+    result, receipt, observation = invoke(
+        tmp_path, "activity-refresh.yml", event="schedule", scenario=scenario)
     assert result.returncode == 0 and receipt["command_outcome"] == "success"
-    assert receipt["data_outcome"] == "partial"
-    assert {row[0] for row in observation["source_calls"]} == {"activities", "sleep", "hrv"}
+    assert receipt["data_outcome"] == "no_work"
+    assert observation["logins"] == 1
+    assert observation["source_calls"] == [["activities", "synthetic"]]
+    assert not any(key.startswith("health/") for key in observation["writes"])
 
 
 @pytest.mark.parametrize("workflow", [
-    "activity-refresh.yml", "scheduled-activity-backfill.yml",
+    "refresh.yml", "scheduled-activity-backfill.yml",
     "scheduled-health-detail-backfill.yml", "scheduled-hrv-backfill.yml",
 ])
 def test_scheduled_command_does_not_claim_no_work_when_current_night_is_pending(tmp_path, workflow):
     result, receipt, observation = invoke(
-        tmp_path, workflow, event="schedule", scenario="night_pending")
+        tmp_path, workflow, event="schedule", scenario="night_pending",
+        cron="0 8 * * 1-5" if workflow == "refresh.yml" else None)
     assert result.returncode == 0 and receipt["command_outcome"] == "success"
     assert receipt["data_outcome"] == "partial"
     assert {"sleep", "hrv"}.issubset({row[0] for row in observation["source_calls"]})
@@ -380,6 +399,21 @@ def test_refresh_real_workflow_entry_emits_safe_primary_login_failure(tmp_path, 
     assert observation["logins"] == 1 and observation["source_calls"] == []
     assert observation["diagnostics"]["stages"][0]["stage"] == "restore_summaries"
     assert observation["diagnostics"]["stages"][0]["status"] == "complete"
+
+
+@pytest.mark.parametrize("cron", ["0 8 * * 1-5", "0 10 * * 0,6"])
+def test_refresh_morning_entry_emits_safe_login_failure_without_general_restore(tmp_path, cron):
+    result, receipt, observation = invoke(
+        tmp_path, "refresh.yml", event="schedule", scenario="login_failure", cron=cron)
+    assert result.returncode == 1 and receipt["command_outcome"] == "failure"
+    assert receipt["data_outcome"] == "error"
+    assert observation["logins"] == 1 and observation["source_calls"] == []
+    stages = observation["diagnostics"]["stages"]
+    # The preserved scheduled finally-path still repairs derived indexes after
+    # a primary failure; it must not run general summary restoration or relogin.
+    assert [row["stage"] for row in stages] == ["latest_night", "health_indexes"]
+    assert stages[0]["status"] == "failed"
+    assert stages[1]["status"] == "complete"
 
 
 def test_refresh_actual_general_pipeline_reports_partial_without_failing_the_command(tmp_path):
