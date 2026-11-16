@@ -200,7 +200,7 @@ def test_validated_context_and_summary_never_infer_a_scheduled_occurrence(monkey
     monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
     monkeypatch.setenv("GITHUB_SHA", "a" * 40)
     monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
-    monkeypatch.setenv("ACTIONS_CRON_EXPRESSION", "15 23 * * *")
+    monkeypatch.setenv("ACTIONS_CRON_EXPRESSION", "0 12,18 * * *")
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     path = tmp_path / "receipt.json"
@@ -212,14 +212,14 @@ def test_validated_context_and_summary_never_infer_a_scheduled_occurrence(monkey
     assert receipt["run_attempt"] == 2
     assert receipt["head_sha"] == "a" * 40
     assert receipt["event"] == "schedule"
-    assert receipt["cron_expression"] == "15 23 * * *"
-    assert receipt["cron_timezone"] == "UTC"
+    assert receipt["cron_expression"] == "0 12,18 * * *"
+    assert receipt["cron_timezone"] == "Europe/Oslo"
     assert receipt["scheduled_for"] is None
     assert receipt["occurrence_id"] is None
     assert receipt["job_conclusion"] is None
     assert receipt["data_outcome"] == "no_work"
     summary_text = summary.read_text(encoding="utf-8")
-    for value in ("123", "2", "a" * 40, "schedule", "15 23 * * *", receipt["started_at"], receipt["finished_at"]):
+    for value in ("123", "2", "a" * 40, "schedule", "0 12,18 * * *", receipt["started_at"], receipt["finished_at"]):
         assert value in summary_text
     monkeypatch.delenv("ACTIONS_CRON_EXPRESSION")
     assert main(args) == 0

@@ -128,3 +128,44 @@ def run_command(
         result["night_followup"] = night
         result["baseline_refresh"] = night["baseline_refresh"]
     return result
+
+
+def _calendar_incomplete(report):
+    """Remove the unrequested rolling/discovery part of the global tail count."""
+    closed = report.get("closed_pending")
+    if closed is None:
+        # Capacity/closure could not be established; never invent completion.
+        return report.get("status") in {"held", "bounded_pending", "calendar_timezone_required"}
+    rolling = sum(row["count"] for channels in report.get("rolling_eligible_remaining", {}).values()
+                  for row in channels.values())
+    discovery = report.get("discovery_eligible_remaining", {}).get("count", 0)
+    # refresh_pending defines closed_pending as closed calendar + these two
+    # rolling cohorts. Open periods are already excluded by that producer.
+    return closed > rolling + discovery
+
+
+def run_morning(*, store, login, now=None):
+    """Current night and bounded calendar tail, without a historical source job."""
+    if os.environ.get("GITHUB_EVENT_NAME") != "schedule":
+        raise ValueError("Morning follow-up requires a scheduled invocation")
+    result = run_command(lambda **kwargs: {}, store_factory=lambda: store, login=login, now=now)
+    night = result["night_followup"]
+    streams = night.get("streams", {})
+    heart = night.get("heart_rate", {})
+    if (any(row.get("source_errors", 0) for row in streams.values())
+            or heart.get("status") == "import_error"
+            or any(row.get("status") in {"invalid_response", "import_error"}
+                   for row in heart.get("source_results", []))):
+        raise RuntimeError("Morning night source verification failed")
+    from .night_baseline_refresh import refresh_pending
+
+    # An empty rolling endpoint filter retains the existing week/month tail
+    # without discovering or draining the historical rolling-reference queue.
+    calendar = refresh_pending(store, rolling_endpoints=[])
+    baseline = night["baseline_refresh"]
+    baseline["calendar_refresh"] = calendar
+    night.update(kind="recent-health-sync", streams=streams,
+                 status=night.get("status", "complete" if heart.get("status") == "stored" else "partial"))
+    if _calendar_incomplete(calendar):
+        night["status"] = "partial"
+    return night

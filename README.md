@@ -172,13 +172,15 @@ index build. Garmin's recorded local times handle travel nights; set
 
 ## Keeping data fresh
 
-The summary workflow, detailed-health backfill and HRV backfill run at 08:00 on
-weekdays and 10:00 on weekends in `Europe/Oslo`, with native DST handling. Other
-jobs keep their existing schedules; Garmin jobs are serialized so Garmin is
-never queried concurrently. See
-[workflow schedules](docs/ACTIONS_RUN_VERIFICATION.md#fixed-workflow-mapping). Historical
-backfills skip existing objects, persist progress, pause repeated item failures,
-and quiesce automatically when complete.
+Ordinary incremental Refresh runs daily at 03:15 in `Europe/Oslo`. Its bounded
+morning route checks the current local night at 08:00 on weekdays and 10:00 on
+weekends, with native DST handling. Changed activities and targeted Coach Input
+run at 12:00 and 18:00. Garmin jobs retain the shared serialized queue. See
+[workflow schedules](docs/ACTIONS_RUN_VERIFICATION.md#fixed-workflow-mapping).
+Historical backfill workflows retain their independently
+configured schedules and manual entry points. They skip existing objects,
+checkpoint progress and quiesce when complete; private cron choices are not
+applied to other installations.
 
 Historical activity discovery resumes bounded metadata pages and pending imports
 from the existing range progress. It preserves accumulated failure counts and
@@ -187,10 +189,15 @@ older state, but rolling back to an older reader needs preserved compatible
 progress. See [activity backfill](docs/ACTIVITY_BACKFILL.md) for limits,
 reconciliation, compatibility and measured resource tradeoffs.
 
-Each scheduled summary refresh also refreshes the three most recent HRV and
-detailed-sleep dates. A chat-triggered refresh performs the same recent-health
-steps, checks recent activity artifacts and prepares coach input for selected
-new/recent running activities. Unchanged activity files and ready analyses are
+The broad 03:15 refresh retains its existing three-date recent-health overlap.
+The separate morning route uses source-check receipts and stored data first,
+collects the required daily HR before strict night readers, and prepares the
+current HR/HRV references plus the bounded closed week/month tail. Open periods
+and unrequested rolling history are separate; unfinished closed calendar work
+keeps the overall outcome partial even when today's products are complete.
+A normal chat-triggered general refresh keeps its recent-health steps; targeted
+manual inputs retain their scope and prepare Coach Input for selected activities.
+Unchanged activity files and ready analyses are
 reused; unchanged summaries and same-day snapshots skip uploads. Recent source
 data is still checked so late changes can be reconciled.
 

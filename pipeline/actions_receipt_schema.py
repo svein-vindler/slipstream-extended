@@ -11,8 +11,10 @@ MORNING_SCHEDULES = (
 )
 # cron preserves the historical UTC configuration used by v1 receipts.
 WORKFLOWS = {
-    "refresh.yml": {"module": "pipeline.refresh", "cron": "0 */6 * * *", "schedules": MORNING_SCHEDULES},
-    "activity-refresh.yml": {"module": "pipeline.activity_refresh", "cron": "15 23 * * *"},
+    "refresh.yml": {"module": "pipeline.refresh", "cron": "0 */6 * * *", "schedules": (
+        {"cron_expression": "15 3 * * *", "timezone": "Europe/Oslo"}, *MORNING_SCHEDULES)},
+    "activity-refresh.yml": {"module": "pipeline.activity_refresh", "cron": "15 23 * * *", "schedules": (
+        {"cron_expression": "0 12,18 * * *", "timezone": "Europe/Oslo"},)},
     "scheduled-activity-backfill.yml": {
         "module": "pipeline.activity_backfill_scheduler", "cron": "30 2,8,14,20 * * *",
     },
@@ -98,7 +100,10 @@ def validate_receipt(value):
                     raise ValueError("Invalid run receipt")
             elif value["event"] != "schedule" or not any(
                 cron == item["cron_expression"] and zone == item["timezone"]
-                for item in configured_schedules(value["workflow"])
+                # Published UTC receipts remain readable after schedule changes;
+                # current trigger projection still uses configured_schedules.
+                for item in (*configured_schedules(value["workflow"]), {
+                    "cron_expression": WORKFLOWS[value["workflow"]]["cron"], "timezone": "UTC"})
             ):
                 raise ValueError("Invalid run receipt")
         if value["context_status"] == "valid" and (

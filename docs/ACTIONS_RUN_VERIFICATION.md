@@ -1,6 +1,6 @@
 # Actions run receipts and offline daily reconciliation
 
-The six existing scheduled data workflows use `pipeline.actions_receipt` around
+The six existing receipted data workflows use `pipeline.actions_receipt` around
 their existing command entry points. The wrapper records execution evidence; it
 does not schedule, retry, pause, restore or fetch data by itself. The configured schedules,
 concurrency, permissions, timeouts, source selection and data budgets remain in
@@ -27,7 +27,9 @@ under the installation's normal retention policy when evidence is needed.
 The shared executable schema is `pipeline/actions_receipt_schema.py`.
 `scheduled_for`, `occurrence_id` and `job_conclusion` remain null. Existing v1
 receipts retain their exact historical UTC contract and have no timezone field;
-the shared validator accepts both versions without reinterpreting old evidence.
+the shared validator accepts both versions without reinterpreting old evidence. Earlier
+v2 UTC receipts also remain readable; current trigger projection uses the new
+configured cron/timezone pairs.
 The command cannot observe the final job conclusion before the job ends. A later
 offline audit uses separately supplied run/job observations for that conclusion.
 `trigger_provenance` is `unavailable`: `github.event.schedule` supplies the cron
@@ -42,7 +44,9 @@ queue run are not presented as this invocation's work. Coach and HRV per-run
 counters require a report timestamp inside the actual invocation window;
 unbound counters are omitted, without inventing observed zero. Unknown result versions
 or statuses remain `unknown`. Known blocked, pending, unsupported and
-waiting-for-profile results keep their distinctions.
+waiting-for-profile results keep their distinctions. Refreshed activity artifacts
+with pending targeted Coach work produce a partial data outcome, without
+copying activity identifiers or blocked-reason text into the receipt.
 
 The data command runs once with the same original parser arguments. The six
 CLI functions additionally return their existing report to the wrapper; direct
@@ -62,18 +66,29 @@ GitHub run/job facts; missing receipt is not evidence of successful execution.
 
 | Workflow | Existing command | Current cron and timezone |
 | --- | --- | --- |
-| `refresh.yml` | `pipeline.refresh --workflow` | `0 8 * * 1-5`, `0 10 * * 0,6`; Europe/Oslo |
-| `activity-refresh.yml` | `pipeline.activity_refresh` | `15 23 * * *`; UTC |
+| `refresh.yml` | `pipeline.refresh --workflow` | `15 3 * * *`, `0 8 * * 1-5`, `0 10 * * 0,6`; Europe/Oslo |
+| `activity-refresh.yml` | `pipeline.activity_refresh` | `0 12,18 * * *`; Europe/Oslo |
 | `scheduled-activity-backfill.yml` | `pipeline.activity_backfill_scheduler` | `30 2,8,14,20 * * *`; UTC |
 | `scheduled-health-detail-backfill.yml` | `pipeline.health_detail_backfill` | `0 8 * * 1-5`, `0 10 * * 0,6`; Europe/Oslo |
 | `scheduled-hrv-backfill.yml` | `pipeline.hrv_backfill` | `0 8 * * 1-5`, `0 10 * * 0,6`; Europe/Oslo |
 | `coach-input-backfill.yml` | `pipeline.coach_backfill` | `40 2,8,14,20 * * *`; UTC |
 
-Only the three morning workflows change schedule: 08:00 Monday-Friday and
-10:00 Saturday-Sunday in Oslo. Native Actions timezone handling follows DST;
-there is no shell clock guard. Morning refresh retains general scheduled mode,
-including pulse. The local 12:30 task and manual inputs are unchanged. Configured
-time remains a nominal expectation, not proof that GitHub started on time.
+The 03:15 refresh remains ordinary incremental general mode. The weekday/weekend
+cron selects the bounded morning flow through the same `--workflow` entry;
+it ensures daily HR before strict sleep/HRV/night-pulse readers and builds current
+7/28/30/90/365-day references without starting a full historical queue. There is
+no new dispatch input. Native Actions timezone handling follows DST without a
+shell clock guard. Public historical/Coach schedules remain independently
+configured for initial import, partial history and resume. The separate local
+archive task and all manual inputs are unchanged.
+
+Configured time is nominal: observe the actual schedule event and terminal
+result after release before claiming automatic delivery. Pending/partial night
+data is distinct from authentication, schema or transport failure. The existing
+`garmin-sync`, `cancel-in-progress: false`, `queue: max` configuration is retained
+for all relevant writers. Queue evidence for created runs does not explain
+missing schedule-run creation; the cause remains unknown. Source changes do not
+enable disabled workflows.
 
 The Coach `workflow_run` condition and all manual inputs are preserved. A Coach
 run caused by another workflow is not a Coach cron occurrence. An additional

@@ -310,8 +310,12 @@ def test_normal_scheduled_cli_imports_hr_and_all_ten_latest_products(monkeypatch
     monkeypatch.setattr(module, "_login", lambda: garmin)
     monkeypatch.setattr(module, "datetime", latest_night.datetime)
 
-    module.main()
+    result = module.main()
 
+    if module_name == "activity_refresh":
+        assert result["activities_checked"] == 0 and not garmin.calls
+        assert f"refresh/checks/v1/health/signals/{DAY}.json" not in server.objects
+        return
     assert f"refresh/checks/v1/health/signals/{DAY}.json" in server.objects
     for width in (7, 28, 30, 90, 365):
         first = (date.fromisoformat(DAY) - timedelta(days=width - 1)).isoformat()

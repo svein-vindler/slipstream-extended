@@ -59,7 +59,7 @@ def collect_heart_rate(store, garmin, wake_dates, *, timezone=None, reuse_checks
 
     reader = NativeNightReader(store, timezone=timezone)
     days = sorted({source_day for wake in wake_dates
-                   for source_day in reader.night(wake)["channels"]["heart_rate"]["source_dates"]})
+                   for source_day in reader.heart_rate_source_dates(wake)})
     if len(days) > 7:
         raise ValueError("Recent night HR source calendar exceeds the bounded overlap")
     collector = DailySignalCollector(store)
