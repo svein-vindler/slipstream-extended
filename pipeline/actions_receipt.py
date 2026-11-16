@@ -86,6 +86,13 @@ def _project(workflow, report, started, finished):
             return "unknown", counters
         if count > 0 and statuses.get("unsupported", 0) == count:
             return "unsupported", counters
+        rows = report.get("activities", [])
+        if isinstance(rows, list):
+            coach = [row["coach_status"] for row in rows if isinstance(row, dict) and "coach_status" in row]
+            if any(not isinstance(status, str) for status in coach):
+                return "unknown", counters
+            if any(status not in {"ready", "not_applicable"} for status in coach):
+                return "partial", counters
         return "no_work" if count == 0 else "complete", counters
     if workflow == "refresh.yml":
         status = report.get("status")

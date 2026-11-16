@@ -699,7 +699,11 @@ class NativeNightReader:
         finally:
             self._annual_read = False
 
-    def _night(self, day):
+    def heart_rate_source_dates(self, day):
+        """Plan exact HR source dates from stored sleep/context, before HR exists."""
+        return self._night_source_plan(day)[3]
+
+    def _night_source_plan(self, day):
         self.active_keys, self.active_prefixes = set(), set()
         require(date.fromisoformat(day).isoformat() == day)
         user = self.context(day)
@@ -727,7 +731,7 @@ class NativeNightReader:
         }
         selected = self.source("sleep", day)
         if selected is None:
-            return self._finish_night(day, output)
+            return output, None, None, []
         sleep = selected[0]
         start, end = instant(sleep.get("sleep_start_gmt")), instant(sleep.get("sleep_end_gmt"))
         require(start and end and 0 < (end - start).total_seconds() <= 129600)
@@ -782,8 +786,15 @@ class NativeNightReader:
             wall = _wall(utc, sleep.get(key))
             if wall:
                 dates.add(wall.date().isoformat())
+        return output, start, end, sorted(dates)
+
+    def _night(self, day):
+        output, start, end, dates = self._night_source_plan(day)
+        if start is None:
+            return self._finish_night(day, output)
+        channels = output["channels"]
         channel = channels["heart_rate"]
-        for source_day in sorted(dates):
+        for source_day in dates:
             source = self.source("signals", source_day)
             channel["source_dates"].append(source_day)
             if source is None:

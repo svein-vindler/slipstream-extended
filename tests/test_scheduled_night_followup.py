@@ -108,8 +108,11 @@ def test_later_scheduled_garmin_jobs_also_check_the_current_night(monkeypatch, m
     monkeypatch.setattr(module, "R2Store", lambda: store)
     monkeypatch.setattr(module, "_login", lambda: garmin)
 
-    module.main()
+    result = module.main()
 
+    if module_name == "activity_refresh":
+        assert result["activities_checked"] == 0 and not garmin.calls
+        return
     try:
         data = store.get("health/sleep/v1/2026/09/2026-09-30.json")
         sleep = json.loads(gzip.decompress(data))

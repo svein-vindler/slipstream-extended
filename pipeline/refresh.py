@@ -18,6 +18,7 @@ from . import (
     latest_activity,
     latest_night,
     manual_activity_refresh,
+    night_followup,
     recent_body,
     recent_health,
     refresh_summaries,
@@ -184,6 +185,9 @@ def run(
     workflow_context=None,
 ) -> dict:
     request.validate()  # Reject incompatible inputs before login or storage access.
+    morning = (request.scheduled and workflow_context is not None
+               and workflow_context.get("ACTIONS_CRON_EXPRESSION") in {
+                   "0 8 * * 1-5", "0 10 * * 0,6"})
     startup = workflow_receipt(request, workflow_context)
     startup_saved = startup is None
     data = Path(data_dir)
@@ -313,11 +317,13 @@ def run(
             report["stages"].append(entry)
 
     try:
-        if request.mode != "night" and not request.repair_only:
+        if not morning and request.mode != "night" and not request.repair_only:
             base = stage("restore_summaries", lambda store: summary_restore.restore_with_base(
                 str(data), store, flow_id=flow_id,
                 allow_initial=request.mode == "general" and not request.backfill)).base
-        if request.mode == "activity":
+        if morning:
+            stage("latest_night", lambda store: night_followup.run_morning(store=store, login=provider.get))
+        elif request.mode == "activity":
             stage("latest_activity", lambda store: latest_activity.run(
                 run_id=request.run_id, data_dir=str(data), lookback_days=7,
                 request_id=request.request_id if startup is None else None, repair_only=request.repair_only,
@@ -414,7 +420,7 @@ def _workflow_bool(values, name, *, default=False):
 
 
 @safe_cli
-def main():
+def main(*, store_factory=R2Store, login=_login):
     parser = SafeArgumentParser(description=__doc__)
     parser.add_argument("--workflow", action="store_true", help="Read the established GitHub workflow inputs")
     parser.add_argument("--mode", choices=("general", "activity", "night"), default="general")
@@ -467,7 +473,7 @@ def main():
         if not args.workflow:
             prepare_environment(args.env_file)
         return run(request, data_dir=args.data_dir, diagnostics_file=args.diagnostics_file,
-            workflow_context=os.environ if args.workflow else None)
+            workflow_context=os.environ if args.workflow else None, store_factory=store_factory, login=login)
     except (KeyError, ValueError) as exc:
         parser.error(str(exc))
 

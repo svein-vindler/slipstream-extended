@@ -12,7 +12,6 @@ from .activity_backfill import is_job_stopping_error, is_supported_activity
 from .granular import activity_prefix, activity_type, json_bytes, sha256
 from .granular_export import activity_artifact_keys, export_activity
 from .measurements import measured_component
-from .night_followup import run_command
 from .output_privacy import SafeArgumentParser, log_report, safe_cli
 from .r2_store import R2BudgetError, R2Store
 from .sources.garmin import _login
@@ -170,6 +169,39 @@ def refresh_activity(
     return {"id": activity_id, "status": "refreshed", "reason": manifest["reason"]}
 
 
+def _refresh_running_coach(activity, result, *, store, existing_keys):
+    from .coach_backfill import run_one
+    from .manual_activity_refresh import _coach_metadata
+    from .schema import activity_metric, canonical_sport
+
+    if result["status"] == "unsupported" or canonical_sport(activity_type(activity)) != "run":
+        return
+    source = dict(activity)
+    summary = source.get("summaryDTO")
+    summary = summary if isinstance(summary, dict) else {}
+    for field in ("startTimeLocal", "startTimeGMT"):
+        if not source.get(field) and summary.get(field):
+            source[field] = summary[field]
+    if not all(key in existing_keys for key in activity_artifact_keys(source)):
+        result["coach_status"] = "missing_artifacts"
+        return
+    moving = activity_metric(source.get("movingDuration"))
+    if moving is None:
+        moving = activity_metric(summary.get("movingDuration"))
+    metadata = _coach_metadata(source, {"Moving Time": moving}, store)
+    if metadata is None:
+        result["coach_status"] = "activity_date_unknown"
+        return
+    plan = run_one(activity=metadata, store=store)
+    activity_id = str(source["activityId"])
+    blocked = plan.get("blocked_activities", [])
+    result["coach_status"] = (
+        "ready" if activity_id in plan.get("processed_sources", {})
+        else str(blocked[0]["reason"]) if blocked else "pending"
+    )
+    result["coach_reused"] = activity_id in plan.get("reused_sources", {})
+
+
 def run(
     *,
     lookback_days: int = 30,
@@ -248,6 +280,12 @@ def run(
                 "status": "error",
                 "error": str(exc),
             })
+        else:
+            # Target the imported prefix, including unfinished/reusable Coach
+            # work on unchanged artifacts. A summary CSV may not contain it yet.
+            # Failures here retain the CLI's nonzero exit instead of becoming
+            # an apparently successful artifact-only refresh.
+            _refresh_running_coach(activity, results[-1], store=store, existing_keys=existing_keys)
 
     counts: dict[str, int] = {}
     for result in results:
@@ -283,8 +321,7 @@ def main():
             activity_id=args.activity_id,
             force=args.force,
         )
-        return run_command(
-            run, store_factory=R2Store, login=_login, **values)
+        return run(**values)
     except ValueError as exc:
         parser.error(str(exc))
 

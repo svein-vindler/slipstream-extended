@@ -2,7 +2,8 @@ name: Refresh changed Garmin activities
 
 on:
   schedule:
-    - cron: "15 23 * * *"  # daily rolling check, serialized with every Garmin job
+    - cron: "0 12,18 * * *"  # rolling checks, serialized with every Garmin job
+      timezone: "Europe/Oslo"
   workflow_dispatch:
     inputs:
       activity_id:

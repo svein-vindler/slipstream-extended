@@ -1,6 +1,6 @@
 # Shared refresh pipeline and measurements
 
-Chat-triggered refresh and the six-hour schedule enter the same Python core:
+Chat-triggered refresh and scheduled refresh enter the same Python core:
 `pipeline.refresh`. The GitHub workflow passes its existing inputs to
 `python -m pipeline.refresh --workflow`; local execution calls that module too.
 The existing importers, canonical keys, readiness checks, successful receipts,
@@ -15,6 +15,28 @@ repair never logs into Garmin. Explicit historical date/year inputs remain
 available; year imports run newest first. Historical work is never inferred from
 a normal chat request.
 
+`refresh.yml` runs ordinary incremental refresh daily at 03:15 Europe/Oslo.
+Its other scheduled entry runs one bounded morning flow at 08:00 Monday-Friday
+or 10:00 Saturday-Sunday. The existing `--workflow` entry selects this flow from
+`REFRESH_EVENT` and `ACTIONS_CRON_EXPRESSION`; manual inputs keep their meanings.
+Morning work ensures the required daily HR source before strict night readers,
+then refreshes sleep, HRV and night pulse using the existing source/R2 proofs
+and `night_followup` engine. It prepares fresh-current HR/HRV references for
+7/28/30/90/365 days, preserving the bounded week/month tail without starting
+a full historical reference queue. Garmin-not-ready remains pending/partial
+with good stored data preserved; authentication, schema and transport failures
+still fail the command.
+
+`activity-refresh.yml` checks changed activities at 12:00 and 18:00 Europe/Oslo,
+including targeted Coach Input from the imported activity prefix without waiting for
+a later summary CSV. Pending profile/artifact work stays partial. Repeat runs
+retain the bounded metadata freshness check and reuse unchanged FIT/TCX and
+already-current analyses. This activity entry no longer performs night follow-up. Public historical and Coach workflows retain
+their independently configured schedules and manual entries for initial import,
+partial history and resume. The separate local archive task is unchanged.
+Nominal cron times require actual schedule-event and terminal-result observation
+after release; source changes do not enable disabled workflows.
+
 Normal recent-night work also retains timed HR using the existing standard
 Garmin GET, without historical archive reloads. General refresh reuses the HR
 responses already collected by its summary stage; activity changes are not a
@@ -25,8 +47,9 @@ to exact canonical bytes. A later scheduled job can reuse qualified sleep/HRV
 and fetch only missing HR; malformed replies and storage failures remain failures.
 
 The same stored-source reference engine supports HR and HRV rolling 7-, 28-,
-30-, 90- and 365-day products. Local and GitHub workflow entrypoints retain the
-implicit 28/30/90 scope and prioritize the newest wake-date. New job/workset
+30-, 90- and 365-day products. Outside the bounded scheduled morning flow,
+local and GitHub workflow entrypoints retain the implicit 28/30/90 scope and
+prioritize the newest wake-date. New job/workset
 scopes explicitly select 7/365 or all five windows; omitted selections never
 expand older plans, cohorts or scheduled work. Each rolling period contains the
 declared number of inclusive wake-dates: seven rolling dates are distinct from
@@ -37,7 +60,8 @@ later invocation with the same selected scope. Unrelated extended-window work
 does not hold legacy completion. The original bounded week/month tail remains.
 Private diagnostics distinguish `selected_remaining`, calendar work and source
 outcomes; successful source checks do not imply that deferred references are
-complete. No additional schedule, stage allowance or resource cap is introduced.
+complete. Selecting reference windows does not add a schedule, stage allowance
+or resource cap.
 Verified stored source versions are shared across overlapping windows; adding
 periods does not trigger a hidden historical rebuild or another provider fetch.
 Conditional publication retains fresh source/context fences and physical
@@ -209,8 +233,8 @@ savings, not production latency. Regression tests also cover per-stage byte/
 write limits, cumulative bucket limits, overwrite accounting, partial listing
 failure, ambiguous committed writes and fresh inventories on the next run.
 
-The six-hour schedule and successful/negative targeted freshness periods stay
-unchanged. Removing redundant storage scans does not justify extending source
+Successful/negative targeted freshness periods stay unchanged. Removing
+redundant storage scans does not justify extending source
 freshness or reducing the recent-day overlap that catches finalized Garmin data.
 
 ## Latency breakdown
