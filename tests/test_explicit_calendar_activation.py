@@ -5,11 +5,12 @@ import json
 from datetime import date, timedelta
 
 import pytest
+from test_night_baseline_corrections import calendar_store
+from test_night_baseline_refresh import WritableSnapshots
+
 from pipeline import night_baseline_refresh as refresh
 from pipeline.night_products import normalize_args, storage_key
 from scripts.night_baseline_fixtures import native_fixture
-from test_night_baseline_corrections import calendar_store
-from test_night_baseline_refresh import WritableSnapshots
 
 
 def test_known_empty_drain_then_explicit_period_and_repeat_preserves_products():

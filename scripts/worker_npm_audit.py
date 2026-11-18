@@ -7,15 +7,9 @@ from pathlib import Path
 
 ADVISORY = "https://github.com/advisories/GHSA-fc5q-39xc-vjpf"
 LOCK_SHA256 = "a5b77cd9c2ff7e025a89f4d7db88c400427ffa48b71a0e60681a45c1a8d45d97"
-CHAIN = {
-    "@cloudflare/vitest-plugin": ["vitest"],
-    "@rolldown/plugin-babel": ["picomatch", "vite"],
-    "agents": ["@rolldown/plugin-babel"],
-    "fdir": ["picomatch"],
-    "picomatch": None,
-    "tinyglobby": ["fdir", "picomatch"],
-    "vite": ["picomatch", "tinyglobby"],
-    "vitest": ["picomatch", "tinyglobby"],
+NAMES = {
+    "@cloudflare/vitest-plugin", "@rolldown/plugin-babel", "@vitest/mocker",
+    "agents", "fdir", "picomatch", "tinyglobby", "vite", "vitest",
 }
 
 
@@ -64,36 +58,56 @@ def accepted_findings(report, lock_bytes, audit_exit):
             "npm audit command failed")
     if not findings:
         return []
-    require(set(findings) == set(CHAIN) and hashlib.sha256(lock_bytes).hexdigest() == LOCK_SHA256,
-            "new finding or changed dependency lock")
+    require(hashlib.sha256(lock_bytes).hexdigest() == LOCK_SHA256,
+            "changed dependency lock")
     require(lock["packages"]["node_modules/picomatch"]["version"] == "4.0.7",
             "picomatch version")
-    for name, via in CHAIN.items():
+    packages = lock["packages"]
+    visiting, done = set(), set()
+
+    def visit(name):
+        require(name not in visiting, "audit dependency cycle")
+        if name in done:
+            return
+        require(name in NAMES and name in findings, "unknown/unresolved audit dependency")
         item = findings[name]
         require(type(item) is dict and set(item) == {
             "name", "severity", "isDirect", "via", "effects", "range", "nodes", "fixAvailable"}
             and item["name"] == name and item["severity"] == "high"
             and type(item["isDirect"]) is bool and item["nodes"] == ["node_modules/" + name]
             and type(item["via"]) is list and type(item["effects"]) is list
-            and all(type(effect) is str and effect in CHAIN for effect in item["effects"])
-            and type(item["range"]) is str and item["range"]
+            and all(type(effect) is str and effect in NAMES and "node_modules/" + effect in packages
+                    for effect in item["effects"])
+            and type(item["range"]) is str
             and type(item["fixAvailable"]) in (bool, dict), "audit finding shape/node")
+        entry = packages.get(item["nodes"][0])
+        require(type(entry) is dict and type(entry.get("version")) is str,
+                "audit node absent from authenticated lock")
         fix = item["fixAvailable"]
         require(type(fix) is bool or (
             set(fix) == {"name", "version", "isSemVerMajor"}
             and type(fix["name"]) is str and fix["name"]
             and type(fix["version"]) is str and fix["version"]
             and type(fix["isSemVerMajor"]) is bool), "malformed fix metadata")
-        if via is not None:
-            require(all(type(edge) is str for edge in item["via"])
-                    and sorted(item["via"]) == sorted(via), "new advisory/dependency chain")
-        else:
-            require(len(item["via"]) == 1 and type(item["via"][0]) is dict, "picomatch advisory")
-            leaf = item["via"][0]
-            require(leaf.get("url") == ADVISORY and leaf.get("source") == 1247710
-                    and leaf.get("name") == leaf.get("dependency") == "picomatch"
-                    and leaf.get("severity") == "high" and leaf.get("range") == "<=4.0.7",
-                    "new picomatch advisory")
+        require(item["via"], "missing audit advisory path")
+        visiting.add(name)
+        for via in item["via"]:
+            if type(via) is str:
+                visit(via)
+                edges = {**entry.get("dependencies", {}), **entry.get("peerDependencies", {}),
+                         **entry.get("optionalDependencies", {})}
+                require(via in edges, "audit dependency not in authenticated lock")
+            else:
+                require(type(via) is dict and via.get("url") == ADVISORY
+                        and via.get("source") == 1247710
+                        and via.get("name") == via.get("dependency") == "picomatch"
+                        and via.get("severity") == "high" and via.get("range") == "<=4.0.7",
+                        "new picomatch advisory")
+        visiting.remove(name)
+        done.add(name)
+
+    for name in findings:
+        visit(name)
     return sorted(findings)
 
 

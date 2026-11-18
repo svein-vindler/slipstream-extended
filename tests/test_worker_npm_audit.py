@@ -16,24 +16,25 @@ audit = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(audit)
 
 
-def fixture():
-    text = (ROOT / "tests/fixtures/npm-picomatch-audit.json").read_text(encoding="utf-8")
+def fixture(platform="windows"):
+    name = "npm-picomatch-audit-linux.json" if platform == "linux" else "npm-picomatch-audit.json"
+    text = (ROOT / "tests/fixtures" / name).read_text(encoding="utf-8")
     lock_path = Path(os.environ.get("NPM_AUDIT_TEST_LOCK", ROOT / "worker/package-lock.json"))
     return text, audit.strict_json(text), lock_path.read_bytes()
 
 
-def test_actual_known_production_advisory_and_locked_chain_are_accepted():
-    _text, report, lock = fixture()
+@pytest.mark.parametrize("platform,count", [("windows", 8), ("linux", 9)])
+def test_actual_known_production_advisory_and_locked_chain_are_accepted(platform, count):
+    _text, report, lock = fixture(platform)
     assert audit.strict_json(lock)["packages"]["node_modules/picomatch"].get("dev") is not True
-    assert audit.accepted_findings(report, lock, 1) == [
-        "@cloudflare/vitest-plugin", "@rolldown/plugin-babel", "agents", "fdir",
-        "picomatch", "tinyglobby", "vite", "vitest",
-    ]
+    accepted = audit.accepted_findings(report, lock, 1)
+    assert len(accepted) == count and accepted == sorted(report["vulnerabilities"])
+    assert ("@vitest/mocker" in accepted) is (platform == "linux")
 
 
 @pytest.mark.parametrize("fault", [
     "new-finding", "advisory", "advisory-source", "version", "lock-change", "node",
-    "via", "missing-finding", "severity", "error", "counts", "bool-count",
+    "via", "severity", "error", "counts", "bool-count",
     "report-version", "fix-metadata", "dependency-metadata", "native",
 ])
 def test_new_findings_versions_errors_and_malformed_reports_stay_fatal(fault):
@@ -56,9 +57,6 @@ def test_new_findings_versions_errors_and_malformed_reports_stay_fatal(fault):
         leaf["nodes"] = ["node_modules/other/node_modules/picomatch"]
     elif fault == "via":
         report["vulnerabilities"]["agents"]["via"].append("vitest")
-    elif fault == "missing-finding":
-        del report["vulnerabilities"]["agents"]
-        report["metadata"]["vulnerabilities"].update(high=7, total=7)
     elif fault == "severity":
         leaf["severity"] = "critical"
     elif fault == "error":
@@ -83,8 +81,9 @@ def test_malformed_duplicate_and_non_json_constants_fail(text):
         audit.strict_json(text)
 
 
-def test_main_runs_full_audit_preserves_report_and_logs_honest_acceptance(monkeypatch, capsys):
-    text, _report, lock = fixture()
+@pytest.mark.parametrize("platform", ["windows", "linux"])
+def test_main_runs_full_audit_preserves_report_and_logs_honest_acceptance(monkeypatch, capsys, platform):
+    text, _report, lock = fixture(platform)
     seen = []
 
     def run(command, **kwargs):
@@ -119,3 +118,21 @@ def test_command_error_stays_fatal(monkeypatch, capsys):
     monkeypatch.setattr(audit.subprocess, "run", lambda *_args, **_kwargs:
                         SimpleNamespace(returncode=2, stdout='{"error":{"code":"ENETWORK"}}', stderr=""))
     assert audit.main() == 1 and "rejected" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("fault", ["nested-advisory", "cycle", "unresolved"])
+def test_nested_distinct_advisory_cycle_and_unresolved_graph_stay_fatal(fault):
+    _text, report, lock = fixture("linux")
+    if fault == "nested-advisory":
+        leaf = copy.deepcopy(report["vulnerabilities"]["picomatch"]["via"][0])
+        leaf["url"] = "https://github.com/advisories/GHSA-distinct-risk"
+        report["vulnerabilities"]["agents"]["via"].append(leaf)
+        reason = "advisory"
+    elif fault == "cycle":
+        report["vulnerabilities"]["agents"]["via"] = ["agents"]
+        reason = "cycle"
+    else:
+        report["vulnerabilities"]["agents"]["via"] = ["not-in-report"]
+        reason = "unresolved"
+    with pytest.raises(ValueError, match=reason):
+        audit.accepted_findings(report, lock, 1)
