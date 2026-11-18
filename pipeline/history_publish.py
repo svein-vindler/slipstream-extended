@@ -1623,6 +1623,9 @@ def _publish_store(
         })
         baseline_report = refresh_pending(
             reference_store, snapshot_cache=snapshot_cache, max_periods=reference_max_periods,
+            calendar_periods=({name: calendar_slice.all_periods[name]
+                              for name in calendar_slice.period_names}
+                             if calendar_slice is not None else None),
             today=rolling_plan["today"] if rolling_plan else calendar_slice.today if calendar_slice else None,
             timezone=rolling_plan["timezone"] if rolling_plan else calendar_slice.timezone if calendar_slice else None,
             period_names=set() if defer_references or rolling_plan is not None else period_names,

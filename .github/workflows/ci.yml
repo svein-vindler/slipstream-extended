@@ -60,6 +60,6 @@ jobs:
           cache: npm
           cache-dependency-path: worker/package-lock.json
       - run: npm ci
-      - run: npm audit
+      - run: python ../scripts/worker_npm_audit.py
       - run: npm run typecheck
       - run: npm test
