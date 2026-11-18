@@ -1832,7 +1832,7 @@ def refresh_pending(
     store, *, today=None, timezone=None, max_periods=MAX_PERIODS, reserve_writes=0,
     snapshot_cache=None, period_names=None, rolling_sources=None, rolling_endpoints=None,
     prepared_manifest=None, prepared_target_keys=None, batch_local_preparation=False, rolling_windows=None,
-    coverage_observer=None,
+    coverage_observer=None, calendar_periods=None,
 ):
     """Bounded stored-only drain with optional verified local calculation inputs.
 
@@ -1855,6 +1855,16 @@ def refresh_pending(
                 for endpoint in rolling_endpoints), "Choose at most seven exact rolling endpoints")
     timezone = timezone or os.environ.get("HEALTH_TIMEZONE")
     day = today
+    if calendar_periods is not None:
+        require(type(calendar_periods) is dict and 1 <= len(calendar_periods) <= max_periods
+                and set(calendar_periods) == period_names and rolling_sources == []
+                and rolling_endpoints is None and prepared_manifest is None
+                and not batch_local_preparation and today is not None,
+                "Explicit calendar activation scope required")
+        for name, period in calendar_periods.items():
+            require(isinstance(period, (list, tuple)) and len(period) == 2
+                    and affected_periods("hrv", period[0]).get(name) == tuple(period)
+                    and is_closed(period, today), "Explicit closed calendar period required")
     seal = _sealed_preparation(prepared_manifest) if prepared_manifest is not None else None
     prepared_targets = _selected_prepared_targets(prepared_manifest, prepared_target_keys)
     selected_windows = rolling.window_selection(
@@ -1885,6 +1895,22 @@ def refresh_pending(
         report["prepared_build_seal"] = seal
     try:
         queue, revision = _read_queue(io)
+        if calendar_periods is not None:
+            missing = {name: period for name, period in calendar_periods.items()
+                       if name not in queue["pending"]}
+            require(len(queue["pending"]) + len(missing) <= MAX_PENDING,
+                    "Explicit calendar queue capacity deferred")
+            if missing:
+                # The typed caller supplies only its already-qualified calendar
+                # slice. Empty source hints do not satisfy the ordinary native
+                # assembly or either fresh physical source/context fence.
+                for name, (first, last) in missing.items():
+                    queue["pending"][name] = {"start_date": first, "end_date": last,
+                        "phase": "dirty", "sources": {}, "completed": {}}
+                require(store.can_write_group(attempts=1 + reserve_writes,
+                        byte_count=len(canonical(queue).encode())),
+                        "Explicit calendar activation budget deferred")
+                revision = _save_queue(io, queue, revision)
         if rolling_sources != []:
             from .rolling_context_refresh import reconcile_saved_contexts
 

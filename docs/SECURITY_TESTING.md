@@ -9,12 +9,33 @@ CI must pass all of the following:
 
 - Python lint and tests
 - Python dependency audit against the hash-locked runtime requirements
-- npm production dependency audit
+- full npm dependency audit with only the exact temporary exception below
 - TypeScript typecheck against the current Wrangler configuration
 - Node unit tests
 - Workers-runtime tests for Durable Object persistence and concurrent quotas
 - public release tree check for private artifacts, legacy authentication and
   installation-specific Worker configuration
+
+## Temporary exact npm audit risk acceptance
+
+The full production and development npm audit still runs. CI temporarily accepts
+only GHSA-fc5q-39xc-vjpf for exactly picomatch4.0.7 in the existing locked graph
+(package-lock.json SHA256
+a5b77cd9c2ff7e025a89f4d7db88c400427ffa48b71a0e60681a45c1a8d45d97).
+This includes the production agents -> @rolldown/plugin-babel -> picomatch path
+and only the current same-advisory transitive audit chain. It is explicit risk
+acceptance, not a vulnerability fix or a claim that the dependency is dev-only.
+
+The complete audit report remains visible, followed by an explicit acceptance
+message. Other/new findings, a changed affected version or dependency lock,
+unexpected command errors and malformed reports remain fatal. A clean full audit
+passes normally without using the exception. No dependency or lock is changed,
+and this exception does not authorize a Worker deployment.
+
+Remove the exception and restore the direct npm audit command when a validated
+upstream fix is available or the risk acceptance is withdrawn. Any wider scope
+requires another decision; there is no arbitrary wall-clock expiry. Typecheck,
+tests, deploy behavior and schedules are unchanged.
 
 ## Authentication and transport
 
