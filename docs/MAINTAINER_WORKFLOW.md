@@ -239,9 +239,10 @@ with the Cloudflare Vitest plugin. Its ignore rules name only known
 incompatible MCP versions. When an Agents release supports one of those
 versions, remove the matching ignore rule in the same tested change.
 
-The reviewed tooling pair is Wrangler `4.161.0` with
-`@cloudflare/vitest-plugin@1.8.1`. This plugin declares patched `zod@4.6.6`,
-so the obsolete `@cloudflare/vitest-plugin@1.4.6` override is removed.
+The reviewed tooling pair is Wrangler `4.166.0` with
+`@cloudflare/vitest-plugin@1.9.0`. This plugin declares patched `zod@4.6.6`,
+so the obsolete `@cloudflare/vitest-plugin@1.4.6` override is removed. The plugin no longer installs Wrangler; the project retains its direct Wrangler pin.
+The Miniflare Undici override is pinned to `7.30.2` to retain the upstream security fixes.
 The application's root remains on `zod@4.6.7`. Keep the other reviewed
 overrides and validate the actual installed graph, full audit, typecheck and
 both Worker suites. This development-tooling update does not by itself require

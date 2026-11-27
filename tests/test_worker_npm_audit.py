@@ -1,5 +1,6 @@
-"""Exact approved npm audit fixture and fail-closed policy regressions."""
+"""Historical approved npm audit fixture and fail-closed policy regressions."""
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -19,8 +20,18 @@ SPEC.loader.exec_module(audit)
 def fixture(platform="windows"):
     name = "npm-picomatch-audit-linux.json" if platform == "linux" else "npm-picomatch-audit.json"
     text = (ROOT / "tests/fixtures" / name).read_text(encoding="utf-8")
-    lock_path = Path(os.environ.get("NPM_AUDIT_TEST_LOCK", ROOT / "worker/package-lock.json"))
+    lock_path = Path(os.environ.get(
+        "NPM_AUDIT_TEST_LOCK", ROOT / "tests/fixtures/npm-picomatch-approved-lock.json"))
     return text, audit.strict_json(text), lock_path.read_bytes()
+
+
+def test_historical_fixture_does_not_extend_acceptance_to_changed_current_lock():
+    _text, report, historical_lock = fixture()
+    assert hashlib.sha256(historical_lock).hexdigest() == audit.LOCK_SHA256
+    current_lock = (ROOT / "worker/package-lock.json").read_bytes()
+    assert current_lock != historical_lock
+    with pytest.raises(ValueError, match="changed dependency lock"):
+        audit.accepted_findings(report, current_lock, 1)
 
 
 @pytest.mark.parametrize("platform,count", [("windows", 8), ("linux", 9)])
