@@ -4,13 +4,13 @@
 #
 #    pip-compile --generate-hashes --index-url=https://pypi.org/simple --newline=LF --no-emit-index-url --no-strip-extras --output-file=requirements.txt --pip-args='--retries 0 --timeout 20 --keyring-provider disabled' requirements.in
 #
-boto3==1.44.2 \
-    --hash=sha256:70c02826640da17c15067033af01667059dde5e86057c2d1227cd8523c2f24dd \
-    --hash=sha256:d62ff8a9eb06cab9f0b4242d7a2907a8fff9cca630e27ef736660f9d53e5b18e
+boto3==1.44.9 \
+    --hash=sha256:aff889e8ca6f6006f0b5658b712941471d21e4675d6d48421974a20a5a17a918 \
+    --hash=sha256:da4199076833547445a7181e38e833f476808142df95084b2b46c8b2a107aa66
     # via -r requirements.in
-botocore==1.44.3 \
-    --hash=sha256:44d86fff55ce2d014bd72183ebc164b21b36598253b8234d4f59e8600e09b8b3 \
-    --hash=sha256:793eac2a7ca167e9376b136cf000e1675e9ffe8d7ec609160cc1ee00b93ace28
+botocore==1.44.12 \
+    --hash=sha256:5806bb66bf167fa3172f4ddf78b088db9b22653702537b19969d02d2c3301ee5 \
+    --hash=sha256:d5df4cf868f2c4050999a0e6bc94e0a039017e719f4e27b2a8e87053856787b9
     # via
     #   boto3
     #   s3transfer
